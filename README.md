@@ -5,15 +5,14 @@ Built to give agents cheap, easy-to-retrieve context.
 
 ## What it is
 
-- **Sources stay live.** Ox, Cloudflare, Azure/AKS, Azure DevOps, Sysdig and friends
-  remain authoritative. Inventories are not mirrored wholesale.
+- **Sources stay live.** Systems of record remain authoritative. Inventories are not
+  mirrored wholesale.
 - **Connectors are plugins.** Small Python modules that run queries on a schedule and
   emit rows in a shared schema.
 - **One write path.** Validation, distillation, identifier preservation, `as_of`
   stamping, link resolution and indexing all happen in exactly one place.
 - **Two halves, one namespace.** A markdown vault of named entity pages, conclusions
-  and sources; a rows database of findings, workloads, rules and builds with
-  full-text search over the raw.
+  and sources; a rows database with full-text search over the raw.
 - **Narrow tools.** `read(name)`, `search(q)`, `query(filter, agg)`, exposed over MCP
   and kept as LLM-free as possible.
 - **The agent orchestrates.** Planning, fan-out and synthesis live in the agent, not
