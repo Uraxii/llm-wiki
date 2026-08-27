@@ -180,7 +180,10 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
         if not line.strip() or ":" not in line:
             continue
         key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            value = value[1:-1]
+        fields[key.strip()] = value
     return fields, body
 
 

@@ -52,6 +52,9 @@ Check what links to a page:
 llm-wiki links widget-supplier
 ```
 
+`links` scans `wiki/` only; a `[[wikilink]]` written in a `sources/` file is
+not reported, since backlinks are a wiki-layer concept.
+
 Record what happened:
 
 ```
