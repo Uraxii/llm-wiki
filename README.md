@@ -5,18 +5,22 @@ Built to give agents cheap, easy-to-retrieve context.
 
 ## What it is
 
-- **Sources stay live.** Systems of record remain authoritative. Inventories are not
-  mirrored wholesale.
-- **Connectors are plugins.** Small Python modules that run queries on a schedule and
-  emit rows in a shared schema.
-- **One write path.** Validation, distillation, identifier preservation, `as_of`
-  stamping, link resolution and indexing all happen in exactly one place.
-- **Two halves, one namespace.** A markdown vault of named entity pages, conclusions
-  and sources; a rows database with full-text search over the raw.
-- **Narrow tools.** `read(name)`, `search(q)`, `query(filter, agg)`, exposed over MCP
-  and kept as LLM-free as possible.
-- **The agent orchestrates.** Planning, fan-out and synthesis live in the agent, not
-  in the service. Whatever it learns gets written back, so the derived layer accretes.
+Three layers, no service, no database, no network surface.
+
+- **`sources/`.** Immutable. Articles, papers, snapshots. Written once, never
+  edited, never deleted.
+- **`wiki/`.** The model owns it. Pages it writes and keeps updating as new
+  sources land, linked with `[[wikilink]]` syntax. `wiki/index.md` is generated.
+- **`SCHEMA.md`.** The configuration that matters: conventions, workflows, and
+  which retrieval path to take for which question.
+
+No search verb. Agents grep. See `docs/design/llm-wiki.md` for the full design
+and `skills/llm-wiki/SKILL.md` for how an agent uses it.
+
+## CLI
+
+`./llm-wiki` is a single stdlib-only Python script. Verbs: `init`, `where`,
+`add`, `index`, `log`, `links`.
 
 ## Status
 
