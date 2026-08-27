@@ -3,7 +3,9 @@
 over it, stored as plain files. Three layers: `sources/` (immutable),
 `wiki/` (the model owns it), `SCHEMA.md` (the configuration that matters).
 
-stdlib only, forever. See docs/design/llm-wiki.md for the full design.
+Every verb runs on stdlib alone except `add --url`, which lazily imports
+readability-lxml and lxml only inside that one code path. See
+docs/design/llm-wiki.md for the full design.
 """
 from __future__ import annotations
 
@@ -14,6 +16,8 @@ import shutil
 import subprocess
 import sys
 import unicodedata
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -53,10 +57,15 @@ Three layers.
 
     llm-wiki init [PATH]     create the kb tree, default ./.kb
     llm-wiki where           print which kb resolves, and how
-    llm-wiki add TITLE       write a source, body from stdin
-    llm-wiki index           regenerate wiki/index.md
-    llm-wiki log KIND TITLE  append one entry to log.md
+    llm-wiki add TITLE       write a source, body from stdin, or --url to fetch one
+    llm-wiki page TITLE      write or update a wiki page, body from stdin
+    llm-wiki index           repair-only: regenerate wiki/index.md (add/page do this already)
+    llm-wiki log KIND TITLE  repair-only: append one entry to log.md (add/page do this already)
     llm-wiki links PAGE      print pages that link to PAGE
+
+`add` and `page` are the only write paths. Both append a log.md entry and
+regenerate wiki/index.md themselves after a successful write, so the two
+files never drift from what is on disk.
 
 ## Page naming
 
@@ -98,10 +107,14 @@ else. It is generated. Never hand-edit it.
 Pages are updated, not regenerated. A page accumulates reasoning that
 exists nowhere else, so:
 
-- A question already answered on some page: extend that page.
-- A genuinely new topic with no page to extend: make a new page.
+- A question already answered on some page: run `llm-wiki page TITLE`
+  again with the new body; it replaces the body and keeps whatever
+  frontmatter fields were not passed as a flag.
+- A genuinely new topic with no page to extend: `llm-wiki page TITLE` with
+  no existing file creates one.
 - Never regenerate a page from sources. A source is read once and folded
-  in; the page keeps whatever reasoning was already written onto it.
+  in; the page keeps whatever reasoning was already written onto it. Empty
+  stdin re-stamps `updated` only and never touches the body.
 
 ## Retrieval, largest saving first
 
@@ -142,12 +155,16 @@ The paths below are relative to the kb root. cd there first:
 
     cd "$(llm-wiki where | head -1)"
 
-Ingest a source:
+Ingest a source, body from stdin:
 
     llm-wiki add "Title of the thing" --origin curated \\
         --source "https://example.com" <<'EOF'
     body text goes here
     EOF
+
+Ingest a source, fetched from a URL (needs readability-lxml and lxml):
+
+    llm-wiki add --url "https://example.com/article"
 
 Query before writing anything:
 
@@ -163,13 +180,17 @@ Follow a backlink chain:
     rg -l '\\[\\[page-name\\]\\]' wiki/
     llm-wiki links page-name
 
-Write or extend a page by hand, then regenerate the index:
+Write or update a page, body from stdin (empty stdin re-stamps `updated`
+without touching the body):
+
+    llm-wiki page "Widget Catalog" --summary "one line" --category ref <<'EOF'
+    page body goes here
+    EOF
+
+Repair the index or log by hand only if they ever drift, which `add` and
+`page` are meant to prevent:
 
     llm-wiki index
-
-Record what happened:
-
-    llm-wiki log ingest "short description"
     llm-wiki log query "short description"
     llm-wiki log lint "short description"
 
@@ -294,6 +315,60 @@ def generate_index(kb: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+def write_index(kb: Path) -> Path:
+    """Regenerate `wiki/index.md` and return its path. The one place that
+    writes the file, so `init`, `index`, `add` and `page` all stay in sync."""
+    index_path = kb / "wiki" / "index.md"
+    index_path.write_text(generate_index(kb), encoding="utf-8")
+    return index_path
+
+
+def append_log_entry(kb: Path, kind: str, title: str) -> Path:
+    """Append one `## [kind] title - timestamp` line to log.md and return
+    its path. The one place that writes the file, so `log`, `add` and
+    `page` all produce the same shape of entry."""
+    log_path = kb / "log.md"
+    if not log_path.is_file():
+        sys.exit(f"error: {log_path} does not exist; run `llm-wiki init` first")
+    entry = f"## [{flatten(kind)}] {flatten(title)} - {utc_timestamp()}\n"
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(entry)
+    return log_path
+
+
+def fetch_url_text(url: str) -> tuple[str, str]:
+    """Fetch `url` and return `(title, body_text)`.
+
+    readability-lxml and lxml are imported lazily, here only, so every
+    other verb stays runnable with nothing installed. A missing dependency
+    or a network failure exits loudly before anything is written; there is
+    no partial file to clean up either way.
+    """
+    try:
+        from readability import Document
+        import lxml.html
+    except ImportError:
+        sys.exit(
+            "error: add --url requires readability-lxml and lxml; "
+            "install with: pip install readability-lxml lxml"
+        )
+    request = urllib.request.Request(url, headers={"User-Agent": "llm-wiki/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            raw_html = response.read().decode(charset, errors="replace")
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        sys.exit(f"error: fetching {url} failed: {exc}")
+    doc = Document(raw_html)
+    title = doc.short_title() or url
+    tree = lxml.html.fromstring(doc.summary())
+    for tag in ("script", "style", "nav", "header", "footer"):
+        for element in tree.xpath(f".//{tag}"):
+            element.drop_tree()
+    text = re.sub(r"\s+", " ", tree.text_content()).strip()
+    return title, text
+
+
 def require_dir(path: Path) -> None:
     """Guard clause: fail loudly if a kb verb is run before `init`."""
     if not path.is_dir():
@@ -319,7 +394,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     log_path = kb / "log.md"
     if not log_path.exists():
         log_path.write_text("", encoding="utf-8")
-    (kb / "wiki" / "index.md").write_text(generate_index(kb), encoding="utf-8")
+    write_index(kb)
     print(f"{kb.resolve()} (created via {reason})")
 
 
@@ -335,10 +410,26 @@ def cmd_add(args: argparse.Namespace) -> None:
     kb, _ = resolve_kb(args.kb)
     sources_dir = kb / "sources"
     require_dir(sources_dir)
-    if sys.stdin.isatty():
-        sys.exit("error: add reads the body from stdin; pipe or redirect one in")
-    body = sys.stdin.read()
-    slug = slugify(args.title)
+    # Checked by content, not just isatty(): a non-interactive shell (an
+    # agent's own) reports isatty() False on empty stdin too, which would
+    # otherwise trip the "both" error on every `--url` call.
+    stdin_body = None if sys.stdin.isatty() else sys.stdin.read()
+    has_stdin = bool(stdin_body)
+    if args.url and has_stdin:
+        sys.exit("error: --url and stdin are mutually exclusive; use one")
+    if not args.url and not has_stdin:
+        sys.exit("error: add reads the body from stdin, or fetch one with --url")
+    if args.url:
+        fetched_title, body = fetch_url_text(args.url)
+        title = args.title or fetched_title
+        source = args.url
+    else:
+        if not args.title:
+            sys.exit("error: TITLE is required when adding from stdin")
+        title = args.title
+        body = stdin_body
+        source = args.source or ""
+    slug = slugify(title)
     path = sources_dir / f"{slug}.md"
     suffix = 2
     while path.exists():
@@ -346,31 +437,55 @@ def cmd_add(args: argparse.Namespace) -> None:
         suffix += 1
     fields = {
         "origin": args.origin,
-        "source": args.source or "",
+        "source": source,
         "collected_at": utc_timestamp(),
     }
-    content = render_frontmatter(fields) + f"\n# {args.title}\n\n{body}"
+    content = render_frontmatter(fields) + f"\n# {title}\n\n{body}"
     path.write_text(content, encoding="utf-8")
+    append_log_entry(kb, "ingest", title)
+    write_index(kb)
+    print(path)
+
+
+def cmd_page(args: argparse.Namespace) -> None:
+    kb, _ = resolve_kb(args.kb)
+    wiki_dir = kb / "wiki"
+    require_dir(wiki_dir)
+    path = wiki_dir / f"{slugify(args.title)}.md"
+
+    stdin_body = None if sys.stdin.isatty() else sys.stdin.read()
+    has_new_body = bool(stdin_body)
+
+    if path.exists():
+        fields, existing_body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    else:
+        if not has_new_body:
+            sys.exit("error: page create requires a body from stdin")
+        fields, existing_body = {}, ""
+
+    body = stdin_body if has_new_body else existing_body
+    new_fields = {
+        "title": args.title,
+        "summary": args.summary if args.summary is not None else fields.get("summary", ""),
+        "category": args.category if args.category is not None else fields.get("category", ""),
+        "updated": utc_timestamp(),
+    }
+    content = render_frontmatter(new_fields) + "\n" + body
+    path.write_text(content, encoding="utf-8")
+    append_log_entry(kb, "page", args.title)
+    write_index(kb)
     print(path)
 
 
 def cmd_index(args: argparse.Namespace) -> None:
     kb, _ = resolve_kb(args.kb)
-    wiki_dir = kb / "wiki"
-    require_dir(wiki_dir)
-    (wiki_dir / "index.md").write_text(generate_index(kb), encoding="utf-8")
-    print(wiki_dir / "index.md")
+    require_dir(kb / "wiki")
+    print(write_index(kb))
 
 
 def cmd_log(args: argparse.Namespace) -> None:
     kb, _ = resolve_kb(args.kb)
-    log_path = kb / "log.md"
-    if not log_path.is_file():
-        sys.exit(f"error: {log_path} does not exist; run `llm-wiki init` first")
-    entry = f"## [{flatten(args.kind)}] {flatten(args.title)} - {utc_timestamp()}\n"
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(entry)
-    print(log_path)
+    print(append_log_entry(kb, args.kind, args.title))
 
 
 def cmd_links(args: argparse.Namespace) -> None:
@@ -417,17 +532,30 @@ def build_parser() -> argparse.ArgumentParser:
     where_p.set_defaults(func=cmd_where)
 
     add_p = sub.add_parser("add", parents=[parent], help="write a source file")
-    add_p.add_argument("title")
+    add_p.add_argument("title", nargs="?", default=None, help="required unless --url")
     add_p.add_argument(
         "--origin", choices=("curated", "research", "collector"), default="curated"
     )
     add_p.add_argument("--source", default=None)
+    add_p.add_argument("--url", default=None, help="fetch and extract this URL, in place of stdin")
     add_p.set_defaults(func=cmd_add)
 
-    index_p = sub.add_parser("index", parents=[parent], help="regenerate wiki/index.md")
+    page_p = sub.add_parser("page", parents=[parent], help="write or update a wiki page, body from stdin")
+    page_p.add_argument("title")
+    page_p.add_argument("--summary", default=None)
+    page_p.add_argument("--category", default=None)
+    page_p.set_defaults(func=cmd_page)
+
+    index_p = sub.add_parser(
+        "index", parents=[parent],
+        help="repair-only: regenerate wiki/index.md (add/page already do this)",
+    )
     index_p.set_defaults(func=cmd_index)
 
-    log_p = sub.add_parser("log", parents=[parent], help="append one entry to log.md")
+    log_p = sub.add_parser(
+        "log", parents=[parent],
+        help="repair-only: append one entry to log.md (add/page already do this)",
+    )
     log_p.add_argument("kind")
     log_p.add_argument("title")
     log_p.set_defaults(func=cmd_log)
