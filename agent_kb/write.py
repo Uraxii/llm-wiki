@@ -19,12 +19,15 @@ stated once instead of audited everywhere:
 """
 from __future__ import annotations
 
+import json
+import logging
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .plugin import Declaration
-from .row import Row
+from .identifiers import normalise_identifier
+from .row import KINDS, PROVENANCES, Row, content_hash, ensure_schema
 from .vault import Vault
 
 __all__ = ["IngestReport", "entity_key", "ingest", "rebuild", "render_entity"]
@@ -32,6 +35,23 @@ __all__ = ["IngestReport", "entity_key", "ingest", "rebuild", "render_entity"]
 # Entity pages live under one prefix so `Vault.list` can walk exactly the
 # pages a rebuild needs and nothing else.
 ENTITY_PREFIX = "entities/"
+LOGGER = logging.getLogger(__name__)
+ROW_COLUMNS = (
+    "source",
+    "object_id",
+    "entity",
+    "kind",
+    "provenance",
+    "body",
+    "ids",
+    "raw",
+    "content_hash",
+    "observed_at",
+    "ingested_at",
+    "as_of",
+    "half_life_days",
+    "source_ref",
+)
 
 
 @dataclass(frozen=True)
@@ -52,12 +72,12 @@ class IngestReport:
     emitting garbage shows up as a number rather than as silence."""
 
 
-def validate(row: Row, declaration: Declaration) -> None:
+def validate(row: Row, declaration: Declaration, connection_id: str) -> None:
     """Raise unless `row` may be stored.
 
     Checks, in order:
-        - `source` equals `declaration.name`. A plugin cannot write into
-          another plugin's key space.
+        - `source` equals `<declaration.name>/<connection_id>`. A plugin
+          cannot write into another plugin's connection key space.
         - `object_id` and `entity` are non-empty strings; `entity`
           matches the `<source-kind>/<object-type>/<name>` convention and
           contains no `..` component, because it becomes a vault key.
@@ -72,13 +92,40 @@ def validate(row: Row, declaration: Declaration) -> None:
     Raises:
         ValueError: any check fails, naming the field and the reason.
     """
-    raise NotImplementedError("TODO: guard clauses, one per check")
+    expected_source = f"{declaration.name}/{connection_id}"
+    if row.source != expected_source:
+        raise ValueError("source does not match declaration and connection")
+    if not isinstance(row.object_id, str) or not row.object_id:
+        raise ValueError("object_id must be a non-empty string")
+    if not isinstance(row.entity, str) or not row.entity:
+        raise ValueError("entity must be a non-empty string")
+    entity_parts = row.entity.split("/")
+    if len(entity_parts) < 3 or any(part in {"", ".", ".."} for part in entity_parts):
+        raise ValueError("entity must match <source-kind>/<object-type>/<name>")
+    if row.kind not in KINDS or row.kind != declaration.kind:
+        raise ValueError("kind does not match declaration")
+    if row.provenance not in PROVENANCES:
+        raise ValueError("provenance is invalid")
+    if row.provenance != declaration.provenance:
+        raise ValueError("provenance does not match declaration")
+    if not isinstance(row.ids, dict):
+        raise ValueError("ids must be a dict")
+    for key, value in row.ids.items():
+        if not isinstance(key, str):
+            raise ValueError("ids keys must be strings")
+        if not isinstance(value, str):
+            raise ValueError("ids values must be strings")
+    _json_text(row.ids)
+    _json_text(row.raw)
+    if not isinstance(row.source_ref, str) or not row.source_ref:
+        raise ValueError("source_ref must be a non-empty string")
 
 
 def ingest(
     connection: sqlite3.Connection,
     vault: Vault,
     declaration: Declaration,
+    connection_id: str,
     rows: Iterable[Row],
     run_started_at: str,
 ) -> IngestReport:
@@ -120,10 +167,54 @@ def ingest(
         Exception: whatever `rows` raises, after committing what it had
             already yielded.
     """
-    raise NotImplementedError(
-        "TODO: loop rows, validate, stamp, hash, upsert, collect dirty "
-        "entities, render each"
-    )
+    source = f"{declaration.name}/{connection_id}"
+    report = {"inserted": 0, "updated": 0, "refreshed": 0, "rejected": 0}
+    for row in rows:
+        try:
+            validate(row, declaration, connection_id)
+        except ValueError:
+            report["rejected"] += 1
+            continue
+        existing = connection.execute(
+            """
+            SELECT id, content_hash FROM wiki_row
+            WHERE source = ? AND object_id = ?
+            """,
+            (row.source, row.object_id),
+        ).fetchone()
+        row_hash = content_hash(row)
+        observed_at = row.observed_at or run_started_at
+        ids_text = _json_text(row.ids)
+        raw_text = _json_text(row.raw)
+        if existing is None:
+            row_id = _insert_row(
+                connection, row, row_hash, observed_at, run_started_at,
+                ids_text, raw_text, declaration.half_life_days,
+            )
+            _replace_identifiers(connection, row_id, row.ids)
+            report["inserted"] += 1
+            vault.put(entity_key(row.entity), render_entity(connection, row.entity))
+        elif existing["content_hash"] == row_hash:
+            connection.execute(
+                """
+                UPDATE wiki_row SET as_of = ?
+                WHERE source = ? AND object_id = ?
+                """,
+                (run_started_at, row.source, row.object_id),
+            )
+            report["refreshed"] += 1
+        else:
+            row_id = existing["id"]
+            _update_row(
+                connection, row_id, row, row_hash, observed_at,
+                run_started_at, ids_text, raw_text,
+                declaration.half_life_days,
+            )
+            _replace_identifiers(connection, row_id, row.ids)
+            report["updated"] += 1
+            vault.put(entity_key(row.entity), render_entity(connection, row.entity))
+        connection.commit()
+    return IngestReport(source=source, **report)
 
 
 def entity_key(entity: str) -> str:
@@ -133,7 +224,7 @@ def entity_key(entity: str) -> str:
     entity always yields the same key, so a page is never orphaned by a
     rename that only happened in memory.
     """
-    raise NotImplementedError("TODO: f-string, no path logic here")
+    return f"{ENTITY_PREFIX}{entity}.md"
 
 
 def render_entity(connection: sqlite3.Connection, entity: str) -> bytes:
@@ -152,10 +243,39 @@ def render_entity(connection: sqlite3.Connection, entity: str) -> bytes:
     Postcondition: byte-for-byte deterministic. Rows sorted by
     (source, object_id), JSON keys sorted, no timestamp of rendering.
     """
-    raise NotImplementedError(
-        "TODO: SELECT rows WHERE entity, deterministic sort, "
-        "frontmatter + bodies + fenced json blocks"
-    )
+    rows = connection.execute(
+        """
+        SELECT source, object_id, entity, kind, provenance, body, ids, raw,
+               content_hash, observed_at, ingested_at, as_of,
+               half_life_days, source_ref
+        FROM wiki_row
+        WHERE entity = ?
+        ORDER BY source, object_id
+        """,
+        (entity,),
+    ).fetchall()
+    newest_as_of = max((row["as_of"] for row in rows), default="")
+    lines = [
+        "---",
+        f"entity: {entity}",
+        f"row_count: {len(rows)}",
+        f"newest_as_of: {newest_as_of}",
+        "---",
+        "",
+        f"# {entity}",
+        "",
+    ]
+    for row in rows:
+        lines.extend([row["body"], ""])
+    lines.extend(["## Rows", ""])
+    for row in rows:
+        lines.extend([
+            "```json",
+            json.dumps(_row_payload(row), sort_keys=True, indent=2),
+            "```",
+            "",
+        ])
+    return "\n".join(lines).encode("utf-8")
 
 
 def rebuild(connection: sqlite3.Connection, vault: Vault) -> int:
@@ -169,7 +289,151 @@ def rebuild(connection: sqlite3.Connection, vault: Vault) -> int:
     aborting halfway would leave the freshly dropped table holding less
     than the pages do.
     """
-    raise NotImplementedError(
-        "TODO: DROP + ensure_schema, iterate pages, extract fences, "
-        "json.loads, INSERT, skip-and-warn on bad page"
+    connection.executescript(
+        """
+        DROP TABLE IF EXISTS wiki_row_fts;
+        DROP TABLE IF EXISTS identifiers;
+        DROP TABLE IF EXISTS wiki_row;
+        """
     )
+    ensure_schema(connection)
+    restored = 0
+    for key in vault.list(ENTITY_PREFIX):
+        try:
+            blocks = _json_blocks(vault.get(key).decode("utf-8"))
+            for block in blocks:
+                row_id = _insert_payload(connection, block)
+                ids = json.loads(block["ids"])
+                _replace_identifiers(connection, row_id, ids)
+                restored += 1
+        except (KeyError, KeyError, TypeError, ValueError, sqlite3.Error) as error:
+            LOGGER.warning("skipping unrebuildable page %s: %s", key, error)
+    connection.commit()
+    return restored
+
+
+def _json_text(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _insert_row(
+    connection: sqlite3.Connection,
+    row: Row,
+    row_hash: str,
+    observed_at: str,
+    run_started_at: str,
+    ids_text: str,
+    raw_text: str,
+    half_life_days: float,
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO wiki_row (
+            source, object_id, entity, kind, provenance, body, ids, raw,
+            content_hash, observed_at, ingested_at, as_of, half_life_days,
+            source_ref
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            row.source, row.object_id, row.entity, row.kind, row.provenance,
+            row.body, ids_text, raw_text, row_hash, observed_at,
+            run_started_at, run_started_at, half_life_days, row.source_ref,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _update_row(
+    connection: sqlite3.Connection,
+    row_id: int,
+    row: Row,
+    row_hash: str,
+    observed_at: str,
+    run_started_at: str,
+    ids_text: str,
+    raw_text: str,
+    half_life_days: float,
+) -> None:
+    connection.execute(
+        """
+        UPDATE wiki_row
+        SET source = ?, object_id = ?, entity = ?, kind = ?,
+            provenance = ?, body = ?, ids = ?, raw = ?,
+            content_hash = ?, observed_at = ?, ingested_at = ?,
+            as_of = ?, half_life_days = ?, source_ref = ?
+        WHERE id = ?
+        """,
+        (
+            row.source, row.object_id, row.entity, row.kind, row.provenance,
+            row.body, ids_text, raw_text, row_hash, observed_at,
+            run_started_at, run_started_at, half_life_days, row.source_ref,
+            row_id,
+        ),
+    )
+
+
+def _replace_identifiers(
+    connection: sqlite3.Connection,
+    row_id: int,
+    ids: dict[str, str],
+) -> None:
+    connection.execute("DELETE FROM identifiers WHERE row_id = ?", (row_id,))
+    connection.executemany(
+        """
+        INSERT INTO identifiers (row_id, id_type, id_value)
+        VALUES (?, ?, ?)
+        """,
+        [
+            (row_id, id_type, normalise_identifier(id_type, value))
+            for id_type, value in ids.items()
+        ],
+    )
+
+
+def _row_payload(row: sqlite3.Row) -> dict[str, object]:
+    payload = {column: row[column] for column in ROW_COLUMNS}
+    payload["ids"] = json.loads(str(payload["ids"]))
+    payload["raw"] = json.loads(str(payload["raw"]))
+    return payload
+
+
+def _json_blocks(markdown: str) -> list[dict[str, object]]:
+    blocks = []
+    in_block = False
+    current: list[str] = []
+    for line in markdown.splitlines():
+        if line == "```json":
+            in_block = True
+            current = []
+        elif line == "```" and in_block:
+            blocks.append(json.loads("\n".join(current)))
+            in_block = False
+        elif in_block:
+            current.append(line)
+    return blocks
+
+
+def _insert_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, object],
+) -> int:
+    ids_text = _json_text(payload["ids"])
+    raw_text = _json_text(payload["raw"])
+    values = {
+        **payload,
+        "ids": ids_text,
+        "raw": raw_text,
+    }
+    cursor = connection.execute(
+        """
+        INSERT INTO wiki_row (
+            source, object_id, entity, kind, provenance, body, ids, raw,
+            content_hash, observed_at, ingested_at, as_of, half_life_days,
+            source_ref
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        tuple(values[column] for column in ROW_COLUMNS),
+    )
+    return int(cursor.lastrowid)
