@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
@@ -127,8 +126,9 @@ exists nowhere else, so:
 - Never regenerate a page from sources. A source is read once and folded
   in; the page keeps whatever reasoning was already written onto it.
   `page` always reads a real body from stdin; to re-stamp `updated`
-  without touching the body, pass `--touch` instead of piping anything
-  (piping alongside `--touch` is refused as ambiguous).
+  without touching the body, pass `--touch`. Stdin is still read, but
+  `--touch` refuses a non-empty one (piped, redirected, any size)
+  instead of guessing which one the caller meant.
 
 ## Retrieval, largest saving first
 
@@ -200,8 +200,8 @@ Write or update a page, body from stdin:
     page body goes here
     EOF
 
-Re-stamp a page's `updated` timestamp without touching its body (never
-pipe anything alongside `--touch`, that combination is refused):
+Re-stamp a page's `updated` timestamp without touching its body (stdin
+must be empty; a real body on stdin, piped or redirected, is refused):
 
     llm-wiki page "Widget Catalog" --touch
 
@@ -299,14 +299,13 @@ def slugify(title: str) -> str:
 def _normalize_title_for_compare(title: str) -> str:
     """Fold a title down for the "is this the same page" check: NFC so
     NFD/NFC accented spellings match, casefold so casing doesn't matter,
-    whitespace collapsed and trimmed so doubled or leading/trailing
-    spaces don't matter, and capped at `MAX_SLUG_LEN` since `slugify`
-    itself never looks past that many characters, so two titles that
-    only differ beyond it already produce the same page identity. A
-    genuine difference within that window still compares unequal."""
+    and whitespace collapsed and trimmed so doubled or leading/trailing
+    spaces don't matter. Never truncated: `slugify` caps filenames at
+    `MAX_SLUG_LEN`, so two different titles can share a slug while still
+    differing beyond that length. Comparing the full title is what turns
+    that case into a loud collision instead of a silent body merge."""
     normalized = unicodedata.normalize("NFC", flatten(title))
-    collapsed = re.sub(r"\s+", " ", normalized).strip().casefold()
-    return collapsed[:MAX_SLUG_LEN]
+    return re.sub(r"\s+", " ", normalized).strip().casefold()
 
 
 def utc_timestamp() -> str:
@@ -336,14 +335,24 @@ def resolve_kb(explicit: str | None) -> ResolvedKb:
 
 
 def _default_file_mode() -> int:
-    """0644 narrowed by the process umask, matching what a plain
+    """0666 narrowed by the process umask, matching what a plain
     `open()`/`Path.write_text()` would produce. `mkstemp` ignores umask
     and always makes its temp file 0600, so a file written through it
     needs this applied explicitly or it lands more restrictive than
     every other file this tool writes."""
     current_umask = os.umask(0)
     os.umask(current_umask)
-    return 0o644 & ~current_umask
+    return 0o666 & ~current_umask
+
+
+def _open_temp_file(directory: Path, prefix: str) -> tuple[int, Path]:
+    """`mkstemp`, turning a read-only dir or a full disk into a clear
+    exit instead of a bare traceback."""
+    try:
+        fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=prefix)
+    except OSError as exc:
+        sys.exit(f"error: cannot write to {directory}: {exc}")
+    return fd, Path(tmp_name)
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -351,13 +360,15 @@ def atomic_write_text(path: Path, content: str) -> None:
     written file: build it in a same-directory temp file, then atomically
     replace. A crash mid-write leaves only the temp file behind, never a
     half-written `path`."""
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    tmp_path = Path(tmp_name)
+    fd, tmp_path = _open_temp_file(path.parent, f".{path.name}.")
     try:
         os.fchmod(fd, _default_file_mode())
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
         os.replace(tmp_path, path)
+    except OSError as exc:
+        tmp_path.unlink(missing_ok=True)
+        sys.exit(f"error: cannot write {path}: {exc}")
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -369,8 +380,7 @@ def write_source_file(sources_dir: Path, slug: str, content: str) -> Path:
     a temp file first, then exclusively hard-linked into place, so a
     losing process retries the next numbered suffix instead of clobbering
     the winner (closes the add/add TOCTOU on `path.exists()`)."""
-    fd, tmp_name = tempfile.mkstemp(dir=sources_dir, prefix=f".{slug}.")
-    tmp_path = Path(tmp_name)
+    fd, tmp_path = _open_temp_file(sources_dir, f".{slug}.")
     try:
         os.fchmod(fd, _default_file_mode())
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
@@ -385,6 +395,8 @@ def write_source_file(sources_dir: Path, slug: str, content: str) -> Path:
                 suffix += 1
                 continue
             return candidate
+    except OSError as exc:
+        sys.exit(f"error: cannot write to {sources_dir}: {exc}")
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -395,6 +407,8 @@ PAGE_STDIN_REQUIRED_ERROR = (
     "error: page requires a non-empty body from stdin (or pass --touch "
     "to re-stamp `updated` without touching the body)"
 )
+
+TOUCH_STDIN_ERROR = "error: --touch does not take a body; stdin held one"
 
 
 def read_stdin_body() -> str:
@@ -417,16 +431,14 @@ def read_stdin_body() -> str:
         sys.exit(f"error: failed to read stdin: {exc}")
 
 
-def _stdin_is_piped() -> bool:
-    """True only when stdin is an anonymous pipe or named FIFO: a real
-    `producer | llm-wiki page ... --touch` pipeline. A tty, `/dev/null`,
-    a closed fd, or `< file` redirection are all char devices or regular
-    files, not FIFOs, so none of them trip this. Used only to refuse the
-    ambiguous case of `--touch` given alongside a real pipe."""
+def read_optional_stdin() -> str:
+    """Read whatever is on stdin, if anything. No fd-type sniffing: a
+    tty, `/dev/null`, a closed fd, a pipe, or a `< file` redirect of any
+    size are all just read and judged by content, by `--touch` below."""
     try:
-        return stat.S_ISFIFO(os.fstat(sys.stdin.fileno()).st_mode)
-    except (OSError, ValueError, AttributeError):
-        return False
+        return sys.stdin.read()
+    except (OSError, ValueError):
+        return ""
 
 
 def generate_index(kb: Path) -> str:
@@ -472,14 +484,24 @@ def write_index(kb: Path) -> Path:
 def append_log_entry(kb: Path, kind: str, title: str) -> Path:
     """Append one `## [kind] title - timestamp` line to log.md and return
     its path. The one place that writes the file, so `log`, `add` and
-    `page` all produce the same shape of entry."""
+    `page` all produce the same shape of entry. Raises `FileNotFoundError`
+    if log.md is missing; the caller decides whether that is fatal."""
     log_path = kb / "log.md"
     if not log_path.is_file():
-        sys.exit(f"error: {log_path} does not exist; run `llm-wiki init` first")
+        raise FileNotFoundError(log_path)
     entry = f"## [{flatten(kind)}] {flatten(title)} - {utc_timestamp()}\n"
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(entry)
     return log_path
+
+
+def append_log_entry_best_effort(kb: Path, kind: str, title: str) -> None:
+    """Log a write `add`/`page` already made to disk. A missing log.md
+    here is bookkeeping trouble, not a failed write: warn and exit 0."""
+    try:
+        append_log_entry(kb, kind, title)
+    except FileNotFoundError as exc:
+        print(f"warning: {exc} does not exist; log entry not recorded", file=sys.stderr)
 
 
 class _NoAutoRedirect(urllib.request.HTTPRedirectHandler):
@@ -644,7 +666,7 @@ def cmd_add(args: argparse.Namespace) -> None:
     content = render_frontmatter(fields) + f"\n# {title}\n\n{body}"
     path = write_source_file(sources_dir, slug, content)
     write_index(kb)
-    append_log_entry(kb, "ingest", title)
+    append_log_entry_best_effort(kb, "ingest", title)
     print(path)
 
 
@@ -655,13 +677,6 @@ def cmd_page(args: argparse.Namespace) -> None:
     slug = slugify(args.title)
     path = wiki_dir / f"{slug}.md"
 
-    if args.touch and _stdin_is_piped():
-        sys.exit(
-            "error: --touch re-stamps `updated` only and never reads "
-            "stdin; drop the pipe, or drop --touch and send the body "
-            "on stdin instead"
-        )
-
     if path.exists():
         # newline="": default text-mode reading normalizes any \r\n or \r
         # in the body to \n, which would silently rewrite it on every
@@ -670,9 +685,11 @@ def cmd_page(args: argparse.Namespace) -> None:
             existing_text = handle.read()
         fields, existing_body = parse_frontmatter(existing_text)
         existing_title = fields.get("title", "")
-        if _normalize_title_for_compare(existing_title) != _normalize_title_for_compare(
-            args.title
-        ):
+        # No stored title (missing/unterminated frontmatter): adopt the
+        # new one instead of demanding an impossible "pass back ''".
+        if existing_title and _normalize_title_for_compare(
+            existing_title
+        ) != _normalize_title_for_compare(args.title):
             # Frontmatter title is ground truth for "is this the same
             # page"; a genuine difference landing on the same slug is a
             # collision, never a silent overwrite of someone else's body.
@@ -690,6 +707,8 @@ def cmd_page(args: argparse.Namespace) -> None:
         fields, existing_body = {}, ""
 
     if args.touch:
+        if read_optional_stdin().strip():
+            sys.exit(TOUCH_STDIN_ERROR)
         body = existing_body
     else:
         body = read_stdin_body()
@@ -706,7 +725,7 @@ def cmd_page(args: argparse.Namespace) -> None:
     content = render_frontmatter({**known_fields, **extra_fields}) + "\n" + body
     atomic_write_text(path, content)
     write_index(kb)
-    append_log_entry(kb, "page", args.title)
+    append_log_entry_best_effort(kb, "page", args.title)
     print(path)
 
 
@@ -718,7 +737,10 @@ def cmd_index(args: argparse.Namespace) -> None:
 
 def cmd_log(args: argparse.Namespace) -> None:
     kb, _ = resolve_kb(args.kb)
-    print(append_log_entry(kb, args.kind, args.title))
+    try:
+        print(append_log_entry(kb, args.kind, args.title))
+    except FileNotFoundError as exc:
+        sys.exit(f"error: {exc} does not exist; run `llm-wiki init` first")
 
 
 def cmd_links(args: argparse.Namespace) -> None:
@@ -782,7 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
     page_p.add_argument("--category", default=None)
     page_p.add_argument(
         "--touch", action="store_true",
-        help="re-stamp `updated` only, keep the body, never read stdin",
+        help="re-stamp `updated` only, keep the body; refuses a non-empty stdin",
     )
     page_p.set_defaults(func=cmd_page)
 
