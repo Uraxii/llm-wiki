@@ -22,7 +22,7 @@ Install: `uv tool install .` (or `pipx install .`) from the repo root.
 llm-wiki init [PATH]     create the kb tree, default ./.kb
 llm-wiki where           print which kb resolves, and how
 llm-wiki add TITLE       write a source, body from stdin, or --url to fetch one
-llm-wiki page TITLE      write or update a wiki page, body from stdin
+llm-wiki page TITLE      write or update a wiki page, body from stdin, or --touch to re-stamp only
 llm-wiki index           repair-only: regenerate wiki/index.md (add/page do this already)
 llm-wiki log KIND TITLE  repair-only: append one entry to log.md (add/page do this already)
 llm-wiki links PAGE      print pages that link to PAGE
@@ -69,11 +69,20 @@ page body goes here
 EOF
 ```
 
-Creating a page requires a body. Updating one replaces the body with
-stdin and keeps any frontmatter field not passed as a flag; `updated` is
-always re-stamped. Piping in empty stdin (or a closed stdin) re-stamps
-`updated` and leaves the body untouched, byte for byte, since a page holds
-reasoning that exists nowhere else.
+`page` always reads a real body from stdin to EOF, no timeout: empty or
+whitespace-only stdin is a loud error, never a silent no-op. Updating a
+page replaces the body with stdin and keeps any frontmatter field not
+passed as a flag; `updated` is always re-stamped.
+
+Re-stamp `updated` without touching the body, since a page holds
+reasoning that exists nowhere else:
+
+```
+llm-wiki page "Widget Catalog" --touch
+```
+
+`--touch` never reads stdin; piping anything alongside it is refused as
+ambiguous, and it requires the page to already exist.
 
 Check what links to a page:
 
