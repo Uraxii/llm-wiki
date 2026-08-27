@@ -28,7 +28,6 @@ Early design. See `docs/design/`.
 
 ## Prior art
 
-Architecture borrows its ingest discipline from
-[How Cerebras Built Its Enterprise Knowledge Base](https://www.cerebras.ai/blog/how-we-built-our-knowledge-base),
-and diverges from it by accreting agent-derived knowledge rather than recomputing
-every answer from sources.
+Architecture borrows its ingest discipline from public write-ups of
+enterprise knowledge base builds, and diverges from them by accreting
+agent-derived knowledge rather than recomputing every answer from sources.

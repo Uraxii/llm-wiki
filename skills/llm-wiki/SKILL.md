@@ -17,12 +17,12 @@ stored as plain files. Three layers, no service, no database.
 ## Verbs
 
 ```
-llm-wiki init [PATH]        create the kb tree (default ./.kb)
-llm-wiki where               print which kb resolves, and how
-llm-wiki add TITLE           write a source, body from stdin
-llm-wiki index                regenerate wiki/index.md
-llm-wiki log KIND TITLE      append one entry to log.md
-llm-wiki links PAGE          print pages that link to PAGE
+llm-wiki init [PATH]     create the kb tree, default ./.kb
+llm-wiki where           print which kb resolves, and how
+llm-wiki add TITLE       write a source, body from stdin
+llm-wiki index           regenerate wiki/index.md
+llm-wiki log KIND TITLE  append one entry to log.md
+llm-wiki links PAGE      print pages that link to PAGE
 ```
 
 Every verb accepts `--kb PATH` to override resolution. Without it: walk up
@@ -38,7 +38,9 @@ body text goes here
 EOF
 ```
 
-`--origin` is `curated` (default), `research`, or `collector`.
+`--origin` is `curated` (default), `research`, or `collector`. `add` never
+writes `job` or `mode`; those are written by the collector itself, which
+does not exist yet.
 
 Write or extend a page by hand (pages are updated, not regenerated), then:
 
@@ -72,21 +74,22 @@ snapshot additionally `job`, `mode` (`full` or `partial`).
 Page frontmatter: `title`, `summary`, `category`, `updated`. `index.md` is
 built from exactly those four fields and nothing else.
 
-## Retrieval, ranked by token cost
+## Retrieval, largest saving first
 
 1. A previously answered question is a page, not a search. One synthesized
    page costs 500 to 1,500 tokens. Re-deriving the same answer from three
    sources costs 20,000 or more.
-2. Never return bodies by default. Path, title, snippet, score, then fetch
-   only what got picked.
-3. Chunk, so a hit is a section, not a whole document.
-4. Field projection on structured data. Grepping a raw snapshot for one
-   answer can drag 1.6 MB into context, roughly 400,000 tokens; a projected
-   query over the same data is a few hundred tokens.
-5. Read `wiki/index.md` first, so the first real query is targeted instead
-   of a blind guess.
-6. `SCHEMA.md` is what makes the cheap path get taken. Read it before
+2. Read `wiki/index.md` before searching anything. At a few hundred pages
+   the whole index costs roughly 5,000 tokens, cheaper than one wrong
+   guess at what to search for.
+3. Freshness comes from the index's `updated` column, not from opening the
+   page.
+4. `SCHEMA.md` is what makes the cheap path get taken. Read it before
    deciding what to do next.
+
+Route by question shape: check the index, read the matching page, check
+backlinks, only then search `sources/`, then file the answer back as a
+page and reindex.
 
 ## No search verb
 
