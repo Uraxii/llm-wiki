@@ -1,25 +1,41 @@
-"""Tests for the skeptic-gate findings on llm_wiki.py: slug collisions
-(1), whitespace-only stdin wiping a body (2), the sources/ add/add TOCTOU
-(3), index drift under concurrency (4), closed/silent stdin (7, 8),
-frontmatter field loss on re-stamp (9), and control characters leaking
-into a flattened field (10). Body-preservation coverage doubles as the
-regression test for finding 5 (no path.write_text truncation on crash)
-and finding 15 (leading blank lines in a body).
+"""Tests for the skeptic-gate findings on llm_wiki.py.
+
+Gate 1: slug collisions (1), whitespace-only stdin wiping a body (2),
+the sources/ add/add TOCTOU (3), index drift under concurrency (4),
+closed/silent stdin (7, 8), frontmatter field loss on re-stamp (9), and
+control characters leaking into a flattened field (10). Body-preservation
+coverage doubles as the regression test for finding 5 (no
+path.write_text truncation on crash) and finding 15 (leading blank
+lines in a body).
+
+Gate 2: the index lock is gone (index.md may lag under concurrent
+writers but is never torn, and `index` always repairs it); `page`
+always reads a real body from stdin, no timeout, and `--touch` is the
+only supported re-stamp-without-a-body path; `add --url`'s scheme/host
+guard runs before anything optional (lxml) is imported, so a bad scheme
+is provably the guard firing and not an accident of import order; and
+the title-collision guard normalizes before comparing so cosmetic
+differences (casing, whitespace, NFD/NFC, a shared MAX_SLUG_LEN prefix)
+update the same page instead of refusing.
 
 Anything that touches stdin or real concurrency runs the CLI as a real
-subprocess: select() needs an actual file descriptor, which an
-io.StringIO stand-in for sys.stdin cannot provide. Pure functions are
-exercised directly. Every kb lives under tmp_path; nothing here ever
-touches a real store.
+subprocess: reading stdin to EOF needs an actual file descriptor, which
+an io.StringIO stand-in for sys.stdin cannot provide. Pure functions
+are exercised directly. Every kb lives under tmp_path; nothing here
+ever touches a real store or the network.
 """
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import email.message
 import os
+import stat
 import subprocess
 import sys
 import time
+import unicodedata
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -110,35 +126,96 @@ def test_stdin_empty_does_not_create_a_page(kb: Path) -> None:
     assert not (kb / "wiki" / "empty-stdin-page.md").exists()
 
 
-def test_stdin_whitespace_only_does_not_wipe_existing_body(kb: Path) -> None:
+def test_stdin_whitespace_only_is_a_loud_error_not_a_silent_no_op(kb: Path) -> None:
+    """A select()-based read timeout used to treat "no bytes yet" (and,
+    separately, whitespace-only input) as "keep the old body", silently
+    discarding whatever a slow or nearly-empty producer actually sent.
+    `page` now requires a real body on every non-`--touch` call, so
+    whitespace-only stdin is a loud error and the file is left alone."""
     run_cli(["page", "Ws Page"], kb=kb, input_text="original body\n")
     path = kb / "wiki" / "ws-page.md"
     before_body = llm_wiki.parse_frontmatter(path.read_text(encoding="utf-8"))[1]
 
     result = run_cli(["page", "Ws Page"], kb=kb, input_text="   \n\t  \n")
 
-    assert result.returncode == 0
+    assert result.returncode != 0
     after_body = llm_wiki.parse_frontmatter(path.read_text(encoding="utf-8"))[1]
     assert before_body == after_body == "original body\n"
 
 
-def test_stdin_open_silent_pipe_does_not_hang(kb: Path) -> None:
+def test_stdin_slow_producer_delivers_the_full_body(kb: Path) -> None:
+    """Regression for the second skeptic-gate finding: a select() timeout
+    used to read "no bytes yet" as "empty stdin" and silently re-stamp
+    the old body while reporting success, with a body that arrived a
+    moment late simply gone. `page` now reads stdin to EOF with no
+    timeout, so a producer that pauses before writing still lands."""
     read_fd, write_fd = os.pipe()
-    start = time.monotonic()
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "page", "Slow Producer Page", "--kb", str(kb)],
+        stdin=read_fd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    os.close(read_fd)
     try:
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "page", "Silent Pipe Page", "--kb", str(kb)],
-            stdin=read_fd,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        time.sleep(1.5)  # longer than the old (now-deleted) poll timeout
+        os.write(write_fd, b"THE REAL NEW BODY\n")
     finally:
-        os.close(read_fd)
         os.close(write_fd)
-    elapsed = time.monotonic() - start
-    assert elapsed < 4, "read_stdin_body blocked on a pipe that never produced data"
-    assert result.returncode != 0  # new page, no body ever arrived
+    _, stderr = proc.communicate(timeout=10)
+    assert proc.returncode == 0, stderr
+    path = kb / "wiki" / "slow-producer-page.md"
+    body = llm_wiki.parse_frontmatter(path.read_text(encoding="utf-8"))[1]
+    assert body == "THE REAL NEW BODY\n"
+
+
+# --- --touch (finding 2's replacement contract) ------------------------
+
+
+def test_touch_restamps_without_reading_stdin(kb: Path) -> None:
+    run_cli(["page", "Touch Page"], kb=kb, input_text="original body\n")
+    path = kb / "wiki" / "touch-page.md"
+    before_fields, before_body = llm_wiki.parse_frontmatter(
+        path.read_text(encoding="utf-8")
+    )
+
+    time.sleep(1.1)  # `updated` has second precision
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "page", "Touch Page", "--touch", "--kb", str(kb)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    after_fields, after_body = llm_wiki.parse_frontmatter(
+        path.read_text(encoding="utf-8")
+    )
+    assert after_body == before_body == "original body\n"
+    assert after_fields["updated"] != before_fields["updated"]
+
+
+def test_touch_with_piped_stdin_is_a_loud_error(kb: Path) -> None:
+    run_cli(["page", "Touch Conflict Page"], kb=kb, input_text="original body\n")
+    result = run_cli(
+        ["page", "Touch Conflict Page", "--touch"], kb=kb, input_text="new body\n"
+    )
+    assert result.returncode != 0
+    path = kb / "wiki" / "touch-conflict-page.md"
+    assert llm_wiki.parse_frontmatter(path.read_text(encoding="utf-8"))[1] == "original body\n"
+
+
+def test_touch_requires_an_existing_page(kb: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "page", "New Touch Page", "--touch", "--kb", str(kb)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert not (kb / "wiki" / "new-touch-page.md").exists()
 
 
 def test_stdin_real_body_creates_page(kb: Path) -> None:
@@ -170,9 +247,15 @@ def test_page_body_survives_dashes_fake_frontmatter_unicode_crlf(kb: Path) -> No
     stored_body = llm_wiki.parse_frontmatter(stored)[1]
     assert stored_body == body
 
-    # Re-stamp with empty stdin must not touch the body at all.
-    result2 = run_cli(["page", "Tricky Body Page"], kb=kb, input_text="")
-    assert result2.returncode == 0
+    # --touch must not touch the body at all.
+    result2 = subprocess.run(
+        [sys.executable, str(SCRIPT), "page", "Tricky Body Page", "--touch", "--kb", str(kb)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result2.returncode == 0, result2.stderr
     with path.open(encoding="utf-8", newline="") as handle:
         stored2 = handle.read()
     assert llm_wiki.parse_frontmatter(stored2)[1] == body
@@ -195,8 +278,17 @@ def test_page_preserves_unknown_frontmatter_fields_on_restamp(kb: Path) -> None:
     fields["owner"] = "nicole"
     llm_wiki.atomic_write_text(path, llm_wiki.render_frontmatter(fields) + "\n" + body)
 
-    result = run_cli(["page", "Tagged Page", "--summary", "updated summary"], kb=kb)
-    assert result.returncode == 0
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT), "page", "Tagged Page", "--touch",
+            "--summary", "updated summary", "--kb", str(kb),
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
 
     new_fields, new_body = llm_wiki.parse_frontmatter(path.read_text(encoding="utf-8"))
     assert new_fields["tags"] == "alpha,beta"
@@ -245,6 +337,41 @@ def test_page_ascii_slug_collision_is_a_loud_error_not_an_overwrite(kb: Path) ->
     assert len(wiki_pages(kb)) == 1
 
 
+# --- title-collision guard normalizes before comparing (gate 2, item D) -
+
+
+def test_page_title_case_difference_updates_the_same_page(kb: Path) -> None:
+    run_cli(["page", "widget catalog"], kb=kb, input_text="v1\n")
+    result = run_cli(["page", "Widget Catalog"], kb=kb, input_text="v2\n")
+    assert result.returncode == 0, result.stderr
+    assert len(wiki_pages(kb)) == 1
+
+
+def test_page_title_doubled_whitespace_updates_the_same_page(kb: Path) -> None:
+    run_cli(["page", "Widget Catalog"], kb=kb, input_text="v1\n")
+    result = run_cli(["page", "Widget  Catalog"], kb=kb, input_text="v2\n")
+    assert result.returncode == 0, result.stderr
+    assert len(wiki_pages(kb)) == 1
+
+
+def test_page_title_nfd_vs_nfc_updates_the_same_page(kb: Path) -> None:
+    nfc = unicodedata.normalize("NFC", "Café Notes")
+    nfd = unicodedata.normalize("NFD", "Café Notes")
+    run_cli(["page", nfc], kb=kb, input_text="v1\n")
+    result = run_cli(["page", nfd], kb=kb, input_text="v2\n")
+    assert result.returncode == 0, result.stderr
+    assert len(wiki_pages(kb)) == 1
+
+
+def test_page_title_genuine_mismatch_errors_with_a_recovery_hint(kb: Path) -> None:
+    run_cli(["page", "C++"], kb=kb, input_text="cpp body\n")
+    result = run_cli(["page", "C#"], kb=kb, input_text="csharp body\n")
+    assert result.returncode != 0
+    assert "C++" in result.stderr
+    assert "C#" in result.stderr
+    assert "exact title" in result.stderr  # actionable, not just a report
+
+
 # --- concurrency (findings 3, 4) ---------------------------------------
 
 
@@ -261,7 +388,13 @@ def test_concurrent_add_same_title_all_survive(kb: Path) -> None:
     assert len(list((kb / "sources").glob("*.md"))) == n
 
 
-def test_concurrent_page_index_matches_files_on_disk(kb: Path) -> None:
+def test_concurrent_page_index_never_tears_and_repair_matches_disk(kb: Path) -> None:
+    """No lock guards index regeneration (see docs/design/llm-wiki.md:
+    a racing regenerate produces the same bytes and "the loser loses
+    nothing"). So concurrent writers CAN leave `index.md` momentarily
+    behind the page that just landed; what must never happen is a torn
+    or malformed file, and `llm-wiki index` afterward must always land
+    on exactly what's on disk."""
     n = 12
 
     def do_page(i: int) -> subprocess.CompletedProcess[str]:
@@ -272,6 +405,14 @@ def test_concurrent_page_index_matches_files_on_disk(kb: Path) -> None:
 
     assert all(r.returncode == 0 for r in results), [r.stderr for r in results]
     assert len(wiki_pages(kb)) == n
+
+    text = (kb / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert text.startswith(llm_wiki.INDEX_BANNER)
+    for row in index_data_rows(kb):
+        assert row.count("|") == 6  # 5 columns: leading + 4 internal + trailing bar
+
+    repair = run_cli(["index"], kb=kb)
+    assert repair.returncode == 0
     assert len(index_data_rows(kb)) == n
 
 
@@ -302,18 +443,104 @@ def test_render_parse_roundtrip_colon_pipe_cr_unicode_quote() -> None:
     assert body == "body text: café-世界"
 
 
-# --- add --url safety (finding 6), stubbed, no network -----------------
+# --- add --url safety (finding 6, gate 2 item C), stubbed, no network --
+#
+# `test_url_file_scheme_is_rejected` used to pass even with
+# `_reject_unsafe_url` neutered to `return`, for two reasons: `add --url`
+# imported lxml before the guard ever ran, so a missing lxml install
+# failed the test for the wrong reason; and `/etc/hostname` has no
+# extension, so `mimetypes.guess_type` returns `(None, None)` and the
+# unrelated content-type check would have rejected it anyway. The fix
+# (in `fetch_url_text`) moved the lxml import to after a successful
+# fetch, and this test now targets a `.html`-suffixed `file://` path,
+# which content-type sniffing would happily call `text/html` -- so this
+# can only be rejected by the scheme guard, and asserts on that guard's
+# own error text rather than just a nonzero exit code.
 
 
 def test_url_file_scheme_is_rejected(kb: Path) -> None:
-    result = run_cli(["add", "--url", "file:///etc/hostname"], kb=kb)
+    result = run_cli(["add", "--url", "file:///nonexistent-x7f/article.html"], kb=kb)
     assert result.returncode != 0
+    assert "only http and https are allowed" in result.stderr
     assert not list((kb / "sources").glob("*.md"))
 
 
-def test_reject_unsafe_url_blocks_loopback() -> None:
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/hostname",
+        "ftp://example.com/file.txt",
+        "data:text/html,<p>hi</p>",
+    ],
+)
+def test_reject_unsafe_url_blocks_disallowed_schemes(url: str) -> None:
     with pytest.raises(SystemExit):
-        llm_wiki._reject_unsafe_url("http://127.0.0.1/secret")
+        llm_wiki._reject_unsafe_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/secret",  # loopback
+        "http://169.254.169.254/latest/meta-data",  # link-local
+        "http://10.0.0.1/",  # private
+        "http://192.168.1.1/",  # private
+        "http://172.16.0.1/",  # private
+    ],
+)
+def test_reject_unsafe_url_blocks_non_global_addresses(url: str) -> None:
+    with pytest.raises(SystemExit):
+        llm_wiki._reject_unsafe_url(url)
+
+
+def test_no_auto_redirect_never_follows() -> None:
+    handler = llm_wiki._NoAutoRedirect()
+    assert handler.redirect_request(None, None, 302, "Found", {}, "http://x/") is None
+
+
+class _FakeOpener:
+    """Stands in for the opener `fetch_url_text` builds, so its redirect
+    loop (each hop re-checked against `_reject_unsafe_url`, capped at
+    `MAX_REDIRECTS`) can be exercised with zero network calls."""
+
+    def __init__(self, responses: list[BaseException]) -> None:
+        self._responses = list(responses)
+
+    def open(self, request: object, timeout: float | None = None) -> object:
+        raise self._responses.pop(0)
+
+
+def _redirect_error(location: str) -> urllib.error.HTTPError:
+    headers = email.message.Message()
+    headers["Location"] = location
+    return urllib.error.HTTPError("http://8.8.8.8/start", 302, "Found", headers, None)
+
+
+def test_fetch_url_text_rechecks_each_redirect_hop_against_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_opener = _FakeOpener([_redirect_error("http://127.0.0.1/secret")])
+    monkeypatch.setattr(
+        llm_wiki.urllib.request, "build_opener", lambda *a, **k: fake_opener
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        llm_wiki.fetch_url_text("http://8.8.8.8/start")
+    assert "private or local address" in str(exc_info.value.code)
+
+
+def test_fetch_url_text_too_many_redirects_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = [
+        _redirect_error("http://8.8.8.8/next") for _ in range(llm_wiki.MAX_REDIRECTS + 1)
+    ]
+    fake_opener = _FakeOpener(responses)
+    monkeypatch.setattr(
+        llm_wiki.urllib.request, "build_opener", lambda *a, **k: fake_opener
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        llm_wiki.fetch_url_text("http://8.8.8.8/start")
+    assert "too many redirects" in str(exc_info.value.code)
 
 
 class _FakeResponse:
@@ -345,3 +572,43 @@ def test_fetch_response_non_html_is_rejected() -> None:
     response = _fake_response("application/json", b'{"a": 1}')
     with pytest.raises(SystemExit):
         llm_wiki._read_html(response, "http://example.com")
+
+
+class _FakeHtmlOpener:
+    """Like `_FakeOpener`, but its single `.open()` call succeeds with a
+    real HTML response, so `fetch_url_text` reaches the point where it
+    imports lxml/readability."""
+
+    def open(self, request: object, timeout: float | None = None) -> object:
+        return contextlib.nullcontext(_fake_response("text/html", b"<p>hi</p>"))
+
+
+def test_fetch_url_text_missing_lxml_is_a_loud_pip_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`add --url` used to raise a raw ImportError traceback when
+    readability-lxml/lxml weren't installed; SKILL.md promises a loud
+    error instead. `sys.modules["lxml.html"] = None` is the standard way
+    to force `import lxml.html` to raise ImportError without actually
+    uninstalling anything."""
+    monkeypatch.setattr(
+        llm_wiki.urllib.request, "build_opener", lambda *a, **k: _FakeHtmlOpener()
+    )
+    monkeypatch.setitem(sys.modules, "lxml.html", None)
+    with pytest.raises(SystemExit) as exc_info:
+        llm_wiki.fetch_url_text("http://8.8.8.8/start")
+    assert "pip install" in str(exc_info.value.code)
+
+
+# --- file permissions (gate 2, item E) ----------------------------------
+
+
+def test_generated_files_are_world_readable_like_log_md(kb: Path) -> None:
+    """`atomic_write_text`/`write_source_file` build through `mkstemp`,
+    which always makes its temp file 0600 regardless of umask. Without
+    an explicit chmod that leaks into every file this tool writes, while
+    `log.md` (written with a plain `open`) stays at the umask-derived
+    default -- an inconsistency between files in the same kb."""
+    index_mode = stat.S_IMODE((kb / "wiki" / "index.md").stat().st_mode)
+    log_mode = stat.S_IMODE((kb / "log.md").stat().st_mode)
+    assert index_mode == log_mode

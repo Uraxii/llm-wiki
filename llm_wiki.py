@@ -9,15 +9,13 @@ pyproject.toml. See docs/design/llm-wiki.md for the full design.
 from __future__ import annotations
 
 import argparse
-import contextlib
-import fcntl
 import hashlib
 import ipaddress
 import os
 import re
-import select
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,7 +23,6 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
 from datetime import datetime, timezone
 from http.client import HTTPResponse
 from pathlib import Path
@@ -36,8 +33,6 @@ PAGE_FIELDS = ("title", "summary", "category", "updated")
 GLOBAL_STORE_NAME = "agent-kb"
 MAX_SLUG_LEN = 120
 SLUG_HASH_LEN = 12  # hex chars of fallback hash when a title strips to nothing
-INDEX_LOCK_NAME = ".index.lock"
-STDIN_POLL_TIMEOUT_SEC = 1.0  # bound on waiting for an open-but-silent pipe
 ALLOWED_URL_SCHEMES = ("http", "https")
 ALLOWED_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
 MAX_FETCH_BYTES = 5_000_000  # single-page cap; a runaway body errors, not streams forever
@@ -75,7 +70,7 @@ Three layers.
     llm-wiki init [PATH]     create the kb tree, default ./.kb
     llm-wiki where           print which kb resolves, and how
     llm-wiki add TITLE       write a source, body from stdin, or --url to fetch one
-    llm-wiki page TITLE      write or update a wiki page, body from stdin
+    llm-wiki page TITLE      write or update a wiki page, body from stdin, or --touch to re-stamp only
     llm-wiki index           repair-only: regenerate wiki/index.md (add/page do this already)
     llm-wiki log KIND TITLE  repair-only: append one entry to log.md (add/page do this already)
     llm-wiki links PAGE      print pages that link to PAGE
@@ -130,8 +125,10 @@ exists nowhere else, so:
 - A genuinely new topic with no page to extend: `llm-wiki page TITLE` with
   no existing file creates one.
 - Never regenerate a page from sources. A source is read once and folded
-  in; the page keeps whatever reasoning was already written onto it. Empty
-  stdin re-stamps `updated` only and never touches the body.
+  in; the page keeps whatever reasoning was already written onto it.
+  `page` always reads a real body from stdin; to re-stamp `updated`
+  without touching the body, pass `--touch` instead of piping anything
+  (piping alongside `--touch` is refused as ambiguous).
 
 ## Retrieval, largest saving first
 
@@ -197,12 +194,16 @@ Follow a backlink chain:
     rg -l '\\[\\[page-name\\]\\]' wiki/
     llm-wiki links page-name
 
-Write or update a page, body from stdin (empty stdin re-stamps `updated`
-without touching the body):
+Write or update a page, body from stdin:
 
     llm-wiki page "Widget Catalog" --summary "one line" --category ref <<'EOF'
     page body goes here
     EOF
+
+Re-stamp a page's `updated` timestamp without touching its body (never
+pipe anything alongside `--touch`, that combination is refused):
+
+    llm-wiki page "Widget Catalog" --touch
 
 Repair the index or log by hand only if they ever drift, which `add` and
 `page` are meant to prevent:
@@ -295,6 +296,19 @@ def slugify(title: str) -> str:
     return f"untitled-{digest}"
 
 
+def _normalize_title_for_compare(title: str) -> str:
+    """Fold a title down for the "is this the same page" check: NFC so
+    NFD/NFC accented spellings match, casefold so casing doesn't matter,
+    whitespace collapsed and trimmed so doubled or leading/trailing
+    spaces don't matter, and capped at `MAX_SLUG_LEN` since `slugify`
+    itself never looks past that many characters, so two titles that
+    only differ beyond it already produce the same page identity. A
+    genuine difference within that window still compares unequal."""
+    normalized = unicodedata.normalize("NFC", flatten(title))
+    collapsed = re.sub(r"\s+", " ", normalized).strip().casefold()
+    return collapsed[:MAX_SLUG_LEN]
+
+
 def utc_timestamp() -> str:
     """ISO 8601 UTC timestamp, second precision."""
     return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
@@ -321,6 +335,17 @@ def resolve_kb(explicit: str | None) -> ResolvedKb:
     return ResolvedKb(root, f"global fallback at {root}")
 
 
+def _default_file_mode() -> int:
+    """0644 narrowed by the process umask, matching what a plain
+    `open()`/`Path.write_text()` would produce. `mkstemp` ignores umask
+    and always makes its temp file 0600, so a file written through it
+    needs this applied explicitly or it lands more restrictive than
+    every other file this tool writes."""
+    current_umask = os.umask(0)
+    os.umask(current_umask)
+    return 0o644 & ~current_umask
+
+
 def atomic_write_text(path: Path, content: str) -> None:
     """Write `content` to `path` without ever exposing a partially
     written file: build it in a same-directory temp file, then atomically
@@ -329,6 +354,7 @@ def atomic_write_text(path: Path, content: str) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     tmp_path = Path(tmp_name)
     try:
+        os.fchmod(fd, _default_file_mode())
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
         os.replace(tmp_path, path)
@@ -346,6 +372,7 @@ def write_source_file(sources_dir: Path, slug: str, content: str) -> Path:
     fd, tmp_name = tempfile.mkstemp(dir=sources_dir, prefix=f".{slug}.")
     tmp_path = Path(tmp_name)
     try:
+        os.fchmod(fd, _default_file_mode())
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
         suffix = 1
@@ -362,37 +389,44 @@ def write_source_file(sources_dir: Path, slug: str, content: str) -> Path:
         tmp_path.unlink(missing_ok=True)
 
 
-@contextlib.contextmanager
-def index_lock(kb: Path) -> Iterator[None]:
-    """Serialize index regeneration across processes. A temp-file-plus-
-    replace alone cannot guarantee the last writer's directory scan saw
-    every concurrent writer's file; this is the smallest lock that
-    closes that race (every caller writes its own page/source file
-    before requesting this lock, so whoever holds it last is guaranteed
-    to see all of them)."""
-    lock_path = kb / INDEX_LOCK_NAME
-    with lock_path.open("w", encoding="utf-8") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+NO_STDIN_ERROR = "error: this command reads its body from stdin, but none was provided"
+
+PAGE_STDIN_REQUIRED_ERROR = (
+    "error: page requires a non-empty body from stdin (or pass --touch "
+    "to re-stamp `updated` without touching the body)"
+)
 
 
-def read_stdin_body() -> str | None:
-    """Read a body piped on stdin. Returns None when stdin is a tty,
-    already closed, or an open pipe that produced nothing within the
-    poll window, so a silent pipe (an agent harness routinely leaves one
-    attached) can never hang the process."""
+def read_stdin_body() -> str:
+    """Read a body from stdin, to EOF. No timeout, no "empty means keep
+    the old body" heuristic: a body is required, so a caller with
+    nothing to send is a caller bug (an inherited pipe that never
+    closes), and it should hang visibly rather than have this function
+    guess "empty" and silently discard whatever the caller was actually
+    about to send. `--touch` on `page` is the only supported way to
+    skip stdin.
+
+    Exits loudly, never raises, when stdin is a tty (nothing was piped),
+    already closed, or an fd closed out from under this process.
+    """
+    if sys.stdin is None or sys.stdin.closed or sys.stdin.isatty():
+        sys.exit(NO_STDIN_ERROR)
     try:
-        if sys.stdin is None or sys.stdin.closed or sys.stdin.isatty():
-            return None
-        ready, _, _ = select.select([sys.stdin], [], [], STDIN_POLL_TIMEOUT_SEC)
-    except (OSError, ValueError):
-        return None
-    if not ready:
-        return None
-    return sys.stdin.read()
+        return sys.stdin.read()
+    except (OSError, ValueError) as exc:
+        sys.exit(f"error: failed to read stdin: {exc}")
+
+
+def _stdin_is_piped() -> bool:
+    """True only when stdin is an anonymous pipe or named FIFO: a real
+    `producer | llm-wiki page ... --touch` pipeline. A tty, `/dev/null`,
+    a closed fd, or `< file` redirection are all char devices or regular
+    files, not FIFOs, so none of them trip this. Used only to refuse the
+    ambiguous case of `--touch` given alongside a real pipe."""
+    try:
+        return stat.S_ISFIFO(os.fstat(sys.stdin.fileno()).st_mode)
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def generate_index(kb: Path) -> str:
@@ -423,11 +457,15 @@ def generate_index(kb: Path) -> str:
 def write_index(kb: Path) -> Path:
     """Regenerate `wiki/index.md` and return its path. The one place that
     writes the file, so `init`, `index`, `add` and `page` all stay in
-    sync. Locked and written via a temp file so concurrent callers never
-    see a torn read or a stale row count."""
+    sync. No lock: two writers racing each regenerate from whatever they
+    see on disk and the last `os.replace` wins, so the index can
+    momentarily lag a page that just landed. That's fine, the index is
+    derived and disposable; `llm-wiki index` recomputes it from what is
+    actually on disk. The temp-file-plus-`os.replace` in
+    `atomic_write_text` guarantees only that no reader ever sees a torn
+    or half-written file, not that every writer's rows survive."""
     index_path = kb / "wiki" / "index.md"
-    with index_lock(kb):
-        atomic_write_text(index_path, generate_index(kb))
+    atomic_write_text(index_path, generate_index(kb))
     return index_path
 
 
@@ -454,9 +492,12 @@ class _NoAutoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _reject_unsafe_url(url: str) -> None:
-    """Refuse anything but http(s) to a publicly routable address, so
-    `add --url` cannot be used to read a local file or reach into the
-    fetching machine's own network (loopback, link-local, private)."""
+    """Refuse anything but http(s) to an address that resolves as
+    publicly routable right now, so `add --url` cannot be pointed at a
+    local file or a loopback, link-local, or private address at check
+    time. This is a point-in-time DNS check, not a connection-time one:
+    it does not defend against DNS rebinding, where the name resolves
+    differently between this check and the request that follows it."""
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in ALLOWED_URL_SCHEMES:
         sys.exit(f"error: fetching {url} failed: only http and https are allowed")
@@ -491,11 +532,11 @@ def fetch_url_text(url: str) -> tuple[str, str]:
     Only http(s) to a publicly routable address is allowed, and each
     redirect hop is re-checked against that policy. A network failure or
     a policy violation exits loudly before anything is written; there is
-    no partial file to clean up either way.
+    no partial file to clean up either way. `lxml`/`readability-lxml`
+    are imported only once a response is actually in hand, both so a
+    rejected URL never needs them and so a missing install fails loudly
+    here instead of with a raw traceback.
     """
-    import lxml.html
-    from readability import Document
-
     opener = urllib.request.build_opener(_NoAutoRedirect)
     current_url = url
     raw_html = ""
@@ -517,6 +558,15 @@ def fetch_url_text(url: str) -> tuple[str, str]:
             sys.exit(f"error: fetching {current_url} failed: {exc}")
     else:
         sys.exit(f"error: fetching {url} failed: too many redirects")
+
+    try:
+        import lxml.html
+        from readability import Document
+    except ImportError as exc:
+        sys.exit(
+            "error: add --url needs readability-lxml and lxml: "
+            f"pip install readability-lxml lxml ({exc})"
+        )
 
     doc = Document(raw_html)
     title = doc.short_title() or url
@@ -578,7 +628,7 @@ def cmd_add(args: argparse.Namespace) -> None:
         source = args.url
     else:
         stdin_body = read_stdin_body()
-        if not stdin_body or not stdin_body.strip():
+        if not stdin_body.strip():
             sys.exit("error: add reads the body from stdin, or fetch one with --url")
         if not args.title:
             sys.exit("error: TITLE is required when adding from stdin")
@@ -605,8 +655,12 @@ def cmd_page(args: argparse.Namespace) -> None:
     slug = slugify(args.title)
     path = wiki_dir / f"{slug}.md"
 
-    stdin_body = read_stdin_body()
-    has_new_body = bool(stdin_body) and stdin_body.strip() != ""
+    if args.touch and _stdin_is_piped():
+        sys.exit(
+            "error: --touch re-stamps `updated` only and never reads "
+            "stdin; drop the pipe, or drop --touch and send the body "
+            "on stdin instead"
+        )
 
     if path.exists():
         # newline="": default text-mode reading normalizes any \r\n or \r
@@ -616,21 +670,32 @@ def cmd_page(args: argparse.Namespace) -> None:
             existing_text = handle.read()
         fields, existing_body = parse_frontmatter(existing_text)
         existing_title = fields.get("title", "")
-        if existing_title != flatten(args.title):
+        if _normalize_title_for_compare(existing_title) != _normalize_title_for_compare(
+            args.title
+        ):
             # Frontmatter title is ground truth for "is this the same
-            # page"; a different title landing on the same slug is a
+            # page"; a genuine difference landing on the same slug is a
             # collision, never a silent overwrite of someone else's body.
             sys.exit(
                 f"error: slug {slug!r} already belongs to page titled "
-                f"{existing_title!r}; refusing to overwrite it with "
-                f"{args.title!r}"
+                f"{existing_title!r}; {args.title!r} is not just a "
+                f"case/whitespace/accent variant of it. To update that "
+                f"page, pass its exact title back to `llm-wiki page`. To "
+                f"write a new page, pick a title that slugifies "
+                f"differently."
             )
+    elif args.touch:
+        sys.exit(f"error: --touch requires an existing page at {path}")
     else:
-        if not has_new_body:
-            sys.exit("error: page create requires a body from stdin")
         fields, existing_body = {}, ""
 
-    body = stdin_body if has_new_body else existing_body
+    if args.touch:
+        body = existing_body
+    else:
+        body = read_stdin_body()
+        if not body.strip():
+            sys.exit(PAGE_STDIN_REQUIRED_ERROR)
+
     known_fields = {
         "title": args.title,
         "summary": args.summary if args.summary is not None else fields.get("summary", ""),
@@ -708,10 +773,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_p.add_argument("--url", default=None, help="fetch and extract this URL, in place of stdin")
     add_p.set_defaults(func=cmd_add)
 
-    page_p = sub.add_parser("page", parents=[parent], help="write or update a wiki page, body from stdin")
+    page_p = sub.add_parser(
+        "page", parents=[parent],
+        help="write or update a wiki page, body from stdin, or --touch to re-stamp only",
+    )
     page_p.add_argument("title")
     page_p.add_argument("--summary", default=None)
     page_p.add_argument("--category", default=None)
+    page_p.add_argument(
+        "--touch", action="store_true",
+        help="re-stamp `updated` only, keep the body, never read stdin",
+    )
     page_p.set_defaults(func=cmd_page)
 
     index_p = sub.add_parser(
