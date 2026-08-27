@@ -81,8 +81,9 @@ reasoning that exists nowhere else:
 llm-wiki page "Widget Catalog" --touch
 ```
 
-`--touch` never reads stdin; piping anything alongside it is refused as
-ambiguous, and it requires the page to already exist.
+`--touch` still reads stdin like any other call, but refuses a non-empty
+body (piped, redirected, any size) instead of guessing which one you
+meant; it also requires the page to already exist.
 
 Check what links to a page:
 

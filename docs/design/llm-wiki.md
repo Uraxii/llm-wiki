@@ -120,6 +120,25 @@ hundred and thirty thousand, which is most of a context window spent before
 answering anything. Sources stay reachable by search, where a snippet costs a
 few hundred tokens instead of a catalog line each.
 
+### The `page` verb
+
+`llm-wiki page TITLE` is the only way to write into `wiki/`. Page identity
+is the frontmatter `title`, not the filename: two titles that fold to the
+same slug (case, whitespace, NFC/NFD) update the same page, and a page
+with no stored title yet just adopts whatever title comes next. Two
+titles that only look alike within `slugify`'s length cap are still
+compared in full and refused as a collision rather than silently merged.
+
+A body is required on stdin for every call except `--touch`, which
+re-stamps `updated` and leaves the body untouched. `--touch` still reads
+whatever stdin holds and refuses a non-empty one instead of guessing
+which the caller meant; it never inspects what kind of file descriptor
+stdin is, so a tty, a pipe, and a redirected file all behave the same.
+
+`index.md` can lag a page that just landed under concurrent writers (see
+above); `llm-wiki index` always repairs it from whatever is actually on
+disk.
+
 ### log.md
 
 Append-only, one line per ingest, query or lint pass, each entry opening with a
