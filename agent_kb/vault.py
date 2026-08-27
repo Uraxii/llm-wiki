@@ -15,6 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 __all__ = ["LocalVault", "Vault"]
 
@@ -74,7 +75,8 @@ class LocalVault(Vault):
         containment check compares resolved paths and a symlinked
         subdirectory cannot smuggle writes outside.
         """
-        raise NotImplementedError("TODO: mkdir parents, store root.resolve()")
+        root.mkdir(parents=True, exist_ok=True)
+        self.root = root.resolve()
 
     def _path(self, key: str) -> Path:
         """Resolve `key` to a path inside the vault, or raise.
@@ -87,28 +89,39 @@ class LocalVault(Vault):
         Raises:
             ValueError: empty key, or a key resolving outside the root.
         """
-        raise NotImplementedError(
-            "TODO: reject empty/absolute, (root / key).resolve(), "
-            "is_relative_to(root)"
-        )
+        key_path = Path(key)
+        if not key or key_path.is_absolute():
+            raise ValueError(f"invalid vault key: {key!r}")
+        path = (self.root / key_path).resolve()
+        if not path.is_relative_to(self.root):
+            raise ValueError(f"vault key escapes root: {key!r}")
+        return path
 
     def put(self, key: str, data: bytes) -> None:
         """See `Vault.put`. Writes via a temp file in the same directory
         then `os.replace`, so a reader never sees a half-written page."""
-        raise NotImplementedError("TODO: _path, mkdir parents, temp + replace")
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=path.parent, delete=False) as temp_file:
+            temp_file.write(data)
+            temp_path = Path(temp_file.name)
+        temp_path.replace(path)
 
     def get(self, key: str) -> bytes:
         """See `Vault.get`."""
-        raise NotImplementedError(
-            "TODO: _path, read_bytes, FileNotFoundError -> KeyError"
-        )
+        try:
+            return self._path(key).read_bytes()
+        except FileNotFoundError as error:
+            raise KeyError(key) from error
 
     def list(self, prefix: str = "") -> Iterator[str]:
         """See `Vault.list`."""
-        raise NotImplementedError(
-            "TODO: rglob under _path(prefix), relative_to(root), sorted"
-        )
+        start = self.root if prefix == "" else self._path(prefix)
+        if not start.exists():
+            return iter(())
+        paths = sorted(path for path in start.rglob("*") if path.is_file())
+        return (path.relative_to(self.root).as_posix() for path in paths)
 
     def exists(self, key: str) -> bool:
         """See `Vault.exists`."""
-        raise NotImplementedError("TODO: _path(...).is_file()")
+        return self._path(key).is_file()

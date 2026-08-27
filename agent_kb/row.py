@@ -11,6 +11,8 @@ never rewrite, normalise, trim, lowercase or truncate a join key.
 from __future__ import annotations
 
 import sqlite3
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,15 +35,6 @@ KINDS = ("state", "event")
 # function of the question, so the retrieving agent judges it.
 PROVENANCES = ("observed", "asserted", "decided")
 
-# Join keys a plugin is expected to use when the concept applies. Not a
-# closed set: an unlisted key is allowed, a renamed one is a bug, because
-# cross-source joins happen on exact key names.
-CONVENTIONAL_ID_KEYS = (
-    "digest", "repo", "namespace", "service", "hostname",
-    "zone_id", "rule_id", "finding_id",
-)
-
-
 @dataclass(frozen=True)
 class Row:
     """One atom of collected knowledge, keyed by (source, object_id).
@@ -58,7 +51,7 @@ class Row:
     """
 
     source: str
-    """Plugin `NAME`. Unique across plugins. Becomes `wiki_row.source`."""
+    """`<plugin_name>/<connection_id>`. Becomes `wiki_row.source`."""
 
     object_id: str
     """The source's own identifier for this object, VERBATIM.
@@ -91,7 +84,7 @@ class Row:
 
     Stored as JSON. All values must be `str`; a plugin that wants to
     preserve a number preserves its exact string form. See
-    `CONVENTIONAL_ID_KEYS` for the names to prefer.
+    `agent_kb.identifiers.CANONICAL_ID_TYPES` for the names to prefer.
     """
 
     raw: dict = field(default_factory=dict)
@@ -129,7 +122,9 @@ def content_hash(row: Row) -> str:
     Postcondition: two Rows with equal body/ids/raw hash equal,
     regardless of field ordering inside the dicts or of any timestamp.
     """
-    raise NotImplementedError("TODO: canonical json.dumps + hashlib.sha256")
+    payload = {"body": row.body, "ids": row.ids, "raw": row.raw}
+    data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
 DDL = """
@@ -157,6 +152,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS wiki_row_object
     ON wiki_row (source, object_id);
 CREATE INDEX IF NOT EXISTS wiki_row_entity ON wiki_row (entity);
 CREATE INDEX IF NOT EXISTS wiki_row_freshness ON wiki_row (source, as_of);
+
+CREATE TABLE IF NOT EXISTS identifiers (
+    row_id   INTEGER NOT NULL REFERENCES wiki_row(id) ON DELETE CASCADE,
+    id_type  TEXT NOT NULL,
+    id_value TEXT NOT NULL,
+    PRIMARY KEY (row_id, id_type, id_value)
+);
+CREATE INDEX IF NOT EXISTS identifiers_lookup
+    ON identifiers (id_type, id_value);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS wiki_row_fts USING fts5(
     entity, object_id, body, ids, raw,
@@ -201,7 +205,11 @@ def connect(db_path: Path) -> sqlite3.Connection:
     Returns a connection with `row_factory` set to `sqlite3.Row` and
     foreign keys on. Callers own closing it.
     """
-    raise NotImplementedError("TODO: mkdir parents, sqlite3.connect, pragmas")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
 
 
 def ensure_schema(connection: sqlite3.Connection) -> None:
@@ -211,4 +219,4 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
     Postcondition: `wiki_row`, its indexes, `wiki_row_fts`, the three sync
     triggers and `source_state` all exist.
     """
-    raise NotImplementedError("TODO: connection.executescript(DDL)")
+    connection.executescript(DDL)
