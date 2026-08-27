@@ -46,18 +46,6 @@ def is_due(last_ok_at: str | None, cadence_sec: int, now: datetime) -> bool:
     raise NotImplementedError("TODO: parse ISO, compare against cadence")
 
 
-def missing_env(declaration: Declaration) -> list[str]:
-    """Names in `REQUIRED_ENV` that are unset or empty in `os.environ`.
-
-    Returns names only. The VALUES are never read here, never logged and
-    never returned: the connector subprocess resolves them itself from
-    the inherited environment.
-    """
-    raise NotImplementedError(
-        "TODO: [n for n in required_env if not os.environ.get(n)]"
-    )
-
-
 def run_plugin(
     connection: sqlite3.Connection,
     vault: object,
@@ -82,12 +70,13 @@ def run_plugin(
     Postcondition: rows the plugin yielded before a mid-stream failure
     remain stored. That is intentional and safe, because upsert makes the
     next run's redo free.
+
+    DEFERRED TO STAGE 2: this signature takes no `connection_id` and
+    `write.ingest` now requires one (see `write.py`). The per-connection
+    loop, the secret/setting resolution into a `CollectContext`, and the
+    exact `write.ingest` call shape are all stage 2 work.
     """
-    raise NotImplementedError(
-        "TODO: missing_env guard, write.ingest(connection, vault, "
-        "declaration, module.collect(ctx), run_started_at), "
-        "try/except -> record_error"
-    )
+    raise NotImplementedError("TODO: stage 2, see docstring")
 
 
 def record_error(

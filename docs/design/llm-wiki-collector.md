@@ -107,13 +107,12 @@ the rest of the stack is unchanged.
    `REQUIRED_ENV`, `CONNECTOR`. `NAME` becomes `wiki_row.source` and must
    be unique across plugins; a duplicate is a hard error, because two
    plugins sharing a `source` would collide on the object key.
-3. **Credential resolution.** There is no secret store. Connectors read
-   credentials from environment variables and the collector keeps it that
-   way. The runner checks every name in `REQUIRED_ENV` is present and
-   non-empty in `os.environ`; if any is missing the plugin is SKIPPED
-   loudly and the run continues. The subprocess inherits `os.environ`, so
-   the connector resolves the value itself. No credential ever enters a
-   Row, a log line, or the store.
+3. **Credential resolution.** SUPERSEDED. This section (and the
+   `REQUIRED_ENV`/subprocess-inherits-`os.environ` description below) is
+   STALE. `agent_kb/secrets.py` is the authority for the settled
+   credential contract: masked `Secret` handles, `<VAR>`/`<VAR>_FILE`
+   injection, a hand-built child env that never inherits `os.environ`.
+   Full reconciliation of this doc is a separate, not-yet-done job.
 4. **Execution.** `collect(ctx) -> Iterator[Row]`. A generator, not a list:
    the write path commits incrementally, so a connector dying on page 9
    still leaves pages 1 to 8 durably stored.

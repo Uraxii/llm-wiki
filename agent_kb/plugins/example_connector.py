@@ -1,19 +1,22 @@
 """Worked example: one query against one connector.
 
-FICTIONAL. `example-connector` is a stand-in for a thin read-only CLI
-that reads a system of record, takes its credentials from environment
-variables, prints JSON on stdout in machine-readable mode, and pages with
-an opaque cursor. Copy this file, change the declaration and the two
-mapping functions, delete this docstring.
+FICTIONAL. `example_records` stands in for one endpoint of a system of
+record reached over HTTP. Copy this file, change the declaration and the
+two mapping functions, delete this docstring.
 
-Shape of the connector this wraps:
+A plugin never resolves its own credentials or settings. It declares
+LOGICAL names in `SECRETS` / `SETTINGS`, and the runner hands `collect` a
+`CollectContext` carrying a masked `Secret` handle per secret name
+(`ctx.secret(name)`, revealed only at the point of use) and a plain
+`str` per setting name (`ctx.setting(name)`). The plugin does not know,
+and cannot ask, which environment variable or file backed either one.
 
-    example-connector records --scope SCOPE --json [--cursor CURSOR]
-
-    stdout: {"result": [ {...}, ... ],
-             "page": {"next": "<cursor>" | null}}
-    stderr: diagnostics only, never parsed
-    exit:   0 on success, non-zero on any error
+A plugin makes its own calls. There is no shared subprocess wrapper: a
+vendor with more than one plugin gets a stdlib-only thin client at
+`agent_kb/plugins/<vendor>/_client.py` holding auth and paging; a
+single-plugin vendor may call directly from `collect`. Either way the
+call itself, and everything below it, is stage 2/3 work. See
+`agent_kb/secrets.py` for the credential contract this plugin follows.
 """
 from __future__ import annotations
 
@@ -43,13 +46,16 @@ event plugin would set "event" and emit one rollup row per window."""
 PROVENANCE = "observed"
 """Read off a system of record, not asserted by an agent."""
 
-REQUIRED_ENV = ("EXAMPLE_API_TOKEN", "EXAMPLE_API_SCOPE")
-"""Checked for presence before this module runs. The values are NEVER
-read here: the subprocess inherits `os.environ` and the connector
-resolves them itself, which is why no credential can reach a Row."""
+SECRETS = ("api_token",)
+"""LOGICAL names only. This module does not know, and cannot ask, where
+the value lives or which variable backed it: the parent resolves it and
+hands `collect` a masked handle through `ctx.secret("api_token")`. A
+plugin against a public source declares `SECRETS = ()` instead."""
 
-CONNECTOR = "example-connector"
-"""Bare executable name, resolved under `AGENT_KB_CONNECTORS`."""
+SETTINGS = ("scope",)
+"""Logical names of the plain per-connection values this plugin needs.
+Plain means loggable and git-safe, which is why they come from
+`connections.toml` and a secret never does."""
 
 
 # --- Collection ----------------------------------------------------------
@@ -57,6 +63,22 @@ CONNECTOR = "example-connector"
 
 def collect(ctx: CollectContext) -> Iterator[Row]:
     """Yield one Row per record, paging until the payload has no cursor.
+
+    STAGE 1 STUB. Not implemented. The intended shape, for stage 2/3.
+    This is a single-module plugin, so the call is made directly here,
+    not through a sibling `_client.py` (that split is for a vendor with
+    more than one plugin, per the module docstring above):
+
+        secret = ctx.secret("api_token")
+        scope = ctx.setting("scope")
+        cursor = ""
+        while True:
+            payload = _call_api(secret, scope, cursor)
+            for record in payload["result"]:
+                yield to_row(record, ctx)
+            cursor = payload["page"].get("next")
+            if not cursor:
+                break
 
     Paging is private to this function: no cursor survives the run, and
     the next run re-pages from the start. Upsert by (source, object_id)
@@ -70,15 +92,13 @@ def collect(ctx: CollectContext) -> Iterator[Row]:
         - every Row carries the connector's own identifiers verbatim
         - nothing is written anywhere by this function
     """
-    raise NotImplementedError(
-        "TODO: cursor = None; while True: payload = ctx.run_connector([...]); "
-        "yield from (to_row(r, ctx) for r in payload['result']); "
-        "cursor = payload['page']['next']; break when falsy"
-    )
+    raise NotImplementedError("TODO: stage 2/3, see docstring")
 
 
 def to_row(record: dict, ctx: CollectContext) -> Row:
     """Map one connector record to a Row.
+
+    STAGE 1 STUB. Not implemented.
 
     The ONE place this connector's output shape is known. Everything
     downstream sees only `Row`.
@@ -93,18 +113,13 @@ def to_row(record: dict, ctx: CollectContext) -> Row:
             promises. Better a loud plugin failure than a row whose join
             key was quietly invented.
     """
-    raise NotImplementedError(
-        "TODO: Row(source=NAME, object_id=record['id'], "
-        "entity=f'example/record/{record[\"name\"]}', kind=KIND, "
-        "provenance=PROVENANCE, body=summarize(record), "
-        "ids={...verbatim...}, raw=record, "
-        "observed_at=record.get('updated_at', ''), "
-        "half_life_days=HALF_LIFE_DAYS, source_ref=...)"
-    )
+    raise NotImplementedError("TODO: stage 2/3, see docstring")
 
 
 def summarize(record: dict) -> str:
     """One or two prose sentences describing this record.
+
+    STAGE 1 STUB. Not implemented.
 
     Deterministic template, no model call: the distillation an agent
     reads first, cheap enough to run on every row of every collection.
@@ -113,4 +128,4 @@ def summarize(record: dict) -> str:
     Postcondition: mentions every identifier in the row's `ids`, so a
     keyword hit on the prose and a keyword hit on the raw agree.
     """
-    raise NotImplementedError("TODO: f-string over the record's named fields")
+    raise NotImplementedError("TODO: stage 2/3, see docstring")
