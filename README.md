@@ -19,8 +19,10 @@ and `skills/llm-wiki/SKILL.md` for how an agent uses it.
 
 ## CLI
 
-`./llm-wiki` is a single stdlib-only Python script. Verbs: `init`, `where`,
-`add`, `index`, `log`, `links`.
+Install: `uv tool install .` (or `pipx install .`) from the repo root.
+
+`llm-wiki` is a single-module Python CLI. Verbs: `init`, `where`, `add`,
+`page`, `index`, `log`, `links`.
 
 ## Status
 

@@ -3,9 +3,8 @@
 over it, stored as plain files. Three layers: `sources/` (immutable),
 `wiki/` (the model owns it), `SCHEMA.md` (the configuration that matters).
 
-Every verb runs on stdlib alone except `add --url`, which lazily imports
-readability-lxml and lxml only inside that one code path. See
-docs/design/llm-wiki.md for the full design.
+`add --url` depends on readability-lxml and lxml, declared in
+pyproject.toml. See docs/design/llm-wiki.md for the full design.
 """
 from __future__ import annotations
 
@@ -21,6 +20,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
+
+import lxml.html
+from readability import Document
 
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 PAGE_FIELDS = ("title", "summary", "category", "updated")
@@ -339,19 +341,9 @@ def append_log_entry(kb: Path, kind: str, title: str) -> Path:
 def fetch_url_text(url: str) -> tuple[str, str]:
     """Fetch `url` and return `(title, body_text)`.
 
-    readability-lxml and lxml are imported lazily, here only, so every
-    other verb stays runnable with nothing installed. A missing dependency
-    or a network failure exits loudly before anything is written; there is
-    no partial file to clean up either way.
+    A network failure exits loudly before anything is written; there is no
+    partial file to clean up either way.
     """
-    try:
-        from readability import Document
-        import lxml.html
-    except ImportError:
-        sys.exit(
-            "error: add --url requires readability-lxml and lxml; "
-            "install with: pip install readability-lxml lxml"
-        )
     request = urllib.request.Request(url, headers={"User-Agent": "llm-wiki/1.0"})
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
