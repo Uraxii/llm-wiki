@@ -14,6 +14,8 @@ stored as plain files. Three layers, no service, no database.
 | `wiki/` | The model owns it. Pages are written and kept updated as new sources land. |
 | `SCHEMA.md` | The configuration that matters: conventions and which retrieval path to take. |
 
+Install: `uv tool install .` (or `pipx install .`) from the repo root.
+
 ## Verbs
 
 ```
