@@ -115,7 +115,7 @@ built from exactly those four fields and nothing else.
 
 Route by question shape: check the index, read the matching page, check
 backlinks, only then search `sources/`, then file the answer back as a
-page and reindex.
+page (`page` regenerates the index itself).
 
 ## No search verb
 
