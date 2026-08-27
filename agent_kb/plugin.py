@@ -1,28 +1,32 @@
 """What a plugin is, what it receives, and how it is found.
 
-A plugin is a MODULE, not a class and not a config file. It declares six
-module-level constants and one module-level `collect` generator. That is
-the entire contract, and the rest of the stack is unchanged by whatever a
-plugin does inside it.
+A plugin is a MODULE, not a class and not a config file. It declares
+seven module-level constants and one module-level `collect` generator.
+That is the entire contract, and the rest of the stack is unchanged by
+whatever a plugin does inside it.
 
-Credentials are environment variables. There is no secret store: the
-connector CLIs already read their own credentials from the environment,
-and the collector inherits `os.environ` into the subprocess so the
-connector resolves them itself. No credential is ever read into a Row, a
-log line, or the store.
+A plugin declares LOGICAL credential names only: `SECRETS` says what it
+needs, never where a value lives or which variable backs it. Resolution
+happens in the parent process, and the plugin receives masked `Secret`
+handles through its context. `SECRETS = ()` is a complete declaration
+for a plugin against a public source. See `agent_kb.secrets`.
 """
 from __future__ import annotations
 
+import importlib
+import logging
+import pkgutil
 import types
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import ClassVar, Protocol, runtime_checkable
 
 from .row import Row
+from .row import KINDS, PROVENANCES
+from .secrets import Secret
 
 __all__ = [
-    "CONNECTOR_TIMEOUT_SEC",
+    "AuthExpired",
     "CollectContext",
     "Declaration",
     "Plugin",
@@ -30,13 +34,25 @@ __all__ = [
     "read_declaration",
 ]
 
-# One connector invocation may not hang a whole run. A page that cannot be
-# fetched inside this budget is a plugin failure, and the next scheduled
-# run is the retry.
-CONNECTOR_TIMEOUT_SEC = 120.0
+LOGGER = logging.getLogger(__name__)
 
-# Where connector executables live. Resolved from AGENT_KB_CONNECTORS.
-CONNECTOR_DIR_ENV = "AGENT_KB_CONNECTORS"
+
+class AuthExpired(Exception):
+    """A credential was accepted once and is no longer being accepted.
+
+    Raised by a vendor's shared `_client` on HTTP 401, and by nothing
+    else. The caller re-resolves that one secret ONCE, bypassing any
+    cached value so a rotation lands, and retries that ONE call. A
+    second 401 is a plugin failure for this tick: the run continues,
+    `last_ok_at` is not advanced, and the next tick is the retry.
+
+    There is no OAuth refresh persistence: no refresh token is stored,
+    nothing is written to disk, and re-resolution is the whole recovery.
+
+    The message names the connection and the logical secret. It never
+    carries a value, a header, or a URL with a token in its query
+    string.
+    """
 
 
 @dataclass(frozen=True)
@@ -48,9 +64,9 @@ class Declaration:
     """
 
     name: str
-    """Stable source name. Becomes `Row.source` and the `source_state`
-    key. Unique across plugins: a duplicate is a hard error, because two
-    plugins sharing a name would collide on (source, object_id)."""
+    """Stable plugin name. It composes with a connection id as
+    `<plugin_name>/<connection_id>` for `Row.source` and `source_state`.
+    Unique across plugins. May not contain `/`, the source separator."""
 
     cadence_sec: int
     """Minimum seconds between successful runs. The timer interval is the
@@ -67,15 +83,19 @@ class Declaration:
     """One of `row.PROVENANCES`, applied to every row this plugin
     emits."""
 
-    required_env: tuple[str, ...]
-    """Environment variable names the connector needs. Checked for
-    presence and non-emptiness before the plugin runs; a missing one is a
-    loud SKIP, not a failure, and never a partial run."""
+    secrets: tuple[str, ...]
+    """LOGICAL names of the credentials this plugin needs, such as
+    `("api_token",)`. Logical means the plugin never learns where a
+    value lives or which variable backed it. Each one is resolved in the
+    parent before the plugin runs; one that resolves to neither
+    injection form is a loud SKIP, not a failure, and never a partial
+    run. `()` is a first-class, fully valid declaration."""
 
-    connector: str
-    """Bare name of the connector executable, resolved under
-    `AGENT_KB_CONNECTORS`. Never an absolute path, so the same plugin
-    works on a machine that keeps its connectors elsewhere."""
+    settings: tuple[str, ...]
+    """Logical names of the plain settings this plugin needs from its
+    connection, such as `("account_id",)`. Plain means loggable and
+    git-safe, and is why settings live in `connections.toml` while
+    secrets do not. A name here may never also appear in `secrets`."""
 
     module: types.ModuleType
     """The imported plugin module, whose `collect` the runner calls."""
@@ -88,48 +108,53 @@ class CollectContext:
     A plugin CANNOT reach the store. It emits rows and the write path
     decides what happens to them, which is what keeps the mutator
     single.
+
+    ONE connection's worth of context and no more: a plugin run sees the
+    account it was pointed at, and has no way to name another.
+
+    Settings and secrets stay SEPARATE, and are never flattened into one
+    mapping. A settings value is a plain `str`, safe to log; a secret is
+    a masked `Secret` handle that must be revealed at the point of use.
+    Keeping them apart is what makes "never log a secret" a property of
+    the types instead of a rule people remember.
+
+    Members:
+        secret: accessor defined in stage 2. Contract: returns the
+            `Secret` handle for one declared logical name. Returns a
+            `Secret`, NEVER a `str`, so a caller cannot get a value
+            without saying `reveal`. Raises loudly, and does not skip,
+            when `name` is not in `declaration.secrets`: an undeclared
+            secret is a plugin bug, and a plugin reaching for a
+            credential it never declared must not be quietly handed one.
+        setting: accessor defined in stage 2. Contract: returns the
+            plain `str` for one declared logical name from
+            `declaration.settings`, and raises loudly on an undeclared
+            name for the same reason.
     """
 
     run_started_at: str
     """ISO 8601 UTC, the run's start. Used as `observed_at` fallback so
     every row in one run agrees on "now"."""
 
-    connector_dir: Path
-    """Directory holding connector executables."""
-
     declaration: Declaration
     """This plugin's own declaration, so a plugin need not repeat its
     constants when building rows."""
 
-    def run_connector(self, args: Sequence[str]) -> dict | list:
-        """Invoke this plugin's connector once and return parsed JSON.
+    connection_id: str
+    """Connection id composed with `declaration.name` into Row.source."""
 
-        The ONE place the collector shells out. `shell=False` with an
-        argument list, never a command string. `os.environ` is inherited
-        so the connector resolves its own credentials.
+    secrets: Mapping[str, Secret]
+    """Masked handles by logical name, exactly the names in
+    `declaration.secrets`. Empty for a plugin that declares none. Held
+    as handles rather than values, so nothing is read until a `reveal`
+    asks and a rotation between run start and call is free."""
 
-        Args:
-            args: connector arguments, excluding the executable itself.
-                Must request the connector's machine-readable output
-                mode, because human-readable mode writes paging hints to
-                stderr where they cannot be parsed reliably.
+    settings: Mapping[str, str]
+    """Plain values by logical name, exactly the names in
+    `declaration.settings`, taken from this connection."""
 
-        Returns:
-            The decoded stdout payload.
-
-        Raises:
-            FileNotFoundError: the connector is not under `connector_dir`.
-            RuntimeError: non-zero exit, or stdout that is not JSON. Both
-                are plugin failures, both mean the next run retries.
-            subprocess.TimeoutExpired: exceeded CONNECTOR_TIMEOUT_SEC.
-
-        Postcondition: nothing is written anywhere. This is a pure read.
-        """
-        raise NotImplementedError(
-            "TODO: subprocess.run([exe, *args], capture_output=True, "
-            "text=True, timeout=CONNECTOR_TIMEOUT_SEC), check exit, "
-            "json.loads(stdout)"
-        )
+    secret: ClassVar[Callable[[CollectContext, str], Secret]]
+    setting: ClassVar[Callable[[CollectContext, str], str]]
 
 
 @runtime_checkable
@@ -146,8 +171,8 @@ class Plugin(Protocol):
     HALF_LIFE_DAYS: float
     KIND: str
     PROVENANCE: str
-    REQUIRED_ENV: tuple[str, ...]
-    CONNECTOR: str
+    SECRETS: tuple[str, ...]
+    SETTINGS: tuple[str, ...]
 
     def collect(self, ctx: CollectContext) -> Iterator[Row]:
         """Yield every row this source can currently reach.
@@ -161,8 +186,9 @@ class Plugin(Protocol):
         persisted between runs.
 
         Preconditions:
-            - Every name in `REQUIRED_ENV` is set and non-empty.
-            - `ctx.connector_dir` exists.
+            - Every name in `SECRETS` resolved, so `ctx.secret(name)`
+              returns a handle for each of them.
+            - Every name in `SETTINGS` is present on the connection.
 
         Postconditions:
             - Every yielded Row carries `ids` and `raw` VERBATIM from the
@@ -184,11 +210,52 @@ def read_declaration(module: types.ModuleType) -> Declaration:
     Raises:
         ValueError: a constant is missing, has the wrong type, `KIND` is
             not in `row.KINDS`, `PROVENANCE` is not in `row.PROVENANCES`,
-            `CADENCE_SEC` is not positive, or `CONNECTOR` looks like a
-            path rather than a bare name.
+            `CADENCE_SEC` is not positive, or a name appears in both
+            `SECRETS` and `SETTINGS`.
     """
-    raise NotImplementedError(
-        "TODO: getattr each constant, type + domain check"
+    name = _required(module, "NAME", str)
+    cadence_sec = _required(module, "CADENCE_SEC", int)
+    half_life_days = _required(module, "HALF_LIFE_DAYS", (float, int))
+    kind = _required(module, "KIND", str)
+    provenance = _required(module, "PROVENANCE", str)
+    secrets = _required(module, "SECRETS", tuple)
+    settings = _required(module, "SETTINGS", tuple)
+    collect = getattr(module, "collect", None)
+    if not callable(collect):
+        raise ValueError("collect must be callable")
+    if not name or "/" in name:
+        raise ValueError("NAME must be non-empty and may not contain /")
+    if cadence_sec <= 0:
+        raise ValueError("CADENCE_SEC must be positive")
+    if float(half_life_days) < 0:
+        raise ValueError("HALF_LIFE_DAYS must be non-negative")
+    if kind not in KINDS:
+        raise ValueError("KIND is invalid")
+    if provenance not in PROVENANCES:
+        raise ValueError("PROVENANCE is invalid")
+    if any(not isinstance(item, str) or not item for item in secrets):
+        raise ValueError("SECRETS must contain non-empty strings")
+    if any(not isinstance(item, str) or not item for item in settings):
+        raise ValueError("SETTINGS must contain non-empty strings")
+    # Settings riding the same AGENT_KB_<CONN>_<NAME> env template as
+    # secrets is the CURRENT RECOMMENDATION for getting connection
+    # settings to the child (see secrets.ENV_VAR_TEMPLATE), not a
+    # settled three-way choice against re-reading connections.toml or
+    # argv. This guard is what that template requires: the two name
+    # spaces must stay disjoint or a setting could shadow a credential.
+    # If the reviewer picks a different option, this guard comes out
+    # along with the shared template.
+    if set(secrets) & set(settings):
+        raise ValueError("SECRETS and SETTINGS may not share a name")
+    return Declaration(
+        name=name,
+        cadence_sec=cadence_sec,
+        half_life_days=float(half_life_days),
+        kind=kind,
+        provenance=provenance,
+        secrets=secrets,
+        settings=settings,
+        module=module,
     )
 
 
@@ -204,7 +271,39 @@ def discover(package: str = "agent_kb.plugins") -> list[Declaration]:
             fatal, because a duplicate source name silently merges two
             sources into one primary-key space.
     """
-    raise NotImplementedError(
-        "TODO: pkgutil.iter_modules + importlib.import_module, "
-        "read_declaration each, reject duplicate names"
-    )
+    root = importlib.import_module(package)
+    declarations: list[Declaration] = []
+    seen: dict[str, str] = {}
+    for module_info in pkgutil.walk_packages(root.__path__, f"{package}."):
+        basename = module_info.name.rsplit(".", 1)[-1]
+        if basename.startswith("_") or module_info.ispkg:
+            continue
+        try:
+            module = importlib.import_module(module_info.name)
+            declaration = read_declaration(module)
+        except Exception as error:
+            LOGGER.warning("skipping plugin %s: %s", module_info.name, error)
+            continue
+        if declaration.name in seen:
+            raise ValueError(
+                "duplicate plugin NAME "
+                f"{declaration.name!r}: {seen[declaration.name]} and "
+                f"{module_info.name}"
+            )
+        seen[declaration.name] = module_info.name
+        declarations.append(declaration)
+    return declarations
+
+
+def _required(
+    module: types.ModuleType,
+    name: str,
+    expected_type: type | tuple[type, ...],
+) -> object:
+    try:
+        value = getattr(module, name)
+    except AttributeError as error:
+        raise ValueError(f"{name} is required") from error
+    if not isinstance(value, expected_type):
+        raise ValueError(f"{name} has wrong type")
+    return value
