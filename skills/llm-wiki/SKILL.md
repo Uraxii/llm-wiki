@@ -19,17 +19,23 @@ stored as plain files. Three layers, no service, no database.
 ```
 llm-wiki init [PATH]     create the kb tree, default ./.kb
 llm-wiki where           print which kb resolves, and how
-llm-wiki add TITLE       write a source, body from stdin
-llm-wiki index           regenerate wiki/index.md
-llm-wiki log KIND TITLE  append one entry to log.md
+llm-wiki add TITLE       write a source, body from stdin, or --url to fetch one
+llm-wiki page TITLE      write or update a wiki page, body from stdin
+llm-wiki index           repair-only: regenerate wiki/index.md (add/page do this already)
+llm-wiki log KIND TITLE  repair-only: append one entry to log.md (add/page do this already)
 llm-wiki links PAGE      print pages that link to PAGE
 ```
+
+`add` and `page` are the only write paths into the kb. Both log the write
+and regenerate `wiki/index.md` themselves right after, so `log.md` and
+`index.md` never drift from what is on disk. Reach for `index`/`log`
+directly only to repair them by hand.
 
 Every verb accepts `--kb PATH` to override resolution. Without it: walk up
 from cwd for a `.kb` directory, else fall back to the global store
 `~/.local/share/agent-kb` (honouring `XDG_DATA_HOME`).
 
-Capture a source:
+Capture a source, body from stdin:
 
 ```
 llm-wiki add "Widget Catalog" --origin research \
@@ -42,11 +48,30 @@ EOF
 writes `job` or `mode`; those are written by the collector itself, which
 does not exist yet.
 
-Write or extend a page by hand (pages are updated, not regenerated), then:
+Capture a source by fetching a URL instead (mutually exclusive with
+stdin; `source` frontmatter is set to the URL automatically):
 
 ```
-llm-wiki index
+llm-wiki add --url "https://example.com/widgets"
 ```
+
+This path needs `readability-lxml` and `lxml` installed; every other verb
+runs on the standard library alone. A missing dependency or a network
+failure exits loudly before anything is written.
+
+Write or update a wiki page, body from stdin:
+
+```
+llm-wiki page "Widget Catalog" --summary "one line" --category ref <<'EOF'
+page body goes here
+EOF
+```
+
+Creating a page requires a body. Updating one replaces the body with
+stdin and keeps any frontmatter field not passed as a flag; `updated` is
+always re-stamped. Piping in empty stdin (or a closed stdin) re-stamps
+`updated` and leaves the body untouched, byte for byte, since a page holds
+reasoning that exists nowhere else.
 
 Check what links to a page:
 
@@ -57,10 +82,9 @@ llm-wiki links widget-supplier
 `links` scans `wiki/` only; a `[[wikilink]]` written in a `sources/` file is
 not reported, since backlinks are a wiki-layer concept.
 
-Record what happened:
+Read the log if `add`/`page` ever need auditing:
 
 ```
-llm-wiki log ingest "captured widget catalog source"
 grep "^## \[" .kb/log.md | tail -5
 ```
 
