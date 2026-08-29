@@ -1,0 +1,9 @@
+[models]
+summarize = "cheap"
+
+[identifiers.ingredient]
+describe = "an ingredient as the recipe names it"
+
+[identifiers.isbn]
+pattern = "^97[89]\\d{10}$"
+describe = "ISBN-13 of the cookbook, digits only"

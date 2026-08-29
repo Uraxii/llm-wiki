@@ -1,0 +1,8 @@
+[models]
+summarize = "cheap"
+
+[identifiers.cve]
+pattern = "^CVE-\\d{4}-\\d{4,}$"
+describe = "CVE id as printed in the advisory"
+
+[identifiers.host]
