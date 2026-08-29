@@ -5,3 +5,8 @@ __pycache__/
 *.db
 *.sqlite3
 .DS_Store
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
+.beads/proxieddb/
