@@ -13,3 +13,9 @@ Glossary for the substrate. Domain terms live in each kb's SCHEMA.md, never here
 - **Vocabulary**: the full set of declared keys for one kb. The substrate has none of its own.
 - **Lint**: the substrate's mechanical pass over every page: frontmatter, identifiers, citation direction, dangling hashes. Semantic checks (contradictions, staleness) are the agent's, per SCHEMA.md.
 - **Finding**: one lint failure: a page, a check, a detail. There are no warnings.
+- **Story**: the CLI page that groups every summary about one event. Every summary belongs to exactly one story; a story with one member is a singleton.
+- **Member**: a summary listed in a story's `members`, by source hash, in arrival order.
+- **Join**: two identifiers match when the key is equal and the values are equal after normalisation (NFKC, casefold, trimmed, whitespace collapsed). Dedup normalises; lint never does.
+- **Candidate**: a story that shares a joined identifier with a new summary, or holds one of its nearest summaries by vector. The judgment picks one candidate or none.
+- **Judgment**: the dedup model's answer to "which candidate is the same event": one candidate slug or `NONE`.
+- **Rebuild**: deleting every story and replaying every summary in (`fetched`, hash) order; the repair for lost races and order-dependence.
