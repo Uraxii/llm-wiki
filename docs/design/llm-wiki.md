@@ -317,6 +317,56 @@ it because the summary is missing.
 
 ---
 
+## Dedup and stories
+
+Dedup runs once per source inside serial ingest, after summarize and embed. Its
+output is story membership: every summary belongs to exactly one story page, and
+a story with one member is a singleton. Singletons cost one small page and buy a
+uniform rule for search folding and rebuild.
+
+**Join.** Lint compares identifiers exactly; dedup normalises for the join. The
+key is untouched. The value is NFKC-normalised, casefolded, trimmed, and internal
+whitespace collapsed to one space. One rule for every key, whether or not it has
+a pattern.
+
+**Candidates.** Candidates are story pages, never summaries. Two sources, unioned:
+every story whose normalised identifier set intersects the new summary's, and,
+when a vector file exists for the configured embed model, the stories of the five
+nearest summaries. No vector file means the second source is empty and dedup
+still runs. Order: most shared identifiers first, then earliest `first_seen`.
+
+**Judgment.** Zero candidates: a new story, no model call. Otherwise the dedup
+model from `[models]` receives the new summary and each candidate story, each as
+frontmatter plus body, and answers on its first line with exactly one candidate
+slug or `NONE`. Anything else is read as `NONE` and logged. With no dedup model
+configured the fallback is deterministic: the first candidate. A summary with no
+identifiers has no join candidates; vector candidates apply when they exist;
+otherwise it becomes a singleton.
+
+**Story page.** Frontmatter: `kind: story`, `title` (first member's title),
+`members` (summary hashes, arrival order), `identifiers` (union, first spelling
+kept per normalised form), `first_seen` and `last_seen` (min and max of the
+members' `fetched`), `model`. The body is regenerated on every write: one
+`## <member title>` section per member holding its abstract, in member order.
+Path `wiki/<slugify(title)>.md`; if that path holds a different page the slug
+gets `-<first 8 hex of the first member hash>`. The summary gets `story: <slug>`
+written back. Both pages pass lint before they are kept; a failing story is not
+written, the summary stays story-less, the log names it, ingest continues.
+
+**Rebuild.** `dedup --rebuild` deletes every story page, drops `story:` from
+every summary, and replays summaries ordered by (`fetched`, hash). Manual only,
+no cadence; run it after changing the dedup model or after a logged drop. The
+deterministic order is what repairs order-dependence and a lost race.
+
+**Log.** One line per summary, `## [dedup] <hash> -> <slug> (new|joined) - <ts>`,
+and one `## [dedup] rebuild N summaries into M stories - <ts>` per rebuild.
+
+**Push.** After dedup places a summary, the same join runs against every agent
+page's `identifiers`. One stdout line per match, `push\t<page>\t<shared>`, and
+one log line `## [push] <hash> touches <page> (<n> shared) - <ts>`. The CLI
+never edits the agent page; reacting is the agent's maintain workflow. Not run
+at rebuild. No opt-out: a page with no identifiers never matches.
+
 ## Models and configuration
 
 Every paid pipeline step (summarize, embed, dedup) has its own model, set in
@@ -412,6 +462,17 @@ small enough to review on one screen. Paging style differs per endpoint, not per
 vendor.
 
 ---
+
+
+**Decided interface (ticket .6).** `ingest <url|path|->...` is the one door for
+feeds, snapshots, and an agent mid-answer. Bytes are keyed by sha256 as
+`sources/<hash>.<ext>`; a provenance file `sources/<hash>.toml` (url, fetched,
+content_type, job) sits beside them as the raw file's label. Jobs live in
+`config.toml` as `[jobs.<name>]` with `feed` or `urls` and `mode` `partial`
+(skip URLs already seen) or `full` (fetch all, hash keying skips unchanged
+bytes). Cadence is the OS scheduler calling `ingest --job <name>`; the CLI is a
+one-shot process. Output one line per source `hash\tnew|exists|failed\turl`;
+failures never stop a job.
 
 ## Credentials
 
