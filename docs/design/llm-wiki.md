@@ -7,7 +7,7 @@ same date. Replaces the design in agent-kb PR #1, which is closed.
 
 A live model of an environment plus the accumulated reasoning over it, stored as
 plain files an agent can read without asking permission. Three layers, no
-service, no database, no network surface.
+service, no database of record, no network surface.
 
 ---
 
@@ -33,6 +33,7 @@ to solve.
 ├── SCHEMA.md            how an agent works this kb
 ├── log.md               append-only, greppable prefix
 ├── sources/             immutable, flat
+├── vectors/             GENERATED cache, gitignored, one sqlite file per embedding model
 └── wiki/
     ├── index.md         GENERATED, never hand-edited
     └── <page>.md
@@ -43,9 +44,11 @@ extraction, runs as a CLI the agent shells out to. A command that can fail is
 smaller than a daemon that can be down, and it removes the network surface
 entirely.
 
-**No database.** Agents grep. Files are the store and the query engine. An index
-was solving a scale problem that does not exist yet, and ripgrep over a few
-hundred megabytes is a second or two.
+**No database of record.** Agents grep. Files are the store and the query engine.
+A rows index was solving a scale problem that does not exist yet, and ripgrep
+over a few hundred megabytes is a second or two. The sqlite files under
+`vectors/` are a rebuildable cache derived from `wiki/`, never a store of
+record (see Vectors).
 
 **`.kb` is the store**, not a pointer to one. A pointer file stays available
 later if a project needs to share a store; the indirection buys nothing until
@@ -96,16 +99,15 @@ pages accumulate reasoning that exists nowhere else, so they are truth alongside
 sources rather than a disposable rendering, and an agent writing a conclusion
 onto a page will still find it there next week.
 
-### Backlinks instead of embeddings
+### Backlinks
 
 Pages connect with `[[wikilink]]` syntax. The backlink query is
 `rg -l '\[\[page-name\]\]'`, which needs no stored index and is correct by
-construction. No edge table, no traversal primitive, no vector store, no
-re-embedding when content changes, no API key.
+construction. No edge table, no traversal primitive.
 
 Backlinks answer *given this page, what else touches it*. They cannot answer
-*where do I start*, which is what embeddings were for. The index file covers
-that instead.
+*where do I start*. The index file covers that for a cheap first read, and the
+`search` verb covers it when the index is not enough (see Vectors).
 
 ### index.md is generated
 
@@ -177,16 +179,91 @@ Ranked by actual impact, largest first.
 Metadata should answer freshness without a read. If an agent has to open a page
 to learn it is stale, full price was paid to discard it.
 
-### Where embeddings come back
+### Vectors are on wiki pages only
 
-Not deleted, deferred. They belong on prose only, wiki pages first and sources
-second, and never on collector rows: identifier lookups want exact match, and
-near-duplicate records collapse into one region of vector space until top-k stops
-discriminating.
+Never on raw sources, never on chunks, and never on collector rows: identifier
+lookups want exact match, and near-duplicate records collapse into one region of
+vector space until top-k stops discriminating. The store and the verbs are in
+the next section.
 
-The trigger to add them is observable, not architectural. When the index outgrows
-a single affordable read, or searches start visibly missing, reach for a local
-on-device search tool rather than building a vector store.
+---
+
+## Vectors
+
+One vector per `summary` page and one per synthesis page, never per raw source
+and never per chunk. Two consumers: dedup inside serial ingest, which takes the
+nearest pages as its candidate set, and the agent's `search` verb. Deferring
+vectors was rejected because dedup consumes them at ingest, so they exist from
+day one.
+
+**Store.** A sqlite-vec `vec0` table, cosine metric, one file per embedding
+model at `.kb/vectors/<model-slug>.sqlite`. The slug is the model name with `/`
+and `:` replaced by `--`. The configured embed model selects the file; a missing
+file is created empty on first use. Each file's `vec0` has fixed dimensions for
+its model, and vectors from different models are never compared. Switching back
+to a previous model is free, and two files side by side is what the embedding
+arena needs to compare models.
+
+**Row.** `page_path` as primary key, `file_hash`, `kind` as a filterable
+metadata column, and the vector. `file_hash` is the sha256 of the whole file,
+frontmatter included. A row is stale when the hash differs; mtime is never used.
+Hashing the whole file needs no parsing, and frontmatter (identifiers, domain
+fields) rightly shapes the vector. Content hash is what local-first tools
+converge on. The model name is not stored per row; one model per file makes it
+redundant.
+
+**What is embedded.** Not the whole file. The text fed to the model is `title`,
+`identifiers`, and the `summary` frontmatter field when present, else the first
+N characters of the body (N set per model, about 2k). For CLI summary pages the
+body is already the abstract, so this is the whole page. For agent pages it is
+the lever SCHEMA.md gets: write a `summary` field and that is what search sees.
+Long text embedded whole gives a diffuse vector that loses to a short stub on
+the same topic, which is the length bias the embedding arena must include in
+its fixture. The hash stays whole-file.
+
+**A cache, never a store of record.** Gitignored. Delete it on any trouble;
+`embed` rebuilds it from `wiki/`. Page row and vector are written in one sqlite
+transaction, so there are no orphan vectors and no dual-write ordering problem.
+sqlite-vec is pre-1.0 with breaking changes expected, so the pin is
+`sqlite-vec>=0.1.9,<0.2`. Licence MIT/Apache dual. KNN is brute-force, no ANN,
+which is fine at wiki scale; the upgrade trigger stays observable (query
+latency), not architectural. No numpy: vectors are serialized as float32 through
+sqlite-vec's helpers.
+
+**Verbs.**
+
+- `llm-wiki embed [<page>...]`. With pages, embeds those. Without, sweeps
+  `wiki/`, compares hashes, embeds only missing or stale rows, and deletes rows
+  for pages that no longer exist. Ingest runs the sweep-less path for the page
+  it wrote. SCHEMA.md tells the agent to call `embed <page>` after writing a
+  page; the sweep at the start of every ingest is the safety net. A sweep after
+  a model change is the one paid fan-out over the whole wiki and goes through
+  the spend ceiling.
+- `llm-wiki status`. Read-only, no model calls. Reports wiki pages with no
+  current vector in the configured model's file, and sources under `sources/`
+  with no summary page, which is an interrupted ingest. Lists the offenders and
+  the fix command.
+- `llm-wiki search "<text>" [-n N] [--kind K]`. Embeds the query with the
+  configured model and prints `score<TAB>path<TAB>title<TAB>updated<TAB>bytes`
+  lines (`last_seen` stands in for `updated` on story pages). The two extra
+  columns are projection, not ranking: freshness and body length are visible
+  without a page read, so the agent can discount stale pages and stubs. `kind` is the
+  only filter; identifier joins and hybrid ranking are out of scope. Starting
+  defaults are top-k 10 and a cosine score cutoff of 0.5, both tunable and to be
+  set by the embedding arena. Before searching it runs the `status` check. Any
+  page without a current vector is a refusal: nonzero exit, and the message
+  names the count and `llm-wiki embed`, because an empty result would read as
+  "the wiki has nothing on X". Unsummarized sources only warn on stderr, since
+  search is still correct about every page it can see. Exact identifier lookup
+  stays `rg`.
+
+**Rejected.** Per-page sidecar vector files (thousands of small reads per
+query). Vectors in frontmatter (bloats every page the agent reads). A whole
+search-layer tool that bundles its own embedding model (conflicts with per-step
+model configuration and does not do storage). Float blobs plus numpy (an extra
+dependency and cosine by hand). usearch, faiss, or lancedb (ANN not needed yet,
+and heavy). Silently searching only the rows that match the current model on a
+mismatch (an undetectable lie).
 
 ---
 
@@ -310,7 +387,7 @@ Recorded so they are not re-proposed.
 | The container topology: an api container, a collector container and a shared volume | Append-only snapshots mean no two writes touch the same file, which killed the single-writer requirement that was the only reason the api had to own the volume |
 | A database container | SQLite is an in-process library, not a server. A separate container either wraps it in a server that has to be invented, or shares one file between two writers |
 | The rows database and identifier join table | Solving a scale problem that has not arrived. Grep answers the same questions at the sizes in play |
-| Vectors in v1 | Mixed models produce incomparable vectors, most deployments have no embedding capability, and the index plus backlinks cover both entry and expansion at this scale |
+| Deferring vectors past v1 | Dedup at ingest consumes vectors, so they have to exist on day one. Mixed models producing incomparable vectors is solved by one sqlite-vec file per model, never compared across files |
 | A central diff engine | Only the collector knows whether its source supports incremental fetch. The framework needs one field, not a strategy |
 | An edge table and a path traversal primitive | The agent is the traversal engine and joins with successive cheap queries. Persisting edges only pays when a hop is a live API call |
 | RBAC | Never built. Permissions are inherited from whatever holds the bytes |

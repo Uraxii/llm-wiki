@@ -10,3 +10,7 @@ __pycache__/
 .dolt/
 .beads-credential-key
 .beads/proxieddb/
+
+# session handoffs, never committed
+.handoffs/
+scratch/
