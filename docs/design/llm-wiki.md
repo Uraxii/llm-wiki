@@ -269,6 +269,54 @@ mismatch (an undetectable lie).
 
 ---
 
+## Vocabulary and lint
+
+The substrate has no identifier vocabulary of its own. A kb declares its keys in
+`.kb/config.toml`, one sub-table per key beside the `[models]` table:
+
+    [identifiers.cve]
+    pattern = "^CVE-\\d{4}-\\d{4,}$"
+    describe = "CVE id as printed in the advisory"
+
+    [identifiers.ingredient]
+
+Both sub-keys are optional. No `pattern` means any non-empty value; no
+`describe` means the key name alone is shown to the model. The CLI appends the
+declared table to the summarizer prompt, so SUMMARIZE.md never repeats it and
+the two cannot drift. No `[identifiers]` table at all means no keys exist and
+any identifier on any page is an error; there is no lenient mode.
+
+On a page, `identifiers` is a flat list of `key:value` strings
+(`cve:CVE-2024-1234`, `ingredient:egg`). The prefix up to the first colon is
+the key and must be declared; the rest is the value and must match the pattern
+if one is set. Matching is exact. Case is the regex author's choice;
+normalising values for a join belongs to dedup, not lint.
+
+`llm-wiki lint [<page>...]` reads every page under `wiki/`, CLI-written or not,
+and runs six checks, each of which would hold for a recipe box as well as a
+security wiki:
+
+1. frontmatter does not parse
+2. identifier key not declared
+3. identifier value fails its pattern
+4. a page the CLI did not write wikilinks a `kind: summary` page (synthesis
+   cites sources, never summaries)
+5. a summary whose `source` hash has no file in `sources/`
+6. a story whose `members` are not summary hashes
+
+There are no warnings and no auto-fix. Findings go to stdout, one per line as
+`path`, check, detail, tab-separated; the exit code is 1 if there are any;
+log.md gets one line with the counts. Semantic lint, contradictions, staleness,
+missing freshness fields, is the agent's job per SCHEMA.md, as in Karpathy's
+original.
+
+Ingest runs the same checks on each summary or story it has just written. A
+page that fails is not kept: the source stays in `sources/`, log.md names the
+source and the check, and ingest moves to the next source. The next run retries
+it because the summary is missing.
+
+---
+
 ## Models and configuration
 
 Every paid pipeline step (summarize, embed, dedup) has its own model, set in
@@ -420,9 +468,8 @@ Recorded so they are not re-proposed.
 - **Scope union.** A project kb and the global kb are both in scope. Whether an
   agent searches both by default, and in what order, is undecided. It needs to be
   explicit or answers will silently draw on the wrong store.
-- **Identifier vocabulary.** A hardcoded tuple in code was the original complaint
-  and remains unresolved. Mostly moot while there is no rows database, and it
-  returns the moment structured querying does.
+- **Identifier vocabulary.** Resolved, see Vocabulary and lint: declared per kb in
+  config.toml, none in the substrate.
 - **Extraction and transcription.** No PDF path, no EPUB path, no ASR. All
   ingest-time CLI work, none of it written.
 - **Structured query over collector data.** Deferred along with the service. Item
