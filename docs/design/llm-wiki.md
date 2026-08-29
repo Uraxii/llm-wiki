@@ -237,8 +237,10 @@ sqlite-vec's helpers.
   for pages that no longer exist. Ingest runs the sweep-less path for the page
   it wrote. SCHEMA.md tells the agent to call `embed <page>` after writing a
   page; the sweep at the start of every ingest is the safety net. A sweep after
-  a model change is the one paid fan-out over the whole wiki and goes through
-  the spend ceiling.
+  a model change is the one paid fan-out over the whole wiki. There is no spend
+  ceiling by decision; the sweep prints its planned page count before the first
+  call, so an oversized sweep is visible in the log. Revisit only if a runaway
+  run recurs.
 - `llm-wiki status`. Read-only, no model calls. Reports wiki pages with no
   current vector in the configured model's file, and sources under `sources/`
   with no summary page, which is an interrupted ingest. Lists the offenders and
@@ -266,6 +268,25 @@ and heavy). Silently searching only the rows that match the current model on a
 mismatch (an undetectable lie).
 
 ---
+
+## Models and configuration
+
+Every paid pipeline step (summarize, embed, dedup) has its own model, set in
+`.kb/config.toml` beside `SCHEMA.md`:
+
+```toml
+[models]
+summarize = "deepseek/deepseek-v3.2"
+embed = "..."
+dedup = "..."
+```
+
+Model ids are whatever the configured API endpoint accepts. A CLI flag overrides
+a step's model for one run; there are no environment variables, since they are
+invisible in a cron log. The file is read with the standard library `tomllib`,
+no dependency. The embed model selects the vector file (see Vectors). No spend
+ceiling exists: paid runs print their planned counts and the operations journal
+records what ran.
 
 ## Media
 
