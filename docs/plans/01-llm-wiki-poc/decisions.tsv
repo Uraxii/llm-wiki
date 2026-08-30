@@ -1,0 +1,2 @@
+what	why	evidence	result
+frontmatter renderer emits block lists only	fixtures carry two list styles so byte-exact round-trip of both with one renderer is impossible	tests/fixtures/recipe/.kb/wiki/omelette-story.md, tests/fixtures/security/.kb/wiki/incident-story.md	literal round-trip tested on block fixture, semantic on inline
