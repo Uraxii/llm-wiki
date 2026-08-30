@@ -218,6 +218,27 @@ class DedupTest(unittest.TestCase):
         # the pre-existing page at the un-suffixed slug is untouched
         self.assertEqual(self._fields("second-gadget")["kind"], "host")
 
+    # -- _load_wiki non-UTF-8 (agent-kb-6jx) -----------------------------
+
+    def test_non_utf8_page_is_skipped_not_a_crash(self) -> None:
+        """`wiki/` is the user's agent's directory; the CLI cannot
+        control its bytes. A page decode failure must not traceback
+        `_load_wiki`, and the page stays skipped, same as any other
+        unparseable page (dedup does not embed it, unlike vectors)."""
+        (self.root / "wiki" / "bad.md").write_bytes(b"\xff\xfe not utf8, no frontmatter")
+
+        from llmwiki.core import Kb
+
+        summaries, stories, agent_pages = dedup._load_wiki(Kb(self.root))
+        self.assertEqual(agent_pages, [])
+        self.assertEqual(summaries, {})
+        self.assertEqual(stories, {})
+
+        code, out = _run_quiet(self.root)
+
+        self.assertEqual(code, 0)
+        self.assertIn("dedup: 0 planned", out)
+
     def test_lint_failing_story_is_not_kept(self) -> None:
         self._write_config(
             '[models]\nsummarize = "cheap"\n\n[identifiers.isbn]\npattern = "^[0-9]{13}$"\n'

@@ -298,7 +298,8 @@ def _load_wiki(kb: Kb) -> tuple[dict[str, Page], dict[Path, Story], list[Page]]:
     stories: dict[Path, Story] = {}
     agent_pages: list[Page] = []
     for path in sorted(kb.wiki.glob("*.md")):
-        parsed = parse_frontmatter(path.read_text(encoding="utf-8"))
+        text = path.read_bytes().decode("utf-8", errors="replace")
+        parsed = parse_frontmatter(text)
         if parsed is None:
             continue
         fields, body = parsed
