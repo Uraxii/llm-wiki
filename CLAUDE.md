@@ -4,12 +4,11 @@ This file provides instructions and context for AI coding agents working on this
 
 ## Build & Test
 
-_Add your build and test commands here_
+Python 3.14, stdlib only until a phase adds its dependency (see `docs/plans/01-llm-wiki-poc/overview.md`).
 
 ```bash
-# Example:
-# npm install
-# npm test
+python3 -m unittest discover tests
+python3 -m compileall -q llmwiki
 ```
 
 ## Architecture Overview
