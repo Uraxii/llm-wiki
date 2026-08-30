@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import re
 import sqlite3
 import struct
 import sys
@@ -85,12 +86,27 @@ def _unpack(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{count}f", blob))
 
 
-def _ensure_table(conn: sqlite3.Connection, dim: int) -> None:
+def _ensure_table(conn: sqlite3.Connection, dim: int, db_file: Path) -> None:
+    """Creates the `pages` table at `dim` when absent. When a table
+    already exists at a different dimension, `CREATE ... IF NOT EXISTS`
+    silently keeps the old one and a later INSERT dies with a raw
+    sqlite3 dimension-mismatch error; read the stored dimension back
+    from `sqlite_master` and raise an actionable error here instead."""
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS pages USING vec0("
         "path TEXT PRIMARY KEY, kind TEXT, +file_hash TEXT, +title TEXT, "
         f"embedding FLOAT[{dim}] distance_metric=cosine)"
     )
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'pages'"
+    ).fetchone()[0]
+    stored_dim = int(re.search(r"FLOAT\[(\d+)\]", ddl).group(1))
+    if stored_dim != dim:
+        raise ValueError(
+            f"{db_file}: existing vector table is {stored_dim}-dimensional, "
+            f"embed model now produces {dim}. Delete {db_file} and run "
+            "embed again."
+        )
 
 
 def _stored_hashes(conn: sqlite3.Connection) -> dict[str, str]:
@@ -232,7 +248,7 @@ def sweep(kb: Kb, paths: list[Path] | None = None) -> int:
             return 0
         rows = [_page_row(p) for p in stale]
         vectors = embed(kb.config, [row[4] for row in rows])
-        _ensure_table(conn, len(vectors[0]))
+        _ensure_table(conn, len(vectors[0]), db_path(kb, model_id))
         for row, vector in zip(rows, vectors):
             _write_page(conn, row, vector)
         return len(stale)
@@ -268,7 +284,7 @@ def run(root: Path, paths: list[Path] | None) -> int:
             except ModelError as exc:
                 print(f"llmwiki: embed: {exc}", file=sys.stderr)
                 return 1
-            _ensure_table(conn, len(vectors[0]))
+            _ensure_table(conn, len(vectors[0]), db_path(kb, model_id))
             for row, vector in zip(rows, vectors):
                 _write_page(conn, row, vector)
                 print(f"{row[0]}\tembedded")

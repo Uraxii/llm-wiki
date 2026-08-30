@@ -294,6 +294,52 @@ class VectorsTest(unittest.TestCase):
 
         self.assertIn("bad.md", _rows(db))
 
+    # -- P6: _ensure_table dimension guard (agent-kb-1xm) ------------------
+
+    def test_ensure_table_creates_fresh_table_without_raising(self) -> None:
+        from llmwiki.core import Kb
+
+        kb = Kb(self.root)
+        db = vectors.db_path(kb, "embed-model")
+        conn = vectors._connect(kb, "embed-model")
+        try:
+            vectors._ensure_table(conn, 3, db)  # must not raise
+        finally:
+            conn.close()
+
+    def test_ensure_table_same_dimension_is_a_noop(self) -> None:
+        from llmwiki.core import Kb
+
+        kb = Kb(self.root)
+        db = vectors.db_path(kb, "embed-model")
+        conn = vectors._connect(kb, "embed-model")
+        try:
+            vectors._ensure_table(conn, 3, db)
+            vectors._ensure_table(conn, 3, db)  # existing table, must not raise
+        finally:
+            conn.close()
+
+    def test_ensure_table_dimension_mismatch_names_path_and_remedy(self) -> None:
+        """The raw sqlite3 error names WHAT went wrong (a dimension
+        mismatch); this proves the raised error also names WHAT TO
+        DO: delete the db file and re-run embed."""
+        from llmwiki.core import Kb
+
+        kb = Kb(self.root)
+        db = vectors.db_path(kb, "embed-model")
+        conn = vectors._connect(kb, "embed-model")
+        try:
+            vectors._ensure_table(conn, 3, db)
+            with self.assertRaises(ValueError) as ctx:
+                vectors._ensure_table(conn, 4, db)
+        finally:
+            conn.close()
+
+        message = str(ctx.exception)
+        self.assertIn(str(db), message)
+        self.assertIn("delete", message.lower())
+        self.assertIn("embed", message.lower())
+
     # -- status ---------------------------------------------------------
 
     def test_status_lists_unvectored_pages_and_unsummarized_sources(self) -> None:
