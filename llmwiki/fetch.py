@@ -9,6 +9,7 @@ import ipaddress
 import socket
 import urllib.parse
 import urllib.request
+import zlib
 from html.parser import HTMLParser
 from http.client import HTTPException
 from urllib.error import HTTPError
@@ -74,7 +75,16 @@ def fetch(url: str, accepted: frozenset[str] = ACCEPTED_TYPES) -> tuple[str, str
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         _require_public(current)
-        request = urllib.request.Request(current, headers={"User-Agent": USER_AGENT})
+        # User-Agent and Accept-Encoding are the only headers ever sent.
+        # Neither carries a credential, so the reviewed property "no
+        # credential reaches a fetched host" holds regardless of which of
+        # them a server honours. Accept-Encoding names what this module can
+        # actually decode; some servers send gzip anyway (measured against
+        # python.org), which is why decoding below cannot be skipped.
+        request = urllib.request.Request(
+            current,
+            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"},
+        )
         try:
             with _OPENER.open(request, timeout=TIMEOUT_SEC) as response:
                 kind = response.headers.get_content_type()
@@ -89,6 +99,9 @@ def fetch(url: str, accepted: frozenset[str] = ACCEPTED_TYPES) -> tuple[str, str
                     f"{kind}; charset={charset}" if charset else kind
                 )
                 data = response.read(MAX_BYTES + 1)
+                data = _decode_content_encoding(
+                    response.headers.get("Content-Encoding"), data
+                )
             if len(data) > MAX_BYTES:
                 raise FetchError(f"response is larger than {MAX_BYTES} bytes")
             if data.startswith(b"%PDF-"):
@@ -102,6 +115,40 @@ def fetch(url: str, accepted: frozenset[str] = ACCEPTED_TYPES) -> tuple[str, str
         except (OSError, ValueError, HTTPException) as exc:
             raise FetchError(str(exc)) from None
     raise FetchError(f"more than {MAX_REDIRECTS} redirects")
+
+
+def _decode_content_encoding(encoding: str | None, data: bytes) -> bytes:
+    encoding = (encoding or "").strip().lower()
+    if encoding in ("", "identity"):
+        return data
+    if encoding in ("gzip", "x-gzip"):
+        return _inflate(data, 31, encoding)
+    if encoding == "deflate":
+        # Servers disagree about what "deflate" means: most send a
+        # zlib-wrapped stream (wbits=15), some send raw deflate
+        # (wbits=-15). Try the common case first, fall back to the other.
+        try:
+            return _inflate(data, 15, encoding)
+        except FetchError:
+            return _inflate(data, -15, encoding)
+    # br and zstd included: the standard library cannot decode them and a
+    # dependency is forbidden, so the honest answer is a refusal here
+    # rather than storing the compressed bytes as if they were the page.
+    raise FetchError(f"cannot decode content-encoding {encoding!r}")
+
+
+def _inflate(data: bytes, wbits: int, encoding: str) -> bytes:
+    # decompressobj().decompress(data, max_length) is the standard
+    # library's only bounded decompression path: it stops emitting output
+    # once max_length is reached instead of materialising the full
+    # expansion first. gzip.decompress and a bare zlib.decompress both
+    # decompress a chunk fully before returning and cannot be capped, so
+    # an attacker-chosen compression ratio would exhaust memory before
+    # the MAX_BYTES check below ever runs.
+    try:
+        return zlib.decompressobj(wbits).decompress(data, MAX_BYTES + 1)
+    except zlib.error as exc:
+        raise FetchError(f"cannot decode content-encoding {encoding!r}: {exc}") from None
 
 
 def _resolved_addresses(host: str) -> list[str]:
