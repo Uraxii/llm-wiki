@@ -118,18 +118,34 @@ def parse_frontmatter(
 
 
 def render_frontmatter(fields: dict[str, FrontmatterValue], body: str) -> str:
-    """Render `fields` plus `body` as a full page: a `---` block (lists
-    always in block form, even if parsed from inline) then a blank line
-    then `body`."""
+    """Render `fields` plus `body` as a full page: a `---` block (a
+    non-empty list always in block form, even if parsed from inline;
+    an empty list as inline `key: []`, since a bare `key:` line reads
+    back from `parse_frontmatter` as the empty string, not a list) then
+    a blank line then `body`."""
     lines = ["---"]
     for key, value in fields.items():
         if isinstance(value, list):
-            lines.append(f"{key}:")
-            lines.extend(f"  - {item}" for item in value)
+            if not value:
+                lines.append(f"{key}: []")
+            else:
+                lines.append(f"{key}:")
+                lines.extend(f"  - {item}" for item in value)
         else:
             lines.append(f"{key}: {value}")
     lines.append("---")
     return "\n".join(lines) + "\n\n" + body
+
+
+def as_list(value: FrontmatterValue | None) -> list[str]:
+    """Read a frontmatter list field defensively: `value` itself if it
+    is already a list, `[value]` if it is a truthy scalar (a legacy
+    page written before `render_frontmatter` learned to emit `key: []`,
+    whose empty list round-tripped to a bare string), or `[]` for
+    anything else (missing key, empty string)."""
+    if isinstance(value, list):
+        return value
+    return [value] if value else []
 
 
 def slugify(title: str) -> str:

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-from llmwiki.core import FrontmatterValue, Kb, parse_frontmatter, slugify
+from llmwiki.core import FrontmatterValue, Kb, as_list, parse_frontmatter, slugify
 
 CLI_KINDS = {"summary", "story"}
 WIKILINK = re.compile(r"\[\[([^\]|#]+)")
@@ -34,12 +34,6 @@ class _Context(NamedTuple):
     source_hashes: set[str]  # hashes with a byte file under sources/
 
 
-def _as_list(value: FrontmatterValue | None) -> list[str]:
-    if isinstance(value, list):
-        return value
-    return [value] if value else []
-
-
 def _check_frontmatter(path: Path, parsed: ParsedPage, ctx: _Context) -> list[Finding]:
     if parsed is not None:
         return []
@@ -52,7 +46,7 @@ def _check_identifier_key(path: Path, parsed: ParsedPage, ctx: _Context) -> list
     fields, _body = parsed
     declared = ctx.config.get("identifiers", {})
     findings = []
-    for ident in _as_list(fields.get("identifiers")):
+    for ident in as_list(fields.get("identifiers")):
         key = ident.partition(":")[0]
         if key not in declared:
             findings.append(Finding(path, "identifier-key", f"{key!r} not declared"))
@@ -65,7 +59,7 @@ def _check_identifier_value(path: Path, parsed: ParsedPage, ctx: _Context) -> li
     fields, _body = parsed
     declared = ctx.config.get("identifiers", {})
     findings = []
-    for ident in _as_list(fields.get("identifiers")):
+    for ident in as_list(fields.get("identifiers")):
         key, _, value = ident.partition(":")
         spec = declared.get(key)
         if spec is None:
@@ -111,7 +105,7 @@ def _check_story_member(path: Path, parsed: ParsedPage, ctx: _Context) -> list[F
     if fields.get("kind") != "story":
         return []
     findings = []
-    for member in _as_list(fields.get("members")):
+    for member in as_list(fields.get("members")):
         if member not in ctx.summary_hashes:
             findings.append(Finding(path, "story-member", f"member {member!r} is not a summary source"))
     return findings
