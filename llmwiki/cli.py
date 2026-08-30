@@ -217,6 +217,9 @@ def _usage() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
+    if args and args[0] in ("--help", "-h"):
+        print(_usage())
+        return 0
     kb_path: str | None = None
     if args and args[0] == "--kb":
         if len(args) < 2:
