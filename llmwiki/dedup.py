@@ -28,6 +28,7 @@ from llmwiki.core import (
 )
 from llmwiki.lint import lint_pages
 from llmwiki.model import ModelError, chat, model_name
+from llmwiki import vectors
 
 # The judge's own contract (decision agent-kb-0zf.5): a SUMMARIZE.md
 # analogue is not needed here, this prompt is never user-editable.
@@ -96,10 +97,13 @@ def candidates(
     page: Page, stories: Iterable[Story], extra: Sequence[Story] = ()
 ) -> list[Story]:
     """Every story sharing at least one identifier with `page`, unioned
-    with `extra` (the phase 13 vector seam, empty this phase). Sorted by
-    shared count descending, then `first_seen` ascending, then path name
+    with `extra` (the phase 13 vector seam). Sorted by shared count
+    descending, then (among vector-only candidates) `extra`'s own
+    similarity order, then `first_seen` ascending, then path name
     ascending for a total order."""
     page_forms = _joined_forms(as_list(page.fields.get("identifiers")))
+    extra_paths = {story.path for story in extra}
+    extra_rank = {story.path: index for index, story in enumerate(extra)}
     by_path: dict[Path, Story] = {}
     for story in (*stories, *extra):
         by_path.setdefault(story.path, story)
@@ -108,11 +112,14 @@ def candidates(
     for story in by_path.values():
         story_forms = _joined_forms(as_list(story.fields.get("identifiers")))
         shared = len(page_forms & story_forms)
-        if shared:
+        # A vector candidate survives with no shared identifier: being
+        # nearest IS its evidence. Identifier matches still sort first.
+        if shared or story.path in extra_paths:
             scored.append((shared, story))
     scored.sort(
         key=lambda pair: (
             -pair[0],
+            extra_rank.get(pair[1].path, len(extra)),
             str(pair[1].fields.get("first_seen") or ""),
             pair[1].path.name,
         )
@@ -314,7 +321,20 @@ def _place_summary(
     """Join or start a story for `summary`. Returns `(story, action)`
     with `action` "new" or "joined" on success, `None` when self-lint
     dropped the write."""
-    cands = candidates(summary, stories.values())
+    extra: list[Story] = []
+    # GATE (today's decision): vector neighbours are consulted only
+    # when a dedup judge model is configured. With no judge, `judge`
+    # takes cands[0] blindly and cannot answer NONE, so an unjudged
+    # vector candidate would silently merge two merely-nearby pages,
+    # and the closest unrelated pair measured in the arena corpus is
+    # 0.6922 similarity. With no dedup model, dedup must behave
+    # exactly as it does today.
+    if _dedup_model_id(kb) is not None:
+        for _score, path in vectors.neighbours(kb, summary.path, "story"):
+            story = stories.get(path)
+            if story is not None:
+                extra.append(story)
+    cands = candidates(summary, stories.values(), extra)
     target = judge(kb, summary, cands)
     model_id = _dedup_model_id(kb) or "none"
 

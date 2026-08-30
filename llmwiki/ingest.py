@@ -5,14 +5,14 @@ page kinds.
 """
 from __future__ import annotations
 
-import importlib.util
 import mimetypes
 import sys
 from pathlib import Path
 from typing import NamedTuple
 
 from llmwiki.core import Kb, append_log_entry, as_list, flatten
-from llmwiki import dedup, fetch, feeds, sources, summarize
+from llmwiki.model import ModelError, model_name
+from llmwiki import dedup, fetch, feeds, sources, summarize, vectors
 
 JOB = "manual"  # the job name for a plain `ingest`; `run_job` threads a real one
 STDIN_ARG = "-"
@@ -54,20 +54,26 @@ def ingest_url(arg: str) -> Source:
     return Source(data, url, content_type)
 
 
-def _embed_sweep(kb: Kb) -> None:
-    # Phase 13 seam: llmwiki/vectors.py does not exist yet, so this is a
-    # no-op today. find_spec rather than a try/except ImportError, so an
-    # ImportError raised from INSIDE vectors.py (phase 13 imports
-    # sqlite_vec) propagates instead of being mistaken for "not there".
-    if importlib.util.find_spec("llmwiki.vectors") is None:
-        return
-    from llmwiki import vectors
-
-    vectors.sweep(kb)
+def _sweep_or_fail(kb: Kb) -> bool:
+    """Runs the phase 13 embed sweep, but only when `[models] embed` is
+    configured: a kb with no embed model behaves exactly as it did
+    before vectors.py existed (no embed step, never a pipeline
+    failure). Once configured, a genuine `ModelError` from the sweep
+    itself IS a pipeline failure. Returns False only for that case."""
+    try:
+        model_name(kb.config, "embed", None)
+    except ModelError:
+        return True
+    try:
+        vectors.sweep(kb)
+    except ModelError:
+        return False
+    return True
 
 
 def _pipeline(root: Path, digest: str) -> str | None:
     """Returns the name of the failing step, or `None` when clean."""
+    kb = Kb(root)
     if summarize.run(root, [digest]) != 0:
         return "summarize"
     # Phase 13 embeds the new summary page HERE, between summarize and
@@ -77,8 +83,19 @@ def _pipeline(root: Path, digest: str) -> str | None:
     # Skipping dedup after a failed summarize is deliberate: with no
     # summary page on disk dedup would log a junk "dropped (no summary
     # page for source)" line into the append-only log.
+    if not _sweep_or_fail(kb):
+        return "embed"
     if dedup.run(root, [digest]) != 0:
         return "dedup"
+    # dedup may write a new story page (a join or a fresh one) and
+    # always rewrites the summary's own frontmatter (the `story:`
+    # back-reference), so both sweeps here are real, not redundant: the
+    # first sweep's vector for the summary is stale the moment dedup
+    # touches it. Sweeping again is how "no wiki page lacks a current
+    # vector after ingest" holds even for the story the last source in
+    # a batch creates.
+    if not _sweep_or_fail(kb):
+        return "embed"
     return None
 
 
@@ -127,7 +144,7 @@ def _ingest_one(kb: Kb, arg: str, job: str = JOB) -> tuple[str, str, str]:
 
 def run(root: Path, args: list[str], job: str = JOB) -> int:
     kb = Kb(root)
-    _embed_sweep(kb)
+    _sweep_or_fail(kb)  # best-effort: pre-existing stale pages, never blocks the batch
 
     tally = {"new": 0, "exists": 0, "failed": 0}
     for arg in args:
