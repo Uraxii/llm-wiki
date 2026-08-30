@@ -1,15 +1,19 @@
 """Subprocess smoke test of every verb in the CLI's verb table."""
 
+import contextlib
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from llmwiki import cli  # noqa: E402
 from llmwiki.model import API_KEY_VAR  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
 
@@ -237,6 +241,38 @@ class EmbedAwareCliTest(unittest.TestCase):
             if line.startswith("embed:") and line.endswith("planned")
         ]
         self.assertTrue(planned, result.stdout)
+
+
+class MainErrorBoundaryTest(unittest.TestCase):
+    """agent-kb-3o4: no traceback ever escapes `main`."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def test_an_escaping_exception_becomes_one_line_and_exit_1(self) -> None:
+        def boom(root: Path, args: list[str]) -> int:
+            raise ValueError("kaboom")
+
+        stderr = io.StringIO()
+        with unittest.mock.patch.dict(cli.VERBS, {"where": (boom, cli.VERBS["where"][1])}):
+            with contextlib.redirect_stderr(stderr):
+                rc = cli.main(["--kb", str(self.tmp), "where"])
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stderr.getvalue(), "llmwiki: where: ValueError: kaboom\n")
+
+    def test_keyboard_interrupt_propagates_out_of_main(self) -> None:
+        def interrupt(root: Path, args: list[str]) -> int:
+            raise KeyboardInterrupt
+
+        with unittest.mock.patch.dict(cli.VERBS, {"where": (interrupt, cli.VERBS["where"][1])}):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.main(["--kb", str(self.tmp), "where"])
+
+    def test_a_verb_returning_2_still_returns_2(self) -> None:
+        rc = cli.main(["--kb", str(self.tmp), "ingest"])
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":
