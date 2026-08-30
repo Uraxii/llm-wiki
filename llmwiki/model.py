@@ -59,7 +59,7 @@ def _api_key() -> str:
     raise ModelError(f"no API key: set {API_KEY_VAR} or {API_KEY_FILE_VAR}")
 
 
-def _model_name(config: dict, step: str, model: str | None) -> str:
+def model_name(config: dict, step: str, model: str | None) -> str:
     """`model` is the per-run CLI override and wins when given; otherwise
     the model comes from `[models].<step>` in `config.toml`."""
     if model is not None:
@@ -108,7 +108,7 @@ def _post(config: dict, path: str, body: dict) -> dict:
 
 def chat(config: dict, step: str, prompt: str, model: str | None = None) -> str:
     """One chat completion for pipeline `step` (e.g. "summarize")."""
-    name = _model_name(config, step, model)
+    name = model_name(config, step, model)
     body = {"model": name, "messages": [{"role": "user", "content": prompt}]}
     response = _post(config, "/chat/completions", body)
     try:
@@ -123,7 +123,7 @@ def embed(
     """One embedding vector per entry in `texts`, in input order. The
     model name always comes from `[models].embed`; embedding has no
     per-call step like `chat` does."""
-    name = _model_name(config, "embed", model)
+    name = model_name(config, "embed", model)
     body = {"model": name, "input": texts}
     response = _post(config, "/embeddings", body)
     try:
