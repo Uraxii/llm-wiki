@@ -1,141 +1,178 @@
 ---
 name: llm-wiki
-description: Read and write an llm-wiki knowledgebase (a project-local `.kb` or the global `~/.local/share/agent-kb` store) through the `llm-wiki` CLI. Use whenever you would otherwise cite a raw source without keeping it, need to record a finding so it survives past this session, or are about to re-derive an answer you likely already wrote down before. Covers capturing a source, writing or extending a wiki page, regenerating the index, checking backlinks, and logging what happened. There is no search verb; agents grep.
+description: Keep and retrieve durable knowledge in an llm-wiki knowledgebase (a project-local `.kb`, or the global store) through the `llmwiki` CLI. Use when you would otherwise cite a source without keeping it, when a finding needs to survive past this session, when you are about to re-derive something you probably wrote down before, or when you want to ask the accumulated notes a question in plain language. Covers storing a source, generating summary pages from it, writing your own pages, searching by meaning, and checking the wiki is well formed.
 ---
 
 # llm-wiki
 
 A live model of an environment plus the accumulated reasoning over it,
-stored as plain files. Three layers, no service, no database.
+stored as plain files. Three layers, no service, no daemon, no server.
 
-| Layer | Rule |
+| Layer | Who owns it |
 |---|---|
-| `sources/` | Immutable. Written once, never edited, never deleted. |
-| `wiki/` | The model owns it. Pages are written and kept updated as new sources land. |
-| `SCHEMA.md` | The configuration that matters: conventions and which retrieval path to take. |
-
-Install: `uv tool install .` (or `pipx install .`) from the repo root.
-
-## Verbs
-
-```
-llm-wiki init [PATH]     create the kb tree, default ./.kb
-llm-wiki where           print which kb resolves, and how
-llm-wiki add TITLE       write a source, body from stdin, or --url to fetch one
-llm-wiki page TITLE      write or update a wiki page, body from stdin, or --touch to re-stamp only
-llm-wiki index           repair-only: regenerate wiki/index.md (add/page do this already)
-llm-wiki log KIND TITLE  repair-only: append one entry to log.md (add/page do this already)
-llm-wiki links PAGE      print pages that link to PAGE
-```
-
-`add` and `page` are the only write paths into the kb. Both log the write
-and regenerate `wiki/index.md` themselves right after, so `log.md` and
-`index.md` never drift from what is on disk. Reach for `index`/`log`
-directly only to repair them by hand.
-
-Every verb accepts `--kb PATH` to override resolution. Without it: walk up
-from cwd for a `.kb` directory, else fall back to the global store
-`~/.local/share/agent-kb` (honouring `XDG_DATA_HOME`).
-
-Capture a source, body from stdin:
-
-```
-llm-wiki add "Widget Catalog" --origin research \
-    --source "https://example.com/widgets" <<'EOF'
-body text goes here
-EOF
-```
-
-`--origin` is `curated` (default), `research`, or `collector`. `add` never
-writes `job` or `mode`; those are written by the collector itself, which
-does not exist yet.
-
-Capture a source by fetching a URL instead (mutually exclusive with
-stdin; `source` frontmatter is set to the URL automatically):
-
-```
-llm-wiki add --url "https://example.com/widgets"
-```
-
-This path needs `readability-lxml` and `lxml` installed; every other verb
-runs on the standard library alone. A missing dependency or a network
-failure exits loudly before anything is written.
-
-Write or update a wiki page, body from stdin:
-
-```
-llm-wiki page "Widget Catalog" --summary "one line" --category ref <<'EOF'
-page body goes here
-EOF
-```
-
-`page` always reads a real body from stdin to EOF, no timeout: empty or
-whitespace-only stdin is a loud error, never a silent no-op. Updating a
-page replaces the body with stdin and keeps any frontmatter field not
-passed as a flag; `updated` is always re-stamped.
-
-Re-stamp `updated` without touching the body, since a page holds
-reasoning that exists nowhere else:
-
-```
-llm-wiki page "Widget Catalog" --touch
-```
-
-`--touch` still reads stdin like any other call, but refuses a non-empty
-body (piped, redirected, any size) instead of guessing which one you
-meant; it also requires the page to already exist.
-
-Check what links to a page:
-
-```
-llm-wiki links widget-supplier
-```
-
-`links` scans `wiki/` only; a `[[wikilink]]` written in a `sources/` file is
-not reported, since backlinks are a wiki-layer concept.
-
-Read the log if `add`/`page` ever need auditing:
-
-```
-grep "^## \[" .kb/log.md | tail -5
-```
-
-## Frontmatter contracts
-
-Scalars only, no nested values, no lists.
-
-Source frontmatter: `origin`, `source`, `collected_at`, and for a collector
-snapshot additionally `job`, `mode` (`full` or `partial`).
-
-Page frontmatter: `title`, `summary`, `category`, `updated`. `index.md` is
-built from exactly those four fields and nothing else.
-
-## Retrieval, largest saving first
-
-1. A previously answered question is a page, not a search. One synthesized
-   page costs 500 to 1,500 tokens. Re-deriving the same answer from three
-   sources costs 20,000 or more.
-2. Read `wiki/index.md` before searching anything. At a few hundred pages
-   the whole index costs roughly 5,000 tokens, cheaper than one wrong
-   guess at what to search for.
-3. Freshness comes from the index's `updated` column, not from opening the
-   page.
-4. `SCHEMA.md` is what makes the cheap path get taken. Read it before
-   deciding what to do next.
-
-Route by question shape: check the index, read the matching page, check
-backlinks, only then search `sources/`, then file the answer back as a
-page (`page` regenerates the index itself).
-
-## No search verb
-
-There is no search command. `rg` (or `grep`) is the query engine, and
-backlinks come from the same tool, not a stored index:
-
-```
-rg -l '\[\[page-name\]\]' .kb/wiki/
-```
+| `sources/` | The CLI. Immutable raw bytes keyed by sha256, each with a `<digest>.toml` provenance sidecar. Written once, never edited, never deleted. |
+| `wiki/` | Shared. The CLI writes pages of kind `summary` and `story`. Every other page, `index.md` included, is yours. |
+| `SCHEMA.md` | You. The conventions and retrieval paths for this kb. The CLI never parses it. |
 
 ## Install
 
-Symlink this directory into `~/.claude/skills`.
+```
+uv tool install .
+```
+
+Needs Python 3.14 and pulls `sqlite-vec`, which is not optional: the
+vector store is loaded at import time and there is no degraded mode.
+
+## Which kb you are talking to
+
+In order:
+
+1. `llmwiki --kb PATH <verb>`, used exactly as given.
+2. Otherwise the nearest `.kb` directory, searching the working
+   directory and then each parent.
+3. Otherwise the global store, `~/.local/share/agent-kb`.
+
+`llmwiki where` prints the one that resolved. Run it first when you are
+unsure, and before any verb that writes.
+
+## Starting a kb
+
+```
+llmwiki init                 # creates ./.kb
+```
+
+`init` leaves a kb that runs but does not yet think. Three things must
+follow before the first `ingest`, or the pages you get back will be
+poor and the lint will reject some of them outright.
+
+**1. Write `SUMMARIZE.md`.** `init` leaves a stub of a few lines. This file
+is the summarizer prompt, and it decides what a page in this kb even
+is. Say what one source represents here, name every frontmatter field
+you want on a summary page, and say exactly what to do about
+identifiers. Terse prompts produce pages the lint drops.
+
+**2. Declare an identifier vocabulary in `config.toml`.** Each key is a
+kind of stable external handle a page can carry, written into a page's
+`identifiers` field as `key:value`.
+
+```toml
+[identifiers.serial]
+pattern = "^[A-Z]{2}\\d{6}$"
+describe = "equipment serial, two letters then six digits"
+```
+
+This is not decoration. Two mechanisms run on identifiers and only on
+identifiers: joining a new summary into an existing story, and warning
+you when a new source touches a page you wrote. A kb that declares no
+keys gets one story per source forever and never warns you about
+anything. Declare at least one key that genuinely discriminates, and
+declare no key you cannot write a real pattern for.
+
+**3. Point at an endpoint and name the models.**
+
+```toml
+[models]
+summarize = "<chat model id>"
+embed = "<embedding model id>"
+dedup = "<chat model id>"      # optional, see Sharp edges
+
+[endpoint]
+url = "https://api.example.com/v1"
+```
+
+The credential comes from the environment and nowhere else:
+`LLM_WIKI_API_KEY` as a value, or `LLM_WIKI_API_KEY_FILE` as a path to
+one. Never put it in `config.toml`. Never print it.
+
+## Keeping something
+
+```
+llmwiki ingest https://example.com/page
+llmwiki ingest ./notes.md ./report.txt
+llmwiki ingest -                          # bytes on stdin
+llmwiki ingest --job nightly              # a job declared in config.toml
+```
+
+One `ingest` stores the raw bytes, writes provenance, summarizes each
+new source into a `summary` page, places that summary into a `story`,
+and embeds what it wrote. It prints one line per source: the digest,
+`new` or `existing`, and the argument. A source already stored by
+content hash is not fetched or summarized again.
+
+If a page you wrote shares an identifier with the new source, `ingest`
+prints a `push` line naming your page. That is the signal to go update
+it.
+
+## Asking the wiki something
+
+```
+llmwiki search "how do we rotate the gateway credential"
+llmwiki search "burnt sugar dessert" -n 5 --kind story
+```
+
+Ranked by meaning, not keywords, one line each: score, file name,
+title, last modified, size. Scores are cosine similarity and are only
+comparable within one kb. As a calibration from a real corpus, an
+on-topic hit ran 0.83, a correct hit that shared no vocabulary with the
+query ran 0.63, and a query the kb had nothing on topped out at 0.09.
+
+`search` embeds your query, so it needs `[models] embed` and the
+credential. It refuses to answer while any page lacks a current vector,
+which is what `embed` is for.
+
+## Writing your own pages
+
+There is no verb for this. You write the file. A page is markdown with
+a `---` frontmatter block:
+
+```markdown
+---
+title: Gateway credential rotation
+kind: runbook
+identifiers:
+  - serial:AB123456
+---
+
+Body.
+```
+
+Use any `kind` except `summary` and `story`, which belong to the CLI.
+Give the page real identifiers if you want `ingest` to tell you when a
+new source touches it. Then:
+
+```
+llmwiki lint            # six mechanical checks, one line per finding
+llmwiki embed           # so search can find what you just wrote
+llmwiki status          # pages without a vector, sources without a summary
+```
+
+`lint` has no severities, no warnings, and no auto-fix. A finding is a
+thing to go fix.
+
+## What the CLI will never do
+
+It will not touch `index.md`, `SCHEMA.md`, or any page you wrote. It
+will not delete a source. It will not overwrite a good page with a bad
+one: a generated page that fails its own lint is dropped, and the page
+it would have replaced survives.
+
+## Sharp edges
+
+Verified, and open on the tracker at the time of writing.
+
+- **A kb with no identifier vocabulary never joins anything.**
+  Configuring `[models] dedup` does not rescue it. The judge is
+  prompted with an incident-tracker definition of sameness, "one
+  real-world occurrence", so it correctly refuses to merge two sources
+  that are merely about the same subject. Measured: two documents on
+  one subject, vector similarity 0.7579, judged NONE. Declare the
+  vocabulary. `agent-kb-zn6`, `agent-kb-d1w`.
+- **One unreadable source makes a bare `llmwiki summarize` exit 1 for
+  good**, with the reason only in `log.md`. Read the log before you
+  believe the kb is broken, and pass explicit digests to work around
+  it. `agent-kb-74p`.
+- **A missing `[models] embed` is reported as missing vectors** by
+  `status` and `search`. Check `config.toml` before you go looking for
+  a data problem. `agent-kb-5ty`.
+- **`ingest` embeds each summary twice.** Wasted calls, no wrong
+  output. `agent-kb-2ya`.

@@ -14,19 +14,29 @@ Three layers, no service, no database, no network surface.
 - **`SCHEMA.md`.** The configuration that matters: conventions, workflows, and
   which retrieval path to take for which question.
 
-No search verb. Agents grep. See `docs/design/llm-wiki.md` for the full design
-and `skills/llm-wiki/SKILL.md` for how an agent uses it.
+Retrieval is by meaning: pages are embedded and `search` ranks them by cosine
+similarity. Grep still works and is still the right tool for an exact string.
+See `docs/design/llm-wiki.md` for the full design and `skills/llm-wiki/SKILL.md`
+for how an agent uses it.
 
 ## CLI
 
-Install: `uv tool install .` (or `pipx install .`) from the repo root.
+Install: `uv tool install .` from the repo root. Needs Python 3.14 and
+`sqlite-vec`, the project's one dependency.
 
-`llm-wiki` is a single-module Python CLI. Verbs: `init`, `where`, `add`,
-`page`, `index`, `log`, `links`.
+`llmwiki` verbs: `init`, `where`, `ingest`, `summarize`, `dedup`, `lint`,
+`embed`, `status`, `search`.
+
+Sources, summary pages, story pages, `log.md` and the vector store are the
+CLI's. Everything else under `wiki/`, `index.md` included, belongs to the
+agent, and the CLI never overwrites it.
 
 ## Status
 
-Early design. See `docs/design/`.
+The pipeline runs end to end against a real endpoint: ingest, summarize,
+embed, search. Joining several sources into one story needs an identifier
+vocabulary declared in `config.toml`; without one, every story is a
+singleton. See `docs/design/`.
 
 ## Prior art
 
