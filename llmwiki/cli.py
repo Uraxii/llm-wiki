@@ -137,7 +137,7 @@ VERBS: dict[str, tuple[Verb, str]] = {
     "where": (cmd_where, "where           print the resolved kb root"),
     "ingest": (
         cmd_ingest,
-        "ingest <path>... | -   store sources and run the pipeline",
+        "ingest <url|path>... | -   store sources and run the pipeline",
     ),
     "summarize": (cmd_summarize, "summarize [<hash>...]  write a summary page per source"),
     "dedup": (

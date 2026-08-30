@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from llmwiki.core import Kb, append_log_entry, flatten
-from llmwiki import dedup, sources, summarize
+from llmwiki import dedup, fetch, sources, summarize
 
 JOB = "manual"  # phases 11 and 12 bring real job names
 STDIN_ARG = "-"
@@ -36,6 +36,22 @@ def ingest_path(arg: str) -> Source:
     content_type = mimetypes.guess_type(path.name)[0] or "text/plain"
     data = path.read_bytes()
     return Source(data, str(path), content_type)
+
+
+def ingest_url(arg: str) -> Source:
+    """Fetch a url under fetch.py's guard and reduce it to storable
+    bytes. Lets FetchError out: the caller's broad except turns it into
+    one `failed` line, the same as a missing file does.
+
+    Source.url is the CLEANED REQUESTED url, not the fetch's final_url:
+    phase 12's `partial` job mode skips urls that already have a
+    provenance file, and it looks them up by the url the feed gave, so
+    recording a redirect target would make it refetch forever.
+    """
+    url = fetch.clean_url(arg)
+    _final_url, content_type, data = fetch.fetch(url)
+    content_type, data = fetch.extract(content_type, data)
+    return Source(data, url, content_type)
 
 
 def _embed_sweep(kb: Kb) -> None:
@@ -80,7 +96,12 @@ def _ingest_one(kb: Kb, arg: str) -> tuple[str, str, str]:
     url = arg
     digest = NO_DIGEST  # a failure after store still reports the real hash
     try:
-        source = ingest_stdin() if arg == STDIN_ARG else ingest_path(arg)
+        if arg == STDIN_ARG:
+            source = ingest_stdin()
+        elif fetch.is_url(arg):
+            source = ingest_url(arg)
+        else:
+            source = ingest_path(arg)
         url = source.url
         if not source.data:
             _fail(kb, url, "empty source")
