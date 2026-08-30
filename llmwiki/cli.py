@@ -11,7 +11,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from llmwiki.core import atomic_write_text
+from llmwiki.core import Kb, append_log_entry, atomic_write_text
+from llmwiki.lint import lint_pages, select_pages
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_SKELETON = REPO_ROOT / "docs" / "design" / "SCHEMA.skeleton.md"
@@ -84,7 +85,7 @@ def resolve_root(explicit: str | None, for_init: bool) -> Path:
     return GLOBAL_STORE
 
 
-def cmd_init(root: Path) -> int:
+def cmd_init(root: Path, args: list[str]) -> int:
     if root.exists():
         print(f"llmwiki: init: {root} already exists", file=sys.stderr)
         return 1
@@ -96,15 +97,27 @@ def cmd_init(root: Path) -> int:
     return 0
 
 
-def cmd_where(root: Path) -> int:
+def cmd_where(root: Path, args: list[str]) -> int:
     print(root)
     return 0
 
 
-Verb = Callable[[Path], int]
+def cmd_lint(root: Path, args: list[str]) -> int:
+    kb = Kb(root)
+    pages = [Path(a) for a in args] if args else None
+    findings = lint_pages(root, pages)
+    for finding in findings:
+        print(f"{finding.path}\t{finding.check}\t{finding.detail}")
+    page_count = len(select_pages(root, pages))
+    append_log_entry(kb.log, "lint", f"{len(findings)} findings over {page_count} pages")
+    return 1 if findings else 0
+
+
+Verb = Callable[[Path, list[str]], int]
 VERBS: dict[str, tuple[Verb, str]] = {
     "init": (cmd_init, "init            create a kb at the resolved root"),
     "where": (cmd_where, "where           print the resolved kb root"),
+    "lint": (cmd_lint, "lint [<page>...] check wiki pages, one line per finding"),
 }
 
 
@@ -129,4 +142,4 @@ def main(argv: list[str]) -> int:
 
     verb, fn = args[0], VERBS[args[0]][0]
     root = resolve_root(kb_path, for_init=verb == "init")
-    return fn(root)
+    return fn(root, args[1:])
