@@ -275,7 +275,7 @@ def push(kb: Kb, page: Page, agent_pages: list[Page]) -> int:
         shared = sorted(
             ident for ident in agent_idents if _joined_form(ident) in shared_forms
         )
-        print(f"push\t{agent_page.path}\t{','.join(shared)}")
+        print(f"push\t{agent_page.path}\t{','.join(shared)}", file=sys.stderr)
         append_log_entry(
             kb.log, "push", f"{digest} touches {agent_page.path} ({len(shared)} shared)"
         )

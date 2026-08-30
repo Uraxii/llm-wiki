@@ -5,14 +5,13 @@
 # credential is ever checked in here.
 
 [models]
-# NOT the project default. The default summarizer (deepseek/deepseek-v3.2)
-# corrupts this kb's cook_time_minutes field on roughly two pages in three
-# through the live endpoint: "方式和45", "Sheet 45", "procedurally
+# This is the project default, changed from deepseek/deepseek-v3.2 after
+# it corrupted this kb's cook_time_minutes field on roughly two pages in
+# three through the live endpoint: "方式和45", "Sheet 45", "procedurally
 # incorrect", and once a plausible but wrong "154" where the source says 3.
-# The same prompt on two other models returns "3" exactly. Every other field
-# comes back clean, so this is token corruption on that route, not a
-# prompting failure. Measured in phase 10; see the beads ticket on the
-# summarizer default. Revisit this line when that is settled.
+# The same prompt on this model returns "3" exactly, and every other field
+# came back clean on the same replies, so this was token corruption on
+# that route, not a prompting failure. Measured in phase 10.
 summarize = "google/gemini-2.5-flash"
 
 # No identifier vocabulary. A recipe box has nothing an identifier

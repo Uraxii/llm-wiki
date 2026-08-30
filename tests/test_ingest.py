@@ -6,7 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -251,10 +251,11 @@ class IngestTest(unittest.TestCase):
         self.assertEqual(fields["source"], digest)
 
     def test_a_push_warning_does_not_masquerade_as_an_ingest_record(self) -> None:
-        """`dedup.push` prints `push\\t<path>\\t<identifiers>` on the same
-        stdout ingest writes to, and that is ALSO three tab-separated
-        fields. `_records` must pick out ingest's own line by status
-        column, not by "three fields" or "has a tab" alone."""
+        """`dedup.push` prints `push\\t<path>\\t<identifiers>` on stderr,
+        which is also three tab-separated fields. `_records` must pick
+        out ingest's own line by status column, not by "three fields"
+        or "has a tab" alone, and the push line must never reach
+        stdout at all."""
         (self.root / "wiki" / "agent-note.md").write_text(
             "---\n"
             "kind: note\n"
@@ -279,15 +280,16 @@ class IngestTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             self._write_config(fake.url, '[identifiers.isbn]\npattern = "^[0-9]{13}$"\n')
-            out = io.StringIO()
-            with redirect_stdout(out):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
                 code = ingest.run(self.root, [str(path)])
         stdout = out.getvalue()
 
         self.assertEqual(code, 0)
         # The collision must really have fired, or this test proves
         # nothing.
-        self.assertIn("push\t", stdout)
+        self.assertIn("push\t", err.getvalue())
+        self.assertNotIn("push\t", stdout)
 
         records = _records(stdout)
         self.assertEqual(len(records), 1)
