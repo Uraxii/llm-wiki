@@ -1,0 +1,529 @@
+{
+  "pages": [
+    {
+      "slug": "baking-powder",
+      "domain": "cooking",
+      "title": "Baking powder",
+      "source_title": "Baking powder",
+      "body_chars": 305,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "bcrypt",
+      "domain": "security",
+      "title": "Bcrypt",
+      "source_title": "Bcrypt",
+      "body_chars": 309,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "braising",
+      "domain": "cooking",
+      "title": "Braising",
+      "source_title": "Braising",
+      "body_chars": 698,
+      "short_stub": false,
+      "source_chars": 2267
+    },
+    {
+      "slug": "buffer-overflow",
+      "domain": "security",
+      "title": "Buffer overflow",
+      "source_title": "Buffer overflow",
+      "body_chars": 645,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "caramelization",
+      "domain": "cooking",
+      "title": "Caramelization",
+      "source_title": "Caramelization",
+      "body_chars": 645,
+      "short_stub": false,
+      "source_chars": 2530
+    },
+    {
+      "slug": "certificate-authority",
+      "domain": "security",
+      "title": "Certificate authority",
+      "source_title": "Certificate authority",
+      "body_chars": 687,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "ceviche",
+      "domain": "cooking",
+      "title": "Ceviche",
+      "source_title": "Ceviche",
+      "body_chars": 606,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "cheesemaking",
+      "domain": "cooking",
+      "title": "Cheesemaking",
+      "source_title": "Cheesemaking",
+      "body_chars": 631,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "clickjacking",
+      "domain": "security",
+      "title": "Clickjacking",
+      "source_title": "Clickjacking",
+      "body_chars": 827,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "common-vulnerabilities-and-exposures",
+      "domain": "security",
+      "title": "Common Vulnerabilities and Exposures",
+      "source_title": "Common Vulnerabilities and Exposures",
+      "body_chars": 312,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "confit",
+      "domain": "cooking",
+      "title": "Confit",
+      "source_title": "Confit",
+      "body_chars": 505,
+      "short_stub": false,
+      "source_chars": 4338
+    },
+    {
+      "slug": "content-security-policy",
+      "domain": "security",
+      "title": "Content Security Policy",
+      "source_title": "Content Security Policy",
+      "body_chars": 720,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "cross-site-request-forgery",
+      "domain": "security",
+      "title": "Cross-site request forgery",
+      "source_title": "Cross-site request forgery",
+      "body_chars": 727,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "cross-site-scripting",
+      "domain": "security",
+      "title": "Cross-site scripting",
+      "source_title": "Cross-site scripting",
+      "body_chars": 410,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "curing-food-preservation",
+      "domain": "cooking",
+      "title": "Curing (food preservation)",
+      "source_title": "Curing (food preservation)",
+      "body_chars": 271,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "deep-frying",
+      "domain": "cooking",
+      "title": "Deep frying",
+      "source_title": "Deep frying",
+      "body_chars": 184,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "denial-of-service-attack",
+      "domain": "security",
+      "title": "Denial-of-service attack",
+      "source_title": "Denial-of-service attack",
+      "body_chars": 933,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "directory-traversal-attack",
+      "domain": "security",
+      "title": "Directory traversal attack",
+      "source_title": "Directory traversal attack",
+      "body_chars": 634,
+      "short_stub": false,
+      "source_chars": 5442
+    },
+    {
+      "slug": "espresso",
+      "domain": "cooking",
+      "title": "Espresso",
+      "source_title": "Espresso",
+      "body_chars": 217,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "fermentation-in-food-processing",
+      "domain": "cooking",
+      "title": "Fermentation in food processing",
+      "source_title": "Fermentation in food processing",
+      "body_chars": 843,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "fuzzing",
+      "domain": "security",
+      "title": "Fuzzing",
+      "source_title": "Fuzzing",
+      "body_chars": 913,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "gluten",
+      "domain": "cooking",
+      "title": "Gluten",
+      "source_title": "Gluten",
+      "body_chars": 739,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "http-cookie",
+      "domain": "security",
+      "title": "HTTP cookie",
+      "source_title": "HTTP cookie",
+      "body_chars": 715,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "json-web-token",
+      "domain": "security",
+      "title": "JSON Web Token",
+      "source_title": "JSON Web Token",
+      "body_chars": 814,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "kimchi",
+      "domain": "cooking",
+      "title": "Kimchi",
+      "source_title": "Kimchi",
+      "body_chars": 241,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "knife-sharpening",
+      "domain": "cooking",
+      "title": "Knife sharpening",
+      "source_title": "Knife sharpening",
+      "body_chars": 650,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "maillard-reaction",
+      "domain": "cooking",
+      "title": "Maillard reaction",
+      "source_title": "Maillard reaction",
+      "body_chars": 272,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "marination",
+      "domain": "cooking",
+      "title": "Marination",
+      "source_title": "Marination",
+      "body_chars": 646,
+      "short_stub": false,
+      "source_chars": 2640
+    },
+    {
+      "slug": "mirepoix",
+      "domain": "cooking",
+      "title": "Mirepoix",
+      "source_title": "Mirepoix",
+      "body_chars": 778,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "miso",
+      "domain": "cooking",
+      "title": "Miso",
+      "source_title": "Miso",
+      "body_chars": 641,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "oauth",
+      "domain": "security",
+      "title": "OAuth",
+      "source_title": "OAuth",
+      "body_chars": 292,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "password-cracking",
+      "domain": "security",
+      "title": "Password cracking",
+      "source_title": "Password cracking",
+      "body_chars": 913,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "pasteurization",
+      "domain": "cooking",
+      "title": "Pasteurization",
+      "source_title": "Pasteurization",
+      "body_chars": 785,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "penetration-test",
+      "domain": "security",
+      "title": "Penetration test",
+      "source_title": "Penetration test",
+      "body_chars": 729,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "pressure-cooking",
+      "domain": "cooking",
+      "title": "Pressure cooking",
+      "source_title": "Pressure cooking",
+      "body_chars": 292,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "privilege-escalation",
+      "domain": "security",
+      "title": "Privilege escalation",
+      "source_title": "Privilege escalation",
+      "body_chars": 847,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "public-key-infrastructure",
+      "domain": "security",
+      "title": "Public key infrastructure",
+      "source_title": "Public key infrastructure",
+      "body_chars": 309,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "risotto",
+      "domain": "cooking",
+      "title": "Risotto",
+      "source_title": "Risotto",
+      "body_chars": 800,
+      "short_stub": false,
+      "source_chars": 4795
+    },
+    {
+      "slug": "roux",
+      "domain": "cooking",
+      "title": "Roux",
+      "source_title": "Roux",
+      "body_chars": 291,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "salt-cryptography",
+      "domain": "security",
+      "title": "Salt (cryptography)",
+      "source_title": "Salt (cryptography)",
+      "body_chars": 746,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "same-origin-policy",
+      "domain": "security",
+      "title": "Same-origin policy",
+      "source_title": "Same-origin policy",
+      "body_chars": 348,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "sandbox-computer-security",
+      "domain": "security",
+      "title": "Sandbox (computer security)",
+      "source_title": "Sandbox (computer security)",
+      "body_chars": 596,
+      "short_stub": false,
+      "source_chars": 5443
+    },
+    {
+      "slug": "server-side-request-forgery",
+      "domain": "security",
+      "title": "Server-side request forgery",
+      "source_title": "Server-side request forgery",
+      "body_chars": 264,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "session-hijacking",
+      "domain": "security",
+      "title": "Session hijacking",
+      "source_title": "Session hijacking",
+      "body_chars": 339,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "smoking-cooking",
+      "domain": "cooking",
+      "title": "Smoking (cooking)",
+      "source_title": "Smoking (cooking)",
+      "body_chars": 732,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "sourdough",
+      "domain": "cooking",
+      "title": "Sourdough",
+      "source_title": "Sourdough",
+      "body_chars": 884,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "sous-vide",
+      "domain": "cooking",
+      "title": "Sous vide",
+      "source_title": "Sous vide",
+      "body_chars": 319,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "sql-injection",
+      "domain": "security",
+      "title": "SQL injection",
+      "source_title": "SQL injection",
+      "body_chars": 741,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "static-application-security-testing",
+      "domain": "security",
+      "title": "Static application security testing",
+      "source_title": "Static application security testing",
+      "body_chars": 459,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "stock-food",
+      "domain": "cooking",
+      "title": "Stock (food)",
+      "source_title": "Stock (food)",
+      "body_chars": 794,
+      "short_stub": false,
+      "source_chars": 5456
+    },
+    {
+      "slug": "supply-chain-attack",
+      "domain": "security",
+      "title": "Supply chain attack",
+      "source_title": "Supply chain attack",
+      "body_chars": 822,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "threat-model",
+      "domain": "security",
+      "title": "Threat model",
+      "source_title": "Threat model",
+      "body_chars": 815,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "tofu",
+      "domain": "cooking",
+      "title": "Tofu",
+      "source_title": "Tofu",
+      "body_chars": 726,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "transport-layer-security",
+      "domain": "security",
+      "title": "Transport Layer Security",
+      "source_title": "Transport Layer Security",
+      "body_chars": 737,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "umami",
+      "domain": "cooking",
+      "title": "Umami",
+      "source_title": "Umami",
+      "body_chars": 762,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "web-application-firewall",
+      "domain": "security",
+      "title": "Web application firewall",
+      "source_title": "Web application firewall",
+      "body_chars": 313,
+      "short_stub": true,
+      "source_chars": 600
+    },
+    {
+      "slug": "yeast",
+      "domain": "cooking",
+      "title": "Yeast",
+      "source_title": "Yeast",
+      "body_chars": 734,
+      "short_stub": false,
+      "source_chars": 6000
+    },
+    {
+      "slug": "zero-day-vulnerability",
+      "domain": "security",
+      "title": "Zero-day vulnerability",
+      "source_title": "Zero-day vulnerability",
+      "body_chars": 792,
+      "short_stub": false,
+      "source_chars": 6000
+    }
+  ],
+  "spend_usd": 0.028254,
+  "model": "deepseek/deepseek-v3.2",
+  "generated": "2026-08-29"
+}
