@@ -1,0 +1,543 @@
+"""Vectors: one vec0 table per embed model, kept current by `sweep`,
+queried by `search` and by dedup's vector-neighbour seam."""
+
+import io
+import os
+import shutil
+import sqlite3
+import struct
+import tempfile
+import unittest
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sqlite_vec  # noqa: E402
+
+from llmwiki.core import render_frontmatter  # noqa: E402
+from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
+from llmwiki import dedup, vectors  # noqa: E402
+from fake_endpoint import FakeEndpoint  # noqa: E402
+
+
+@contextmanager
+def _env(values: dict):
+    sentinel = object()
+    previous = {key: os.environ.get(key, sentinel) for key in values}
+    for key, value in values.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is sentinel:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _respond(vector_for, chat_reply="NONE\n"):
+    """A `FakeEndpoint` respond function answering `/embeddings` from
+    `vector_for(text)` and `/chat/completions` with a fixed reply.
+    `chat_reply` defaults to a harmless NONE so an *unexpected* chat
+    call never hangs a test; whether one happened is checked afterward
+    against `fake.requests`, not by making the handler raise (raising
+    inside the server thread risks a client-side timeout, not a fast
+    test failure)."""
+
+    def respond(path: str, body: dict) -> dict:
+        if path == "/embeddings":
+            data = [
+                {"index": i, "embedding": vector_for(text)}
+                for i, text in enumerate(body["input"])
+            ]
+            return {"data": data}
+        if path == "/chat/completions":
+            return {"choices": [{"message": {"content": chat_reply}}]}
+        raise AssertionError(f"unexpected request path {path!r}")
+
+    return respond
+
+
+def _rows(db_path: Path) -> dict[str, tuple]:
+    """Every row in `db_path`'s `pages` table, keyed by path. Read-only,
+    driving the same public schema the module writes -- not a private
+    helper of the module under test."""
+    conn = sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    try:
+        return {
+            row[0]: row
+            for row in conn.execute("SELECT path, kind, file_hash, title FROM pages")
+        }
+    finally:
+        conn.close()
+
+
+class VectorsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / ".kb"
+        for sub in ("wiki", "sources"):
+            (self.root / sub).mkdir(parents=True)
+        (self.root / "log.md").write_text("# log\n")
+        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
+        env_cm.__enter__()
+        self.addCleanup(env_cm.__exit__, None, None, None)
+
+    def _write_config(self, url: str | None = None, extra: str = "") -> None:
+        endpoint = f'[endpoint]\nurl = "{url}"\n\n' if url else ""
+        (self.root / "config.toml").write_text(
+            '[models]\nsummarize = "cheap"\nembed = "embed-model"\n\n' + endpoint + extra
+        )
+
+    def _write_page(self, name: str, title: str, kind: str = "note", body: str = "Body text.") -> Path:
+        fields = {"kind": kind, "title": title}
+        path = self.root / "wiki" / f"{name}.md"
+        path.write_text(render_frontmatter(fields, body))
+        return path
+
+    # -- staleness / deletion --------------------------------------
+
+    def test_sweep_embeds_once_then_makes_no_call_when_current(self) -> None:
+        self._write_page("north", "North Page")
+        self._write_page("south", "South Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            embedded = vectors.sweep(kb)
+            self.assertEqual(embedded, 2)
+            self.assertEqual(len(fake.requests), 1)  # one batch call
+
+            embedded_again = vectors.sweep(kb)
+            self.assertEqual(embedded_again, 0)
+            self.assertEqual(len(fake.requests), 1)  # still one: nothing stale
+
+    def test_sweep_reembeds_only_the_changed_page(self) -> None:
+        north = self._write_page("north", "North Page")
+        self._write_page("south", "South Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+
+            north.write_text(render_frontmatter({"kind": "note", "title": "North Page 2"}, "New body."))
+            embedded = vectors.sweep(kb)
+
+        self.assertEqual(embedded, 1)
+        self.assertEqual(len(fake.requests), 2)
+
+    def test_sweep_deletes_row_for_vanished_page(self) -> None:
+        north = self._write_page("north", "North Page")
+        self._write_page("south", "South Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+            db = vectors.db_path(kb, "embed-model")
+            self.assertEqual(set(_rows(db)), {"north.md", "south.md"})
+
+            north.unlink()
+            vectors.sweep(kb)
+            self.assertEqual(set(_rows(db)), {"south.md"})
+
+    # -- refusals -----------------------------------------------------
+
+    def test_search_refuses_when_a_page_lacks_a_current_vector(self) -> None:
+        self._write_page("north", "North Page")
+        self._write_config(None)
+
+        err = io.StringIO()
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = vectors.search(self.root, "north", n=5)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("pages without a current vector; run embed first", err.getvalue())
+
+    def test_embed_missing_config_key_named_and_exits_2(self) -> None:
+        self._write_page("north", "North Page")
+        (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\n')
+
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = vectors.run(self.root, None)
+
+        self.assertEqual(code, 2)
+        self.assertIn("missing [models].embed in config.toml", err.getvalue())
+
+    # -- P2: planned count ------------------------------------------------
+
+    def test_sweep_prints_planned_count_before_the_paid_call(self) -> None:
+        """`sweep` is the only path `ingest` embeds through; it must
+        disclose spend itself, same shape as summarize/dedup (decision
+        .8)."""
+        self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                embedded = vectors.sweep(Kb(self.root))
+
+        self.assertEqual(embedded, 1)
+        self.assertIn("embed: 1 planned", out.getvalue().splitlines())
+
+    # -- P1: no pages table yet -------------------------------------------
+
+    def test_neighbours_returns_empty_when_db_exists_with_no_pages_table(self) -> None:
+        """A db file can exist (created by `_connect`) with no `pages`
+        table when every candidate got filtered out of `stale` before
+        `_ensure_table` ran: `embed <missing page>` on a fresh kb, then
+        `dedup`. `neighbours` must return [], never raise."""
+        digest = "c" * 64
+        (self.root / "sources" / f"{digest}.md").write_text("summary source text")
+        summary_path = self.root / "wiki" / "summary-new.md"
+        summary_path.write_text(
+            render_frontmatter(
+                {"kind": "summary", "title": "Summary", "source": digest, "identifiers": []},
+                "An abstract.",
+            )
+        )
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for, chat_reply="NONE\n")) as fake:
+            (self.root / "config.toml").write_text(
+                '[models]\nsummarize = "cheap"\nembed = "embed-model"\ndedup = "judge"\n\n'
+                f'[endpoint]\nurl = "{fake.url}"\n'
+            )
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            embed_out = io.StringIO()
+            with redirect_stdout(embed_out):
+                embed_code = vectors.run(self.root, [self.root / "wiki" / "nosuchpage.md"])
+            self.assertEqual(embed_code, 0)
+            self.assertTrue(vectors.db_path(kb, "embed-model").is_file())
+
+            self.assertEqual(vectors.neighbours(kb, summary_path, "story"), [])
+
+            dedup_out = io.StringIO()
+            with redirect_stdout(dedup_out):
+                dedup_code = dedup.run(self.root, [digest])
+
+        self.assertEqual(dedup_code, 0)
+
+    # -- P5: non-UTF-8 pages ------------------------------------------------
+
+    def test_non_utf8_page_gets_a_vector_and_does_not_crash(self) -> None:
+        """`wiki/` is the user's agent's directory; the CLI cannot
+        control its bytes. A latin-1 page must not traceback `status`,
+        `embed` or `search`, and must still get a vector so search's
+        refusal has a way to clear."""
+        bad = self.root / "wiki" / "bad.md"
+        bad.write_bytes(b"---\ntitle: Caf\xe9\nkind: summary\n---\nlatin1 body\n")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            status_out = io.StringIO()
+            with redirect_stdout(status_out):
+                status_code = vectors.status(self.root)
+            self.assertEqual(status_code, 0)
+
+            embed_out = io.StringIO()
+            with redirect_stdout(embed_out):
+                embed_code = vectors.run(self.root, None)
+            self.assertEqual(embed_code, 0)
+
+            search_out = io.StringIO()
+            with redirect_stdout(search_out):
+                search_code = vectors.search(self.root, "cafe", n=5)
+            self.assertEqual(search_code, 0)
+
+            db = vectors.db_path(Kb(self.root), "embed-model")
+
+        self.assertIn("bad.md", _rows(db))
+
+    # -- status ---------------------------------------------------------
+
+    def test_status_lists_unvectored_pages_and_unsummarized_sources(self) -> None:
+        self._write_page("north", "North Page")
+        digest = "a" * 64
+        (self.root / "sources" / f"{digest}.md").write_text("orphan source")
+        self._write_config(None)
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = vectors.status(self.root)
+
+        self.assertEqual(code, 0)
+        lines = out.getvalue().splitlines()
+        self.assertIn("north.md\tno vector", lines)
+        self.assertIn(f"{digest}\tno summary", lines)
+
+    def test_status_clears_once_embedded_and_summarized(self) -> None:
+        self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            vectors.sweep(Kb(self.root))
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = vectors.status(self.root)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+
+    # -- search: order and kind pre-filter -----------------------------
+
+    def test_search_returns_top_k_in_similarity_order(self) -> None:
+        self._write_page("va", "Alpha VA")
+        self._write_page("vb", "Alpha VB")
+        self._write_page("vc", "Alpha VC")
+        self._write_page("vd", "Alpha VD")
+
+        table = {
+            "Alpha VA": [1.0, 0.0],
+            "Alpha VB": [0.8, 0.6],
+            "Alpha VC": [0.0, 1.0],
+            "Alpha VD": [-1.0, 0.0],
+            "query": [1.0, 0.0],
+        }
+
+        def vector_for(text: str) -> list[float]:
+            for marker, vec in table.items():
+                if marker in text:
+                    return vec
+            raise AssertionError(f"no vector fixture for {text!r}")
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            vectors.sweep(Kb(self.root))
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = vectors.search(self.root, "query", n=3)
+
+        self.assertEqual(code, 0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 3)
+        order = [line.split("\t")[1] for line in lines]
+        self.assertEqual(order, ["va.md", "vb.md", "vc.md"])  # vd excluded, least similar
+
+    def test_kind_is_a_true_prefilter_not_a_lossy_postfilter(self) -> None:
+        self._write_page("story-a", "MARK Story A", kind="story")
+        self._write_page("story-b", "MARK Story B", kind="story")
+        self._write_page("summary-a", "MARK Summary A", kind="summary")
+        self._write_page("summary-b", "MARK Summary B", kind="summary")
+
+        table = {
+            "MARK Story A": [1.0, 0.0],
+            "MARK Story B": [0.9962, 0.0872],
+            "MARK Summary A": [0.7071, 0.7071],
+            "MARK Summary B": [0.6428, 0.7660],
+            "query": [1.0, 0.0],
+        }
+
+        def vector_for(text: str) -> list[float]:
+            for marker, vec in table.items():
+                if marker in text:
+                    return vec
+            raise AssertionError(f"no vector fixture for {text!r}")
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            vectors.sweep(Kb(self.root))
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = vectors.search(self.root, "query", n=2, kind="summary")
+
+        self.assertEqual(code, 0)
+        lines = out.getvalue().splitlines()
+        # A post-filter (kind outside vec0) would let the two nearer
+        # story pages consume the k=2 budget and return zero summaries.
+        self.assertEqual(len(lines), 2)
+        names = {line.split("\t")[1] for line in lines}
+        self.assertEqual(names, {"summary-a.md", "summary-b.md"})
+
+    def test_kind_matching_nothing_returns_no_rows(self) -> None:
+        self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            vectors.sweep(Kb(self.root))
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = vectors.search(self.root, "north", n=5, kind="nothing-matches-this")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_search_on_empty_wiki_returns_no_rows_no_refusal(self) -> None:
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = vectors.search(self.root, "anything", n=5)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+
+
+class DedupVectorSeamTest(unittest.TestCase):
+    """The live defect fix: a vector neighbour with zero shared
+    identifiers must survive `candidates()` and reach `judge`, but only
+    when a dedup model is configured (the gate)."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / ".kb"
+        for sub in ("wiki", "sources"):
+            (self.root / sub).mkdir(parents=True)
+        (self.root / "log.md").write_text("# log\n")
+        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
+        env_cm.__enter__()
+        self.addCleanup(env_cm.__exit__, None, None, None)
+
+    def _write_config(self, url: str, with_dedup_model: bool) -> None:
+        dedup_line = 'dedup = "judge"\n' if with_dedup_model else ""
+        (self.root / "config.toml").write_text(
+            '[models]\nsummarize = "cheap"\nembed = "embed-model"\n'
+            + dedup_line
+            + f'\n[endpoint]\nurl = "{url}"\n\n[identifiers.tag]\n'
+        )
+
+    def _seed(self) -> tuple[str, Path]:
+        story_path = self.root / "wiki" / "story-other.md"
+        story_path.write_text(
+            render_frontmatter(
+                {"kind": "story", "title": "MARKER Story", "identifiers": ["tag:zzz"], "members": []},
+                "An old story body.",
+            )
+        )
+        digest = "b" * 64
+        (self.root / "sources" / f"{digest}.md").write_text("summary source text")
+        summary_path = self.root / "wiki" / "summary-new.md"
+        summary_path.write_text(
+            render_frontmatter(
+                {
+                    "kind": "summary",
+                    "title": "MARKER Summary",
+                    "source": digest,
+                    "identifiers": ["tag:unrelated"],
+                },
+                "A fresh abstract.",
+            )
+        )
+        return digest, story_path
+
+    def _fields(self, path: Path) -> dict:
+        from llmwiki.core import parse_frontmatter
+
+        return parse_frontmatter(path.read_text())[0]
+
+    def test_vector_only_candidate_joins_when_dedup_model_configured(self) -> None:
+        digest, _story_path = self._seed()
+
+        def vector_for(text: str) -> list[float]:
+            return [1.0, 0.0] if "MARKER" in text else [0.0, 1.0]
+
+        with FakeEndpoint(_respond(vector_for, chat_reply="story-other\n")) as fake:
+            self._write_config(fake.url, with_dedup_model=True)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)  # both pages get the same MARKER vector: similarity 1.0
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = dedup.run(self.root, [digest])
+
+        self.assertEqual(code, 0)
+        # identifiers share nothing ("zzz" vs "unrelated"); only the
+        # vector seam can have produced this join.
+        self.assertEqual(self._fields(self.root / "wiki" / "summary-new.md")["story"], "story-other")
+        self.assertIn(digest, self._fields(self.root / "wiki" / "story-other.md")["members"])
+
+    def test_gate_blocks_vector_candidate_with_no_dedup_model(self) -> None:
+        digest, _story_path = self._seed()
+
+        def vector_for(text: str) -> list[float]:
+            return [1.0, 0.0] if "MARKER" in text else [0.0, 1.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url, with_dedup_model=False)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = dedup.run(self.root, [digest])
+
+        self.assertEqual(code, 0)
+        # No dedup model: the gate keeps the seam off, exactly today's
+        # deterministic-fallback behaviour -- a singleton, not a join.
+        self.assertNotEqual(self._fields(self.root / "wiki" / "summary-new.md")["story"], "story-other")
+        self.assertNotIn(digest, self._fields(self.root / "wiki" / "story-other.md")["members"])
+        self.assertFalse(any(r.path == "/chat/completions" for r in fake.requests))
+
+
+if __name__ == "__main__":
+    unittest.main()

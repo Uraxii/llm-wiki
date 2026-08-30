@@ -13,7 +13,7 @@ from pathlib import Path
 
 from llmwiki.core import Kb, append_log_entry, atomic_write_text
 from llmwiki.lint import lint_pages, select_pages
-from llmwiki import dedup, ingest, summarize
+from llmwiki import dedup, ingest, summarize, vectors
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_SKELETON = REPO_ROOT / "docs" / "design" / "SCHEMA.skeleton.md"
@@ -24,6 +24,7 @@ CONFIG_TOML = """\
 # One model per paid pipeline step, read from this file at run time.
 [models]
 summarize = "google/gemini-2.5-flash"
+embed = "openai/text-embedding-3-small"
 
 # The API endpoint that serves the models above.
 # [endpoint]
@@ -136,6 +137,51 @@ def cmd_dedup(root: Path, args: list[str]) -> int:
     return dedup.run(root, args or None)
 
 
+def cmd_embed(root: Path, args: list[str]) -> int:
+    paths = [Path(a) for a in args] if args else None
+    return vectors.run(root, paths)
+
+
+def cmd_status(root: Path, args: list[str]) -> int:
+    if args:
+        print(_usage(), file=sys.stderr)
+        return 2
+    return vectors.status(root)
+
+
+def cmd_search(root: Path, args: list[str]) -> int:
+    query_parts: list[str] = []
+    n = vectors.TOP_K
+    kind: str | None = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("-n", "--kind"):
+            if index + 1 >= len(args):
+                print(_usage(), file=sys.stderr)
+                return 2
+            value = args[index + 1]
+            if arg == "-n":
+                try:
+                    n = int(value)
+                except ValueError:
+                    print(_usage(), file=sys.stderr)
+                    return 2
+                if n < 1:
+                    print(_usage(), file=sys.stderr)
+                    return 2
+            else:
+                kind = value
+            index += 2
+        else:
+            query_parts.append(arg)
+            index += 1
+    if not query_parts:
+        print(_usage(), file=sys.stderr)
+        return 2
+    return vectors.search(root, " ".join(query_parts), n=n, kind=kind)
+
+
 Verb = Callable[[Path, list[str]], int]
 VERBS: dict[str, tuple[Verb, str]] = {
     "init": (cmd_init, "init            create a kb at the resolved root"),
@@ -151,6 +197,15 @@ VERBS: dict[str, tuple[Verb, str]] = {
         "dedup [--rebuild] [<hash>...]  join or start a story per summary",
     ),
     "lint": (cmd_lint, "lint [<page>...] check wiki pages, one line per finding"),
+    "embed": (
+        cmd_embed,
+        "embed [<page>...]  write a vector per wiki page, skipping current ones",
+    ),
+    "status": (cmd_status, "status          pages without a vector, sources without a summary"),
+    "search": (
+        cmd_search,
+        "search <query> [-n N] [--kind K]  nearest pages, one line each",
+    ),
 }
 
 

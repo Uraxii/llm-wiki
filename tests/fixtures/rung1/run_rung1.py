@@ -9,8 +9,8 @@ endpoint through the CLI subprocess; this script makes no HTTP calls of its
 own.
 
 Run:
-    LLM_WIKI_API_KEY=... LLM_WIKI_ENDPOINT_URL=... python3 run_rung1.py
-    LLM_WIKI_API_KEY=... LLM_WIKI_ENDPOINT_URL=... python3 run_rung1.py --vocab
+    LLM_WIKI_API_KEY=... LLM_WIKI_ENDPOINT_URL=... .venv/bin/python run_rung1.py
+    LLM_WIKI_API_KEY=... LLM_WIKI_ENDPOINT_URL=... .venv/bin/python run_rung1.py --vocab
 
 `--vocab` also runs the vocab-appendix pass (phase 10's second half): it
 resummarizes every source and rebuilds dedup, doubling the paid calls.
@@ -103,7 +103,7 @@ def replace_file(path: Path, content: str, announce: bool = True) -> None:
 
 
 def run_cli(kb_root: Path, label: str, verb_args: list[str]) -> subprocess.CompletedProcess:
-    argv = ["python3", "-m", "llmwiki", "--kb", str(kb_root), *verb_args]
+    argv = [sys.executable, "-m", "llmwiki", "--kb", str(kb_root), *verb_args]
     print(f"=== STEP {next(STEP)}: {label}")
     print(f"$ {shlex.join(argv)}")
     env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}

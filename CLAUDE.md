@@ -5,11 +5,17 @@ This file provides instructions and context for AI coding agents working on this
 ## Build & Test
 
 Python 3.14, standard library only, with `sqlite-vec` the single measured
-exception in phase 13. See the Dependencies rule below.
+exception. See the Dependencies rule below.
+
+**Use `.venv/bin/python`, not bare `python3`.** From phase 13 the whole CLI
+requires `sqlite-vec`: `llmwiki/vectors.py` imports it at module level and
+`ingest` sweeps vectors on every run, so bare `python3 -m llmwiki` raises
+`ModuleNotFoundError` and so does the suite. Any `[jobs]` entry on an OS
+scheduler must name the venv interpreter.
 
 ```bash
-python3 -m unittest discover tests
-python3 -m compileall -q llmwiki
+.venv/bin/python -m unittest discover tests
+.venv/bin/python -m compileall -q llmwiki
 ```
 
 The suite must be hermetic. Run it a second time with a dead proxy and get
@@ -17,7 +23,7 @@ the identical result; anything else means a module reached the real network:
 
 ```bash
 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 \
-  python3 -m unittest discover tests 2>&1 1>/dev/null | tail -4
+  .venv/bin/python -m unittest discover tests 2>&1 1>/dev/null | tail -4
 ```
 
 Note the redirect: `unittest` reports on stderr, and `summarize` prints its
@@ -84,8 +90,10 @@ boxes every element through the iterator protocol while `sqlite-vec` runs SIMD
 over the raw blob. It lives in a git-ignored `.venv` on 3.14, because PEP 668
 refuses `pip install --user` on this Homebrew Python; do not reach for
 `--break-system-packages`. Rebuild with `uv venv --python 3.14 .venv` and
-`uv pip install --python .venv/bin/python sqlite-vec`. Phase 13 runs its suite
-under `.venv/bin/python`; every earlier phase uses bare `python3`.
+`uv pip install --python .venv/bin/python sqlite-vec`. From phase 13 the
+whole project runs under `.venv/bin/python`, not just its suite: a degrade
+path was rejected because it would let `ingest` skip embedding silently and
+let `search` claim the wiki has nothing on a subject it has pages for.
 
 If any other task seems to need a package, that is a signal the task is too
 ambitious for this PoC. Cut the task, do not add the package.
