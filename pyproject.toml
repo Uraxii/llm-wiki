@@ -1,14 +1,14 @@
 [project]
-name = "llm-wiki"
+name = "llmwiki"
 version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = ["readability-lxml", "lxml"]
+requires-python = ">=3.14"
+dependencies = ["sqlite-vec"]
 
 [project.optional-dependencies]
 test = ["pytest"]
 
 [project.scripts]
-llm-wiki = "llm_wiki:main"
+llmwiki = "llmwiki.cli:main"
 
 [build-system]
 requires = ["hatchling"]
