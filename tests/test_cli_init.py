@@ -51,7 +51,7 @@ class InitTest(TmpDirTest):
         self.run_main(["--kb", str(self.kb), "init"])
         config = load_config(self.kb)
         self.assertEqual(
-            config["models"]["summarize"], "deepseek/deepseek-v3.2"
+            config["models"]["summarize"], "google/gemini-2.5-flash"
         )
 
     def test_schema_matches_skeleton_bytes(self) -> None:

@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -280,10 +280,14 @@ class DedupTest(unittest.TestCase):
         digest = self._digest("push source text")
         self._write_summary("summary-file", digest, "Push Widget", ["tag:shared-thing"])
 
-        code, out = _run_quiet(self.root)
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        with redirect_stdout(out_buf), redirect_stderr(err_buf):
+            code = dedup.run(self.root, None)
+        out, err = out_buf.getvalue(), err_buf.getvalue()
 
         self.assertEqual(code, 0)
-        push_lines = [line for line in out.splitlines() if line.startswith("push\t")]
+        self.assertNotIn("push\t", out)
+        push_lines = [line for line in err.splitlines() if line.startswith("push\t")]
         self.assertEqual(len(push_lines), 1)
         self.assertIn("agent-file.md", push_lines[0])
         self.assertIn("tag:shared-thing", push_lines[0])
@@ -366,15 +370,25 @@ class DedupTest(unittest.TestCase):
             "summary-file", digest, "Push Widget", ["tag:shared-thing"], fetched="2024-01-01T00:00:00Z"
         )
 
-        code, out = _run_quiet(self.root)
+        err_buf = io.StringIO()
+        with redirect_stderr(err_buf):
+            code, out = _run_quiet(self.root)
         self.assertEqual(code, 0)
-        self.assertTrue(any(line.startswith("push\t") for line in out.splitlines()))
+        self.assertFalse(any(line.startswith("push\t") for line in out.splitlines()))
+        self.assertTrue(
+            any(line.startswith("push\t") for line in err_buf.getvalue().splitlines())
+        )
         log_before = (self.root / "log.md").read_text()
         self.assertIn("## [push]", log_before)
 
-        code, out = _rebuild_quiet(self.root)
+        err_buf = io.StringIO()
+        with redirect_stderr(err_buf):
+            code, out = _rebuild_quiet(self.root)
         self.assertEqual(code, 0)
         self.assertFalse(any(line.startswith("push\t") for line in out.splitlines()))
+        self.assertFalse(
+            any(line.startswith("push\t") for line in err_buf.getvalue().splitlines())
+        )
 
         new_log = (self.root / "log.md").read_text()[len(log_before) :]
         self.assertNotIn("## [push]", new_log)

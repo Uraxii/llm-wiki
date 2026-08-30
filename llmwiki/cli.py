@@ -23,7 +23,7 @@ GLOBAL_STORE = Path.home() / ".local" / "share" / "agent-kb"
 CONFIG_TOML = """\
 # One model per paid pipeline step, read from this file at run time.
 [models]
-summarize = "deepseek/deepseek-v3.2"
+summarize = "google/gemini-2.5-flash"
 
 # The API endpoint that serves the models above.
 # [endpoint]
