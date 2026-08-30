@@ -463,6 +463,37 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(len(pages), 1)
         self.assertNotIn("dropped", (self.root / "log.md").read_text())
 
+    def test_bare_identifiers_key_is_kept_as_empty_list(self) -> None:
+        # agent-kb-79x: a fresh kb declares no identifier vocabulary, and
+        # a real model replied with a bare `identifiers:` key rather than
+        # `identifiers: []`. `parse_frontmatter` reads that as the empty
+        # string, not a list; it must still be kept as an empty list.
+        digest = self._store_source()
+        reply = (
+            "---\n"
+            "title: No Vocabulary Widget\n"
+            "identifiers:\n"
+            "---\n\n"
+            "Abstract text.\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 0)
+        pages = list((self.root / "wiki").glob("*.md"))
+        self.assertEqual(len(pages), 1)
+        fields, _body = parse_frontmatter(pages[0].read_text())
+        # A bare key round-trips as the empty string, same as any other
+        # page core.as_list already reads as an empty list (see its
+        # docstring); the page is kept, which is the whole fix.
+        self.assertEqual(fields["identifiers"], "")
+        self.assertNotIn("dropped", (self.root / "log.md").read_text())
+
     def test_correctly_indented_identifiers_list_is_kept_as_list(self) -> None:
         digest = self._store_source()
         reply = (
@@ -512,6 +543,37 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(len(pages), 1)
         fields, _body = parse_frontmatter(pages[0].read_text())
         self.assertEqual(fields["title"], "Leading Newline Widget")
+
+
+class DropReasonTest(unittest.TestCase):
+    """`_drop_reason` called directly: the acceptance rule for
+    `identifiers`, without a model or the fake endpoint in the way."""
+
+    def test_absent_identifiers_key_drops(self) -> None:
+        parsed = ({"title": "Widget"}, "body")
+        self.assertEqual(
+            summarize._drop_reason(parsed, "Widget"),
+            "identifiers missing or not a list",
+        )
+
+    def test_identifiers_list_with_blank_item_drops(self) -> None:
+        parsed = ({"title": "Widget", "identifiers": ["isbn:1", ""]}, "body")
+        self.assertEqual(summarize._drop_reason(parsed, "Widget"), "blank identifier")
+
+    def test_bare_identifiers_value_is_kept(self) -> None:
+        parsed = ({"title": "Widget", "identifiers": ""}, "body")
+        self.assertIsNone(summarize._drop_reason(parsed, "Widget"))
+
+    def test_empty_identifiers_list_is_kept(self) -> None:
+        parsed = ({"title": "Widget", "identifiers": []}, "body")
+        self.assertIsNone(summarize._drop_reason(parsed, "Widget"))
+
+    def test_non_empty_scalar_identifiers_drops(self) -> None:
+        parsed = ({"title": "Widget", "identifiers": "isbn:1"}, "body")
+        self.assertEqual(
+            summarize._drop_reason(parsed, "Widget"),
+            "identifiers missing or not a list",
+        )
 
 
 class BuiltInPromptTest(unittest.TestCase):
