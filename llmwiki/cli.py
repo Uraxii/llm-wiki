@@ -20,12 +20,9 @@ SCHEMA_SKELETON = REPO_ROOT / "docs" / "design" / "SCHEMA.skeleton.md"
 GLOBAL_STORE = Path.home() / ".local" / "share" / "agent-kb"
 
 CONFIG_TOML = """\
-# Model used for each paid pipeline step. Only "summarize" is live for
-# now; embed and dedup are commented out until later phases add them.
+# One model per paid pipeline step, read from this file at run time.
 [models]
 summarize = "deepseek/deepseek-v3.2"
-# embed = "openai/text-embedding-3-small"
-# dedup = "..."
 
 # The API endpoint that serves the models above.
 # [endpoint]
