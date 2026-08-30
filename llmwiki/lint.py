@@ -31,7 +31,7 @@ class _Context(NamedTuple):
     config: dict
     kind_by_key: dict[str, str]  # page stem and title slug -> kind
     summary_hashes: set[str]  # source hashes claimed by a summary page
-    source_hashes: set[str]  # hashes with a file under sources/
+    source_hashes: set[str]  # hashes with a byte file under sources/
 
 
 def _as_list(value: FrontmatterValue | None) -> list[str]:
@@ -141,7 +141,9 @@ def _build_context(kb: Kb, parsed_by_path: dict[Path, ParsedPage]) -> _Context:
             kind_by_key[slugify(str(title))] = kind
         if kind == "summary" and fields.get("source"):
             summary_hashes.add(str(fields["source"]))
-    source_hashes = {p.stem for p in kb.sources.glob("*") if p.is_file()}
+    source_hashes = {
+        p.stem for p in kb.sources.glob("*") if p.is_file() and p.suffix != ".toml"
+    }
     return _Context(kb.config, kind_by_key, summary_hashes, source_hashes)
 
 
