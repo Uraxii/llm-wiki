@@ -116,6 +116,11 @@ def cmd_summarize(root: Path, args: list[str]) -> int:
 
 
 def cmd_ingest(root: Path, args: list[str]) -> int:
+    if "--job" in args:
+        if len(args) != 2 or args[0] != "--job":
+            print(_usage(), file=sys.stderr)
+            return 2
+        return ingest.run_job(root, args[1])
     if not args:
         print(_usage(), file=sys.stderr)
         return 2
@@ -137,7 +142,8 @@ VERBS: dict[str, tuple[Verb, str]] = {
     "where": (cmd_where, "where           print the resolved kb root"),
     "ingest": (
         cmd_ingest,
-        "ingest <url|path>... | -   store sources and run the pipeline",
+        "ingest <url|path>... | - | --job <name>   store sources and run the "
+        "pipeline, or run one declared job",
     ),
     "summarize": (cmd_summarize, "summarize [<hash>...]  write a summary page per source"),
     "dedup": (

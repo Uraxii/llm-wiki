@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Namespaced RSS Feed</title>
+    <item>
+      <title>Namespaced Post</title>
+      <link>https://example.test/rss-ns/first</link>
+      <content:encoded>Extra namespaced element that must not confuse dispatch.</content:encoded>
+    </item>
+  </channel>
+</rss>

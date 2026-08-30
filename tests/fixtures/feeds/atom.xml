@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom Feed</title>
+  <entry>
+    <title>First Entry</title>
+    <link rel="self" href="https://example.test/atom/first/self"/>
+    <link rel="alternate" href="https://example.test/atom/first"/>
+  </entry>
+  <entry>
+    <title>Second Entry</title>
+    <link href="https://example.test/atom/second"/>
+  </entry>
+</feed>

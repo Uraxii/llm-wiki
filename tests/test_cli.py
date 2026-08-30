@@ -123,6 +123,21 @@ class VerbTableTest(unittest.TestCase):
         result = self._run(["ingest"])
         self.assertIn("url", result.stderr)
 
+    def test_ingest_job_flag_mixed_with_a_url_is_rejected(self) -> None:
+        result = self._run(["ingest", "--job", "myjob", "https://example.test"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage:", result.stderr)
+
+    def test_ingest_job_flag_with_no_name_is_rejected(self) -> None:
+        result = self._run(["ingest", "--job"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage:", result.stderr)
+
+    def test_ingest_unknown_job_name_exits_2(self) -> None:
+        result = self._run(["ingest", "--job", "no-such-job"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("[jobs.no-such-job]", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

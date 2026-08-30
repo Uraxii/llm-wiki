@@ -8,8 +8,9 @@ import tempfile
 import threading
 import unittest
 import unittest.mock
+from collections.abc import Callable
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -54,6 +55,64 @@ class _FetchServer:
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)
+
+
+class _RoutedServer:
+    """A local http server routing GET by path through a table, so one
+    server can serve a feed document and its item pages together.
+    Copies test_fetch.py's ThreadingHTTPServer harness (fake_endpoint.py
+    only answers JSON on POST, the wrong shape for a feed server)."""
+
+    def __init__(self) -> None:
+        self.routes: dict[str, Callable[[BaseHTTPRequestHandler], None]] = {}
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                route = outer.routes.get(self.path)
+                if route is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                route(self)
+
+            def log_message(self, fmt: str, *args) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self._server.server_port}"
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
+        self._thread.start()
+
+    def route(
+        self, path: str, body: bytes, content_type: str = "text/plain"
+    ) -> None:
+        def handler(h: BaseHTTPRequestHandler) -> None:
+            h.send_response(200)
+            h.send_header("Content-Type", content_type)
+            h.send_header("Content-Length", str(len(body)))
+            h.end_headers()
+            h.wfile.write(body)
+
+        self.routes[path] = handler
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def _rss(items: list[tuple[str, str]]) -> bytes:
+    body = "".join(
+        f"<item><title>{title}</title><link>{url}</link></item>"
+        for url, title in items
+    )
+    return f"<rss version='2.0'><channel>{body}</channel></rss>".encode()
 
 
 @contextmanager
@@ -445,6 +504,259 @@ class IngestTest(unittest.TestCase):
         self.assertEqual(records, [])
         log = (self.root / "log.md").read_text()
         self.assertIn("## [ingest] manual 0 new, 0 exists, 0 failed", log)
+
+
+def _run_job(root, name):
+    """ingest.run_job, returning (code, records), same shape as `_run`."""
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = ingest.run_job(root, name)
+    return code, _records(out.getvalue())
+
+
+class RunJobTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / ".kb"
+        for sub in ("wiki", "sources"):
+            (self.root / sub).mkdir(parents=True)
+        (self.root / "log.md").write_text("# log\n")
+        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
+        env_cm.__enter__()
+        self.addCleanup(env_cm.__exit__, None, None, None)
+
+    def _write_config(self, endpoint_url: str, jobs_toml: str = "") -> None:
+        (self.root / "config.toml").write_text(
+            '[models]\nsummarize = "cheap"\n\n'
+            f'[endpoint]\nurl = "{endpoint_url}"\n\n' + jobs_toml
+        )
+
+    def _server(self) -> _RoutedServer:
+        server = _RoutedServer()
+        self.addCleanup(server.close)
+        return server
+
+    def _resolved(self):
+        return unittest.mock.patch(
+            "llmwiki.fetch._resolved_addresses", return_value=[PUBLIC_ADDRESS]
+        )
+
+    def test_unknown_job_name_errors_naming_the_config_key_and_exits_2(self) -> None:
+        self._write_config("http://unused")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = ingest.run_job(self.root, "nope")
+
+        self.assertEqual(code, 2)
+        self.assertIn("[jobs.nope]", err.getvalue())
+        self.assertEqual((self.root / "log.md").read_text(), "# log\n")
+
+    def test_feed_and_urls_both_present_is_an_error(self) -> None:
+        self._write_config(
+            "http://unused",
+            '[jobs.both]\nfeed = "http://x/feed"\nurls = ["http://x/a"]\n',
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = ingest.run_job(self.root, "both")
+
+        self.assertEqual(code, 2)
+        self.assertIn("[jobs.both]", err.getvalue())
+
+    def test_neither_feed_nor_urls_is_an_error(self) -> None:
+        self._write_config("http://unused", '[jobs.neither]\nmode = "partial"\n')
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = ingest.run_job(self.root, "neither")
+
+        self.assertEqual(code, 2)
+        self.assertIn("[jobs.neither]", err.getvalue())
+
+    def test_unknown_mode_is_an_error_naming_the_value(self) -> None:
+        self._write_config(
+            "http://unused",
+            '[jobs.bad]\nurls = ["http://x/a"]\nmode = "weird"\n',
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = ingest.run_job(self.root, "bad")
+
+        self.assertEqual(code, 2)
+        self.assertIn("weird", err.getvalue())
+
+    def test_partial_mode_skips_a_seen_url_even_carrying_a_tracking_param(self) -> None:
+        server = self._server()
+        item_url = server.url + "/item1"
+        server.route("/item1", b"Item one body.")
+        server.route(
+            "/feed",
+            _rss([(item_url + "?utm_source=newsletter", "Item One")]),
+            "application/rss+xml",
+        )
+
+        def respond(_path, _body):
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake, self._resolved():
+            self._write_config(
+                fake.url,
+                f'[jobs.myjob]\nfeed = "{server.url}/feed"\nmode = "partial"\n',
+            )
+            seed_code, seed_records = _run(self.root, [item_url])
+            self.assertEqual(seed_code, 0)
+            self.assertEqual(seed_records[0][1], "new")
+
+            code, records = _run_job(self.root, "myjob")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(records, [])
+        log = (self.root / "log.md").read_text()
+        self.assertIn("## [ingest] myjob 0 new, 0 exists, 0 failed", log)
+
+    def test_full_mode_refetches_a_seen_item_and_reports_exists(self) -> None:
+        server = self._server()
+        item_url = server.url + "/item1"
+        server.route("/item1", b"Item one body.")
+        server.route("/feed", _rss([(item_url, "Item One")]), "application/rss+xml")
+
+        def respond(_path, _body):
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake, self._resolved():
+            self._write_config(
+                fake.url, f'[jobs.myjob]\nfeed = "{server.url}/feed"\nmode = "full"\n'
+            )
+            seed_code, seed_records = _run(self.root, [item_url])
+            digest = seed_records[0][0]
+
+            code, records = _run_job(self.root, "myjob")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 1)
+        digest2, status, _url = records[0]
+        self.assertEqual(digest2, digest)
+        self.assertEqual(status, "exists")
+        log = (self.root / "log.md").read_text()
+        self.assertIn("## [ingest] myjob 0 new, 1 exists, 0 failed", log)
+
+    def test_job_name_reaches_the_provenance_sidecar_and_the_closing_log_line(
+        self,
+    ) -> None:
+        server = self._server()
+        item_url = server.url + "/item1"
+        server.route("/item1", b"Item one body.")
+        server.route("/feed", _rss([(item_url, "Item One")]), "application/rss+xml")
+
+        def respond(_path, _body):
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake, self._resolved():
+            self._write_config(
+                fake.url,
+                f'[jobs.myjob]\nfeed = "{server.url}/feed"\nmode = "partial"\n',
+            )
+            code, records = _run_job(self.root, "myjob")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 1)
+        digest, status, _url = records[0]
+        self.assertEqual(status, "new")
+        provenance = sources.read_provenance(Kb(self.root), digest)
+        self.assertEqual(provenance["job"], "myjob")
+        log = (self.root / "log.md").read_text()
+        self.assertIn("## [ingest] myjob 1 new, 0 exists, 0 failed", log)
+
+    def test_urls_list_job_ingests_each_literal_url(self) -> None:
+        server = self._server()
+        server.route("/item1", b"Item one body.")
+        server.route("/item2", b"Item two body.")
+        item1 = server.url + "/item1"
+        item2 = server.url + "/item2"
+
+        def respond(_path, _body):
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake, self._resolved():
+            self._write_config(
+                fake.url,
+                f'[jobs.myjob]\nurls = ["{item1}", "{item2}"]\nmode = "partial"\n',
+            )
+            code, records = _run_job(self.root, "myjob")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 2)
+        self.assertEqual({r[1] for r in records}, {"new"})
+
+    def test_empty_urls_list_job_is_a_clean_no_op(self) -> None:
+        self._write_config("http://unused", '[jobs.myjob]\nurls = []\nmode = "partial"\n')
+
+        code, records = _run_job(self.root, "myjob")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(records, [])
+        log = (self.root / "log.md").read_text()
+        self.assertIn("## [ingest] myjob 0 new, 0 exists, 0 failed", log)
+
+    def test_a_bare_string_urls_typo_is_read_as_one_url_not_one_per_character(
+        self,
+    ) -> None:
+        server = self._server()
+        item_url = server.url + "/item1"
+        server.route("/item1", b"Item one body.")
+
+        def respond(_path, _body):
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake, self._resolved():
+            self._write_config(
+                fake.url, f'[jobs.myjob]\nurls = "{item_url}"\nmode = "partial"\n'
+            )
+            code, records = _run_job(self.root, "myjob")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0][1], "new")
+
+    def test_a_non_string_element_in_urls_errors_naming_the_config_key(self) -> None:
+        self._write_config(
+            "http://unused", '[jobs.myjob]\nurls = ["http://x/a", 7]\n'
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = ingest.run_job(self.root, "myjob")
+
+        self.assertEqual(code, 2)
+        self.assertIn("[jobs.myjob]", err.getvalue())
+        self.assertEqual((self.root / "log.md").read_text(), "# log\n")
+
+    def test_a_list_valued_feed_errors_naming_the_config_key_no_traceback(self) -> None:
+        self._write_config(
+            "http://unused", '[jobs.myjob]\nfeed = ["http://x/feed"]\n'
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = ingest.run_job(self.root, "myjob")
+
+        self.assertEqual(code, 2)
+        self.assertIn("[jobs.myjob]", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.assertEqual((self.root / "log.md").read_text(), "# log\n")
+
+    def test_unreachable_feed_url_fails_the_job_with_exactly_one_log_line(self) -> None:
+        self._write_config(
+            "http://unused",
+            '[jobs.myjob]\nfeed = "http://127.0.0.1/blocked"\nmode = "partial"\n',
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = ingest.run_job(self.root, "myjob")
+
+        self.assertEqual(code, 1)
+        self.assertIn("127.0.0.1/blocked", err.getvalue())
+        log = (self.root / "log.md").read_text()
+        self.assertEqual(log.count("## [ingest]"), 1)
+        self.assertIn("127.0.0.1/blocked", log)
 
 
 if __name__ == "__main__":

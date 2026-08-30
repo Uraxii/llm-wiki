@@ -70,7 +70,7 @@ def clean_url(url: str) -> str:
     )
 
 
-def fetch(url: str) -> tuple[str, str, bytes]:
+def fetch(url: str, accepted: frozenset[str] = ACCEPTED_TYPES) -> tuple[str, str, bytes]:
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         _require_public(current)
@@ -78,7 +78,7 @@ def fetch(url: str) -> tuple[str, str, bytes]:
         try:
             with _OPENER.open(request, timeout=TIMEOUT_SEC) as response:
                 kind = response.headers.get_content_type()
-                if kind not in ACCEPTED_TYPES:
+                if kind not in accepted:
                     raise FetchError(f"content type {kind!r} is not accepted")
                 # Built from the parsed pieces rather than the raw header,
                 # and flattened: this value is written into the provenance

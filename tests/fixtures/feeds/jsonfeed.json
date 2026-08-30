@@ -1,0 +1,16 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Example JSON Feed",
+  "items": [
+    {
+      "id": "1",
+      "url": "https://example.test/jsonfeed/first",
+      "title": "First Item"
+    },
+    {
+      "id": "2",
+      "url": "https://example.test/jsonfeed/second",
+      "title": "Second Item"
+    }
+  ]
+}
