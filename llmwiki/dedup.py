@@ -364,6 +364,76 @@ def _ordered(digests: list[str], summaries: dict[str, Page]) -> list[str]:
     return sorted(digests, key=key)
 
 
+def _replay(
+    kb: Kb,
+    targets: list[str],
+    summaries: dict[str, Page],
+    stories: dict[Path, Story],
+    agent_pages: list[Page],
+) -> int:
+    """Place a story for each digest in `targets`, in order, accumulating
+    into `stories`. Returns the number placed; fewer than len(targets)
+    means something was dropped or a model error cut the run short."""
+    placed = 0
+    for digest in targets:
+        summary = summaries.get(digest)
+        if summary is None:
+            append_log_entry(kb.log, "dedup", f"{digest}: dropped (no summary page for source)")
+            continue
+        try:
+            result = _place_summary(kb, digest, summary, summaries, stories)
+        except ModelError as exc:
+            print(f"llmwiki: dedup: {exc}", file=sys.stderr)
+            break
+        if result is None:
+            continue
+        story, action = result
+        stories[story.path] = story
+        append_log_entry(kb.log, "dedup", f"{digest} -> {story.path.stem} ({action})")
+        push(kb, summary, agent_pages)
+        placed += 1
+
+    return placed
+
+
+def rebuild(root: Path) -> int:
+    """Discard every story page and replay every summary from scratch
+    (decision `.5`): the repair for a placement a lost race or ordering
+    got wrong. Returns 1 if anything was dropped on replay, else 0."""
+    kb = Kb(root)
+    summaries, stories, _agent_pages = _load_wiki(kb)
+
+    for story in stories.values():
+        story.path.unlink()
+
+    for summary in summaries.values():
+        # A summary that never carried `story:` must come back off this
+        # loop byte-identical, so only a non-None pop triggers a write.
+        removed = summary.fields.pop("story", None)
+        if removed is not None:
+            atomic_write_text(
+                summary.path, render_frontmatter(summary.fields, summary.body)
+            )
+
+    targets = _ordered(list(summaries), summaries)
+    print(f"dedup: {len(targets)} planned")
+
+    # `rebuilt` starts empty, never seeded from `stories`: every loaded
+    # story page was just deleted above, so there is nothing to carry
+    # forward.
+    rebuilt: dict[Path, Story] = {}
+    # `[]`, not `_agent_pages`: this IS decision `.22`, push does not
+    # run at rebuild. Every summary being replayed here already had its
+    # push warning emitted the first time it was placed; firing it
+    # again on every rebuild would just be noise.
+    placed = _replay(kb, targets, summaries, rebuilt, [])
+
+    append_log_entry(
+        kb.log, "dedup", f"rebuild {placed} summaries into {len(rebuilt)} stories"
+    )
+    return 0 if placed == len(targets) else 1
+
+
 def run(root: Path, digests: list[str] | None) -> int:
     """Place a story for each of `digests`, or every summary lacking a
     `story:` field when `None`, in `(fetched, hash)` order. Returns 1 if
@@ -372,25 +442,5 @@ def run(root: Path, digests: list[str] | None) -> int:
     summaries, stories, agent_pages = _load_wiki(kb)
     targets = _ordered(_target_digests(digests, summaries), summaries)
     print(f"dedup: {len(targets)} planned")
-
-    dropped = False
-    for digest in targets:
-        summary = summaries.get(digest)
-        if summary is None:
-            append_log_entry(kb.log, "dedup", f"{digest}: dropped (no summary page for source)")
-            dropped = True
-            continue
-        try:
-            result = _place_summary(kb, digest, summary, summaries, stories)
-        except ModelError as exc:
-            print(f"llmwiki: dedup: {exc}", file=sys.stderr)
-            return 1
-        if result is None:
-            dropped = True
-            continue
-        story, action = result
-        stories[story.path] = story
-        append_log_entry(kb.log, "dedup", f"{digest} -> {story.path.stem} ({action})")
-        push(kb, summary, agent_pages)
-
-    return 1 if dropped else 0
+    placed = _replay(kb, targets, summaries, stories, agent_pages)
+    return 0 if placed == len(targets) else 1

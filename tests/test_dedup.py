@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import parse_frontmatter, render_frontmatter  # noqa: E402
 from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
-from llmwiki import dedup  # noqa: E402
+from llmwiki import cli, dedup  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
 
 DEFAULT_CONFIG = '[models]\nsummarize = "cheap"\n\n[identifiers.tag]\n'
@@ -26,6 +26,13 @@ def _run_quiet(root, digests=None):
     buried in the unittest summary; returns `(code, stdout)`."""
     with redirect_stdout(io.StringIO()) as buf:
         code = dedup.run(root, digests)
+    return code, buf.getvalue()
+
+
+def _rebuild_quiet(root):
+    """`dedup.rebuild`, mirroring `_run_quiet`."""
+    with redirect_stdout(io.StringIO()) as buf:
+        code = dedup.rebuild(root)
     return code, buf.getvalue()
 
 
@@ -298,6 +305,107 @@ class DedupTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self._fields("story-a")["members"], [digest])
         self.assertEqual(self._fields("story-b")["members"], [])
+
+    # -- rebuild ----------------------------------------------------
+
+    def test_rebuild_twice_is_stable(self) -> None:
+        digest_a = self._digest("rebuild source one")
+        self._write_summary(
+            "summary-a", digest_a, "Widget One", ["tag:multi"], fetched="2024-01-01T00:00:00Z"
+        )
+        digest_b = self._digest("rebuild source two")
+        self._write_summary(
+            "summary-b", digest_b, "Widget Two", ["tag:multi"], fetched="2024-01-02T00:00:00Z"
+        )
+        code, _out = _run_quiet(self.root)
+        self.assertEqual(code, 0)
+
+        code, _out = _rebuild_quiet(self.root)
+        self.assertEqual(code, 0)
+        before = {path.name: path.read_text() for path in (self.root / "wiki").glob("*.md")}
+
+        code, _out = _rebuild_quiet(self.root)
+        self.assertEqual(code, 0)
+        after = {path.name: path.read_text() for path in (self.root / "wiki").glob("*.md")}
+
+        self.assertEqual(before, after)
+
+    def test_rebuild_restores_removed_membership(self) -> None:
+        digest_a = self._digest("member source one")
+        self._write_summary(
+            "summary-a", digest_a, "Widget One", ["tag:multi"], fetched="2024-01-01T00:00:00Z"
+        )
+        digest_b = self._digest("member source two")
+        self._write_summary(
+            "summary-b", digest_b, "Widget Two", ["tag:multi"], fetched="2024-01-02T00:00:00Z"
+        )
+        code, _out = _run_quiet(self.root)
+        self.assertEqual(code, 0)
+
+        story_name = self._fields("summary-a")["story"]
+        self.assertEqual(story_name, self._fields("summary-b")["story"])
+        self.assertEqual(self._fields(story_name)["members"], [digest_a, digest_b])
+
+        # simulate a lost race: hand-edit the story to drop a member
+        story_path = self.root / "wiki" / f"{story_name}.md"
+        fields, body = parse_frontmatter(story_path.read_text())
+        fields["members"] = [digest_a]
+        story_path.write_text(render_frontmatter(fields, body))
+
+        code, _out = _rebuild_quiet(self.root)
+        self.assertEqual(code, 0)
+
+        rebuilt_name = self._fields("summary-a")["story"]
+        self.assertEqual(rebuilt_name, self._fields("summary-b")["story"])
+        self.assertEqual(self._fields(rebuilt_name)["members"], [digest_a, digest_b])
+
+    def test_rebuild_emits_no_push(self) -> None:
+        self._write_agent("agent-file", "Some Host", ["tag:shared-thing"])
+        digest = self._digest("rebuild push source text")
+        self._write_summary(
+            "summary-file", digest, "Push Widget", ["tag:shared-thing"], fetched="2024-01-01T00:00:00Z"
+        )
+
+        code, out = _run_quiet(self.root)
+        self.assertEqual(code, 0)
+        self.assertTrue(any(line.startswith("push\t") for line in out.splitlines()))
+        log_before = (self.root / "log.md").read_text()
+        self.assertIn("## [push]", log_before)
+
+        code, out = _rebuild_quiet(self.root)
+        self.assertEqual(code, 0)
+        self.assertFalse(any(line.startswith("push\t") for line in out.splitlines()))
+
+        new_log = (self.root / "log.md").read_text()[len(log_before) :]
+        self.assertNotIn("## [push]", new_log)
+
+    def test_rebuild_log_line_counts(self) -> None:
+        digest_a = self._digest("log source one")
+        self._write_summary(
+            "summary-a", digest_a, "Widget One", ["tag:multi"], fetched="2024-01-01T00:00:00Z"
+        )
+        digest_b = self._digest("log source two")
+        self._write_summary(
+            "summary-b", digest_b, "Widget Two", ["tag:multi"], fetched="2024-01-02T00:00:00Z"
+        )
+        digest_c = self._digest("log source three")
+        self._write_summary(
+            "summary-c", digest_c, "Widget Three", ["tag:other"], fetched="2024-01-03T00:00:00Z"
+        )
+
+        code, _out = _rebuild_quiet(self.root)
+        self.assertEqual(code, 0)
+
+        log = (self.root / "log.md").read_text()
+        self.assertIn("## [dedup] rebuild 3 summaries into 2 stories", log)
+
+    def test_cli_rebuild_rejects_extra_args(self) -> None:
+        code = cli.main(["--kb", str(self.root), "dedup", "--rebuild", "extra-arg"])
+        self.assertEqual(code, 2)
+
+    def test_cli_rebuild_rejects_misordered_flag(self) -> None:
+        code = cli.main(["--kb", str(self.root), "dedup", "abc", "--rebuild"])
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

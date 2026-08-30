@@ -116,6 +116,11 @@ def cmd_summarize(root: Path, args: list[str]) -> int:
 
 
 def cmd_dedup(root: Path, args: list[str]) -> int:
+    if "--rebuild" in args:
+        if args != ["--rebuild"]:
+            print("llmwiki: dedup --rebuild takes no other arguments", file=sys.stderr)
+            return 2
+        return dedup.rebuild(root)
     return dedup.run(root, args or None)
 
 
@@ -125,7 +130,10 @@ VERBS: dict[str, tuple[Verb, str]] = {
     "where": (cmd_where, "where           print the resolved kb root"),
     "lint": (cmd_lint, "lint [<page>...] check wiki pages, one line per finding"),
     "summarize": (cmd_summarize, "summarize [<hash>...]  write a summary page per source"),
-    "dedup": (cmd_dedup, "dedup [<hash>...]      join or start a story per summary"),
+    "dedup": (
+        cmd_dedup,
+        "dedup [--rebuild] [<hash>...]  join or start a story per summary",
+    ),
 }
 
 
