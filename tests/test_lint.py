@@ -75,6 +75,30 @@ class LintTest(unittest.TestCase):
         )
         self.assertIn("No identifier keys", prompt_block({}))
 
+    def test_dangling_source_needs_a_byte_file_not_just_a_sidecar(self) -> None:
+        kb = self.tmp / "sidecar-only"
+        for sub in ("wiki", "sources"):
+            (kb / sub).mkdir(parents=True)
+        (kb / "config.toml").write_text("")
+        digest = "abc123"
+        page = kb / "wiki" / "summary.md"
+        page.write_text(
+            "---\n"
+            "kind: summary\n"
+            "title: Summary\n"
+            f"source: {digest}\n"
+            "identifiers: []\n"
+            "---\n\n"
+            "Body.\n"
+        )
+        (kb / "sources" / f"{digest}.toml").write_text('url = "https://x"\n')
+
+        self.assertEqual(pairs(lint_pages(kb)), {("summary.md", "dangling-source")})
+
+        (kb / "sources" / f"{digest}.md").write_text("byte content")
+
+        self.assertEqual(pairs(lint_pages(kb)), set())
+
     def test_prompt_block_lists_declared_keys(self) -> None:
         import tomllib
 
