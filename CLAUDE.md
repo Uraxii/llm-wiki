@@ -98,7 +98,9 @@ anything that talks to a model.
 
 **Decisions.** Every non-obvious design call gets a row in
 `docs/plans/01-llm-wiki-poc/decisions.tsv` (what, why, evidence, result),
-and the row is corrected when later evidence contradicts it. A fixture that
+and the row is corrected when later evidence contradicts it. That file is
+git-ignored and stays local: keep writing rows, never commit it, never
+re-add it with `git add -f`. A fixture that
 disagrees with `core.parse_frontmatter` means the fixture is wrong; do not
 loosen the parser to rescue it.
 
