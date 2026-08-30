@@ -5,16 +5,55 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
+import unittest.mock
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from llmwiki.core import parse_frontmatter  # noqa: E402
+from llmwiki.core import Kb, parse_frontmatter  # noqa: E402
 from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
-from llmwiki import ingest, summarize  # noqa: E402
+from llmwiki import ingest, sources, summarize  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+
+# A real-looking address for llmwiki.fetch._resolved_addresses to hand
+# back, so the fetch guard's real is_global check passes against a
+# server that is actually bound to loopback.
+PUBLIC_ADDRESS = "93.184.216.34"
+
+
+class _FetchServer:
+    """A minimal local http server serving one fixed body, standing in
+    for the url ingest.run fetches from."""
+
+    def __init__(self, body: bytes, content_type: str = "text/plain") -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args) -> None:
+                pass  # keep test output free of one line per request
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_port}/"
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
 
 
 @contextmanager
@@ -321,6 +360,83 @@ class IngestTest(unittest.TestCase):
         self.assertEqual(digest, "-")
         self.assertEqual(status, "failed")
         self.assertEqual(url, str(subdir.resolve()))
+
+    def test_url_ingest_reports_new_with_cleaned_url_and_provenance(self) -> None:
+        page = _FetchServer(b"Widget page text.")
+        self.addCleanup(page.close)
+        dirty_url = page.url + "?utm_source=newsletter#section"
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake, unittest.mock.patch(
+            "llmwiki.fetch._resolved_addresses", return_value=[PUBLIC_ADDRESS]
+        ):
+            self._write_config(fake.url)
+            code, records = _run(self.root, [dirty_url])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 1)
+        digest, status, url = records[0]
+        self.assertEqual(status, "new")
+        # tracking param and fragment stripped, the redirect-free case
+        # round-trips to the server's own url exactly.
+        self.assertEqual(url, page.url)
+
+        provenance = sources.read_provenance(Kb(self.root), digest)
+        self.assertEqual(provenance["url"], page.url)
+
+    def test_url_fetch_failure_produces_one_failed_record_and_continues(self) -> None:
+        blocked = "http://127.0.0.1/blocked"  # refused by the guard, no server needed
+        good = self._write_source_file("widget.txt", "Widget source text.")
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = ingest.run(self.root, [blocked, str(good)])
+
+        self.assertEqual(code, 1)
+        records = _records(out.getvalue())
+        self.assertEqual(len(records), 2)
+        digest0, status0, url0 = records[0]
+        digest1, status1, _url1 = records[1]
+        self.assertEqual(digest0, "-")
+        self.assertEqual(status0, "failed")
+        self.assertEqual(url0, blocked)
+        self.assertEqual(status1, "new")
+
+        self.assertIn(f"llmwiki: ingest: {blocked}:", err.getvalue())
+        self.assertIn(blocked, (self.root / "log.md").read_text())
+
+    def test_mixed_argv_of_a_path_and_a_url_both_ingest(self) -> None:
+        path = self._write_source_file("widget.txt", "Widget source text.")
+        page = _FetchServer(b"A different page body.")
+        self.addCleanup(page.close)
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake, unittest.mock.patch(
+            "llmwiki.fetch._resolved_addresses", return_value=[PUBLIC_ADDRESS]
+        ):
+            self._write_config(fake.url)
+            code, records = _run(self.root, [str(path), page.url])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 2)
+        _digest0, status0, url0 = records[0]
+        _digest1, status1, url1 = records[1]
+        self.assertEqual(status0, "new")
+        self.assertEqual(url0, str(path.resolve()))
+        self.assertEqual(status1, "new")
+        self.assertEqual(url1, page.url)
+
+        log = (self.root / "log.md").read_text()
+        self.assertIn("## [ingest] manual 2 new, 0 exists, 0 failed", log)
 
     def test_empty_argv_logs_all_zero_and_returns_0(self) -> None:
         code, records = _run(self.root, [])

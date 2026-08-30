@@ -119,6 +119,10 @@ class VerbTableTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertNotEqual(result.stderr, "")
 
+    def test_ingest_usage_mentions_url(self) -> None:
+        result = self._run(["ingest"])
+        self.assertIn("url", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
