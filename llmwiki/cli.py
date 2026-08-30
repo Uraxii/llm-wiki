@@ -229,5 +229,9 @@ def main(argv: list[str]) -> int:
         return 2
 
     verb, fn = args[0], VERBS[args[0]][0]
-    root = resolve_root(kb_path, for_init=verb == "init")
-    return fn(root, args[1:])
+    try:
+        root = resolve_root(kb_path, for_init=verb == "init")
+        return fn(root, args[1:])
+    except Exception as exc:
+        print(f"llmwiki: {verb}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
