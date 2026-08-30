@@ -4,8 +4,8 @@ This file provides instructions and context for AI coding agents working on this
 
 ## Build & Test
 
-Python 3.14, standard library only. No third party package, in any phase.
-See the Dependencies rule below.
+Python 3.14, standard library only, with `sqlite-vec` the single measured
+exception in phase 13. See the Dependencies rule below.
 
 ```bash
 python3 -m unittest discover tests
@@ -67,18 +67,28 @@ around as that dict. Do not re-type it into dataclasses.
 
 ## Conventions & Patterns
 
-**Dependencies.** The standard library, and nothing else. This is not
-"standard library first"; it is standard library only, by the user's
-instruction. No third party package, in any phase, for any reason.
+**Dependencies.** The standard library, plus `sqlite-vec` and nothing else.
+Convenience never justifies a package; only a property the standard library
+cannot provide does, and that case is argued with a measurement, to the user,
+before anything is added.
 
-Two consequences that have already been paid for. HTML extraction is a small
-`html.parser` densest-block reader, not `trafilatura`, and anything it cannot
-read is stored as raw bytes. There is no PDF text extraction, because the
-standard library has none; do not hand-roll one. Vector search is `sqlite3`
-alone, storing vectors as blobs and scoring them in Python, not `sqlite-vec`.
+HTML extraction is a small `html.parser` densest-block reader, not
+`trafilatura`, and anything it cannot read is stored as raw bytes. There is no
+PDF text extraction, because the standard library has none; do not hand-roll
+one. Both were dropped by user directive.
 
-If a task seems to need a package, that is a signal the task is too ambitious
-for this PoC. Cut the task, do not add the package.
+`sqlite-vec` (phase 13) is the single exception, kept for a measured reason.
+A stdlib scan using `math.sumprod` over normalized `array('f')` vectors runs
+about 43x slower at ten thousand pages, 911 ms against 21 ms, because sumprod
+boxes every element through the iterator protocol while `sqlite-vec` runs SIMD
+over the raw blob. It lives in a git-ignored `.venv` on 3.14, because PEP 668
+refuses `pip install --user` on this Homebrew Python; do not reach for
+`--break-system-packages`. Rebuild with `uv venv --python 3.14 .venv` and
+`uv pip install --python .venv/bin/python sqlite-vec`. Phase 13 runs its suite
+under `.venv/bin/python`; every earlier phase uses bare `python3`.
+
+If any other task seems to need a package, that is a signal the task is too
+ambitious for this PoC. Cut the task, do not add the package.
 
 **Network.** Never `urllib.request.urlopen` anywhere in this project. It
 reads `http_proxy` from the environment and follows redirects, and both

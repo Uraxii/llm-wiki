@@ -27,12 +27,12 @@ rungs 2 to 8.
 
 ## Constraints
 
-- Python 3.14 standard library only, no third party package in any phase (user
-  directive). This overrides `.7`, which chose `trafilatura` and `pypdf` for
-  extraction, and the `sqlite-vec` half of `.1`. Extraction is an `html.parser`
-  densest-block reader with raw bytes as the fallback, there is no PDF text
-  extraction, and the vector store is `sqlite3` with vectors held as blobs and
-  scored in Python.
+- Python 3.14 standard library, plus `sqlite-vec` (`.1`, phase 13) and nothing
+  else. The user's stdlib directive overrides `.7`, which chose `trafilatura`
+  and `pypdf`: extraction is an `html.parser` densest-block reader with raw
+  bytes as the fallback, and there is no PDF text extraction. `sqlite-vec`
+  survives because it is 43x faster than a stdlib scan at ten thousand pages,
+  measured; see `.1`.
 - No argparse (one `--kb` first-arg convention plus positional verbs), no pyyaml,
   no numpy, no env vars for model config (`.8`); credentials ONLY from the system
   environment, `LLM_WIKI_API_KEY` or `LLM_WIKI_API_KEY_FILE` (user directive,
@@ -72,7 +72,7 @@ llmwiki/
   cli.py         verb table, --kb resolution, exit codes
   fetch.py       URL guard, html.parser extraction     (phase 11)
   feeds.py       RSS, Atom, JSON Feed, jobs, modes     (phase 12)
-  vectors.py     sqlite3 file per model, embed/status/search (phase 13)
+  vectors.py     sqlite-vec file per model, embed/status/search (phase 13)
 tests/           one test file per module; fixtures under tests/fixtures/
 ```
 
