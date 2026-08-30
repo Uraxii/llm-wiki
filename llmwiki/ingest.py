@@ -1,0 +1,125 @@
+"""The serial per-source ingest pipeline: store bytes and provenance,
+then summarize, embed, and dedup each new one. One door for every source
+kind (decision agent-kb-0zf.6); the collector itself knows nothing about
+page kinds.
+"""
+from __future__ import annotations
+
+import importlib.util
+import mimetypes
+import sys
+from pathlib import Path
+from typing import NamedTuple
+
+from llmwiki.core import Kb, append_log_entry, flatten
+from llmwiki import dedup, sources, summarize
+
+JOB = "manual"  # phases 11 and 12 bring real job names
+STDIN_ARG = "-"
+NO_DIGEST = "-"  # stdout hash column when the bytes never got stored
+
+
+class Source(NamedTuple):
+    data: bytes
+    url: str
+    content_type: str
+
+
+def ingest_stdin() -> Source:
+    return Source(sys.stdin.buffer.read(), STDIN_ARG, "text/plain")
+
+
+def ingest_path(arg: str) -> Source:
+    """Lets OSError out (missing file, a directory, permissions): the
+    caller's broad except turns any of those into one `failed` line."""
+    path = Path(arg).resolve()
+    content_type = mimetypes.guess_type(path.name)[0] or "text/plain"
+    data = path.read_bytes()
+    return Source(data, str(path), content_type)
+
+
+def _embed_sweep(kb: Kb) -> None:
+    # Phase 13 seam: llmwiki/vectors.py does not exist yet, so this is a
+    # no-op today. find_spec rather than a try/except ImportError, so an
+    # ImportError raised from INSIDE vectors.py (phase 13 imports
+    # sqlite_vec) propagates instead of being mistaken for "not there".
+    if importlib.util.find_spec("llmwiki.vectors") is None:
+        return
+    from llmwiki import vectors
+
+    vectors.sweep(kb)
+
+
+def _pipeline(root: Path, digest: str) -> str | None:
+    """Returns the name of the failing step, or `None` when clean."""
+    if summarize.run(root, [digest]) != 0:
+        return "summarize"
+    # Phase 13 embeds the new summary page HERE, between summarize and
+    # dedup, where dedup's vector-candidate seam (`candidates(..., extra=)`)
+    # wants it: the embedding must exist before dedup can consult it.
+    #
+    # Skipping dedup after a failed summarize is deliberate: with no
+    # summary page on disk dedup would log a junk "dropped (no summary
+    # page for source)" line into the append-only log.
+    if dedup.run(root, [digest]) != 0:
+        return "dedup"
+    return None
+
+
+def _fail(kb: Kb, url: str, reason: str) -> None:
+    # stderr first: if log.md is missing, append_log_entry raises and
+    # the real reason must already be visible, not hidden behind that.
+    print(f"llmwiki: ingest: {url}: {reason}", file=sys.stderr)
+    append_log_entry(kb.log, "ingest", f"{url}: {reason}")
+
+
+def _ingest_one(kb: Kb, arg: str) -> tuple[str, str, str]:
+    """Returns (digest_or_NO_DIGEST, "new"|"exists"|"failed", url). `url`
+    starts as `arg` and is replaced by the read source's own url once the
+    read succeeds, so a failed read still reports what the user typed."""
+    url = arg
+    digest = NO_DIGEST  # a failure after store still reports the real hash
+    try:
+        source = ingest_stdin() if arg == STDIN_ARG else ingest_path(arg)
+        url = source.url
+        if not source.data:
+            _fail(kb, url, "empty source")
+            return NO_DIGEST, "failed", url
+
+        digest, status = sources.store(
+            kb, source.data, source.url, source.content_type, JOB
+        )
+        if status == "exists":
+            return digest, "exists", url
+
+        step = _pipeline(kb.root, digest)
+        if step is not None:
+            _fail(kb, url, f"{step} failed")
+            return digest, "failed", url
+        return digest, "new", url
+    except Exception as exc:
+        # One bad source must never stop the batch; KeyboardInterrupt is
+        # a BaseException and is correctly not caught here.
+        _fail(kb, url, f"{type(exc).__name__}: {exc}")
+        return digest, "failed", url
+
+
+def run(root: Path, args: list[str]) -> int:
+    kb = Kb(root)
+    _embed_sweep(kb)
+
+    tally = {"new": 0, "exists": 0, "failed": 0}
+    for arg in args:
+        digest, status, url = _ingest_one(kb, arg)
+        # flatten: this is a report line, not the provenance record (the
+        # sidecar keeps the raw url); a url holding a tab or newline must
+        # not turn one record into more than three fields.
+        print(f"{digest}\t{status}\t{flatten(url)}")
+        tally[status] += 1
+
+    append_log_entry(
+        kb.log,
+        "ingest",
+        f"{JOB} {tally['new']} new, {tally['exists']} exists, {tally['failed']} failed",
+    )
+    return 1 if tally["failed"] else 0
