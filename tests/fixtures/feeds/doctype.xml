@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rss [
+  <!ENTITY x "hostile">
+]>
+<rss version="2.0">
+  <channel>
+    <item>
+      <link>https://example.test/doctype/first</link>
+    </item>
+  </channel>
+</rss>

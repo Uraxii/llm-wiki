@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmwiki.core import Kb  # noqa: E402
-from llmwiki.sources import read_provenance, store  # noqa: E402
+from llmwiki.sources import read_provenance, store, stored_urls  # noqa: E402
 
 
 class SourcesTest(unittest.TestCase):
@@ -197,6 +197,20 @@ class SourcesTest(unittest.TestCase):
         )
         names = sorted(path.name for path in self.kb.sources.iterdir())
         self.assertEqual(names, sorted([f"{digest}.md", f"{digest}.toml"]))
+
+    def test_stored_urls_is_empty_over_an_empty_sources_dir(self) -> None:
+        self.assertEqual(stored_urls(self.kb), set())
+
+    def test_stored_urls_collects_every_sidecar_url(self) -> None:
+        store(self.kb, b"payload one", "https://x/one", "text/plain", "job")
+        store(self.kb, b"payload two", "https://x/two", "text/plain", "job")
+        self.assertEqual(stored_urls(self.kb), {"https://x/one", "https://x/two"})
+
+    def test_stored_urls_skips_a_sidecar_that_fails_to_parse(self) -> None:
+        store(self.kb, b"payload one", "https://x/one", "text/plain", "job")
+        junk = self.kb.sources / "notadigest.toml"
+        junk.write_text("this is not valid toml [[[", encoding="utf-8")
+        self.assertEqual(stored_urls(self.kb), {"https://x/one"})
 
 
 if __name__ == "__main__":

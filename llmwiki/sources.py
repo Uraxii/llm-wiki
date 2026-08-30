@@ -91,3 +91,21 @@ def read_provenance(kb: Kb, digest: str) -> dict:
     sidecar = kb.sources / f"{digest}.toml"
     with sidecar.open("rb") as handle:
         return tomllib.load(handle)
+
+
+def stored_urls(kb: Kb) -> set[str]:
+    """Every url with an existing provenance sidecar, read fresh from
+    `sources/*.toml` each call: the store is keyed by content hash, not
+    url, so there is no url index to consult instead. A sidecar that
+    fails to parse is skipped rather than crashing the caller's job."""
+    urls: set[str] = set()
+    for sidecar in kb.sources.glob("*.toml"):
+        try:
+            with sidecar.open("rb") as handle:
+                provenance = tomllib.load(handle)
+        except (tomllib.TOMLDecodeError, OSError):
+            continue
+        url = provenance.get("url")
+        if isinstance(url, str):
+            urls.add(url)
+    return urls
