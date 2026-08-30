@@ -16,6 +16,15 @@ stored as plain files. Three layers, no service, no daemon, no server.
 
 ## Install
 
+Check first, because it is usually already there:
+
+```
+llmwiki --help
+```
+
+If that is not found, install it from a checkout of the `agent-kb`
+project (`github.com/Uraxii/agent-kb`):
+
 ```
 uv tool install .
 ```
