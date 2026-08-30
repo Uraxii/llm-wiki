@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: Keep and retrieve durable knowledge in an llm-wiki knowledgebase (a project-local `.kb`, or the global store) through the `llmwiki` CLI. Use when you would otherwise cite a source without keeping it, when a finding needs to survive past this session, when you are about to re-derive something you probably wrote down before, or when you want to ask the accumulated notes a question in plain language. Covers storing a source, generating summary pages from it, writing your own pages, searching by meaning, and checking the wiki is well formed.
+description: Use at the moments knowledge is about to be lost or re-derived: before citing a source you are not keeping, when a research or investigation finding needs to outlive the session, when starting a question you suspect you answered before, and when an answer should come from accumulated notes rather than a fresh search. Also use when maintaining that knowledgebase: adding a page, checking pages, or re-embedding after edits. Covers a project-local `.kb` or the global store driven through the `llmwiki` CLI: immutable source capture with provenance, model-written summary and story pages, agent-written pages, meaning-based search, and the mechanical lint.
 ---
 
 # llm-wiki
