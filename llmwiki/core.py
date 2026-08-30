@@ -164,9 +164,16 @@ def slugify(title: str) -> str:
     return f"untitled-{digest}"
 
 
-def atomic_write_text(path: Path, content: str) -> None:
-    """Write `content` to `path` without ever exposing a partially
-    written file: build it in a same-directory temp file, then atomically
+def read_page_text(path: Path) -> str:
+    """Read a wiki page as text, replacing any byte that is not valid
+    UTF-8. A page the CLI did not write can hold anything, and one bad
+    byte must not take down a whole run."""
+    return path.read_bytes().decode("utf-8", errors="replace")
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write `data` to `path` without ever exposing a partially written
+    file: build it in a same-directory temp file, then atomically
     replace. A crash mid-write leaves only the temp file behind, never a
     half-written `path`. Raises `OSError` on failure (caller's problem)."""
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
@@ -175,12 +182,19 @@ def atomic_write_text(path: Path, content: str) -> None:
         current_umask = umask(0)
         umask(current_umask)
         fchmod(fd, 0o666 & ~current_umask)
-        with fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content)
+        with fdopen(fd, "wb") as handle:
+            handle.write(data)
         os_replace(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write `content` to `path` without ever exposing a partially
+    written file. Encodes as UTF-8 and delegates to
+    `atomic_write_bytes`; see that docstring for the write mechanics."""
+    atomic_write_bytes(path, content.encode("utf-8"))
 
 
 def utc_timestamp() -> str:

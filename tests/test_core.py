@@ -12,9 +12,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmwiki.core import (  # noqa: E402
     append_log_entry,
+    atomic_write_bytes,
     atomic_write_text,
     load_config,
     parse_frontmatter,
+    read_page_text,
     render_frontmatter,
     slugify,
 )
@@ -103,6 +105,41 @@ class AtomicWriteTextTest(TmpDirTest):
         target = self.tmp / "no-such-dir" / "out.txt"
         with self.assertRaises(OSError):
             atomic_write_text(target, "hello\n")
+
+
+class AtomicWriteBytesTest(TmpDirTest):
+    def test_writes_bytes_exactly(self) -> None:
+        target = self.tmp / "out.bin"
+        data = b"body with \xff\xfe bad bytes\n"
+        atomic_write_bytes(target, data)
+        self.assertEqual(target.read_bytes(), data)
+
+    def test_missing_parent_raises_oserror(self) -> None:
+        target = self.tmp / "no-such-dir" / "out.bin"
+        with self.assertRaises(OSError):
+            atomic_write_bytes(target, b"hello\n")
+
+    def test_text_write_is_byte_identical_to_bytes_write(self) -> None:
+        text_target = self.tmp / "text.txt"
+        bytes_target = self.tmp / "bytes.txt"
+        content = "hello\nworld\n"
+        atomic_write_text(text_target, content)
+        atomic_write_bytes(bytes_target, content.encode("utf-8"))
+        self.assertEqual(text_target.read_bytes(), bytes_target.read_bytes())
+
+
+class ReadPageTextTest(TmpDirTest):
+    def test_replaces_invalid_utf8(self) -> None:
+        target = self.tmp / "bad.md"
+        target.write_bytes(b"---\ntitle: x\n---\n\nbody with \xff\xfe bad bytes\n")
+        text = read_page_text(target)
+        self.assertIn("�", text)
+        self.assertTrue(text.startswith("---\ntitle: x\n---\n\n"))
+
+    def test_valid_utf8_round_trips(self) -> None:
+        target = self.tmp / "good.md"
+        target.write_text("---\ntitle: x\n---\n\nplain body\n", encoding="utf-8")
+        self.assertEqual(read_page_text(target), "---\ntitle: x\n---\n\nplain body\n")
 
 
 class LoadConfigTest(TmpDirTest):

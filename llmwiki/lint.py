@@ -11,7 +11,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-from llmwiki.core import FrontmatterValue, Kb, as_list, parse_frontmatter, slugify
+from llmwiki.core import (
+    FrontmatterValue,
+    Kb,
+    as_list,
+    parse_frontmatter,
+    read_page_text,
+    slugify,
+)
 
 CLI_KINDS = {"summary", "story"}
 WIKILINK = re.compile(r"\[\[([^\]|#]+)")
@@ -160,7 +167,7 @@ def lint_pages(root: Path, pages: list[Path] | None = None) -> list[Finding]:
     kb = Kb(root)
     targets = select_pages(root, pages)
     all_pages = select_pages(root, None)
-    parsed_by_path = {p: parse_frontmatter(p.read_text(encoding="utf-8")) for p in all_pages}
+    parsed_by_path = {p: parse_frontmatter(read_page_text(p)) for p in all_pages}
     ctx = _build_context(kb, parsed_by_path)
 
     findings: list[Finding] = []

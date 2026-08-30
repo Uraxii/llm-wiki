@@ -21,8 +21,10 @@ from llmwiki.core import (
     Page,
     append_log_entry,
     as_list,
+    atomic_write_bytes,
     atomic_write_text,
     parse_frontmatter,
+    read_page_text,
     render_frontmatter,
     slugify,
 )
@@ -137,10 +139,10 @@ def _dedup_model_id(kb: Kb) -> str | None:
 
 
 def _judge_prompt(page: Page, cands: list[Story]) -> str:
-    parts = [DEDUP_PROMPT, "=== NEW SUMMARY ===", page.path.read_text(encoding="utf-8")]
+    parts = [DEDUP_PROMPT, "=== NEW SUMMARY ===", read_page_text(page.path)]
     for story in cands:
         parts.append(f"=== CANDIDATE: {story.path.stem} ===")
-        parts.append(story.path.read_text(encoding="utf-8"))
+        parts.append(read_page_text(story.path))
     return "\n\n".join(parts)
 
 
@@ -238,8 +240,8 @@ def _write_story(
     the pair, and roll both back on any finding (previous text restored,
     or the file unlinked when there was none). Returns False, leaving
     the summary story-less, when the write was dropped."""
-    story_prev = story.path.read_text(encoding="utf-8") if story.path.is_file() else None
-    summary_prev = summary.path.read_text(encoding="utf-8")
+    story_prev = story.path.read_bytes() if story.path.is_file() else None
+    summary_prev = summary.path.read_bytes()
 
     story_fields = dict(story.fields)
     story_fields["members"] = story.members
@@ -258,8 +260,8 @@ def _write_story(
     if story_prev is None:
         story.path.unlink()
     else:
-        atomic_write_text(story.path, story_prev)
-    atomic_write_text(summary.path, summary_prev)
+        atomic_write_bytes(story.path, story_prev)
+    atomic_write_bytes(summary.path, summary_prev)
     finding = findings[0]
     append_log_entry(
         kb.log, "dedup", f"{digest}: dropped ({finding.check}: {finding.detail})"
@@ -298,7 +300,7 @@ def _load_wiki(kb: Kb) -> tuple[dict[str, Page], dict[Path, Story], list[Page]]:
     stories: dict[Path, Story] = {}
     agent_pages: list[Page] = []
     for path in sorted(kb.wiki.glob("*.md")):
-        text = path.read_bytes().decode("utf-8", errors="replace")
+        text = read_page_text(path)
         parsed = parse_frontmatter(text)
         if parsed is None:
             continue

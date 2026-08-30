@@ -137,6 +137,10 @@ def _page_row(path: Path) -> tuple[str, str, str, str, str, str]:
     gets a vector, so `search`'s refusal would fire forever with no way
     to clear it. It gets kind="", title=path.name, and its embed text
     is the filename plus the first BODY_HEAD_CHARS of raw text.
+
+    Cannot use `core.read_page_text` here: file_hash below is sha256
+    of the raw bytes, so this needs the bytes themselves, not a decoded
+    (and possibly replaced) copy.
     """
     raw = path.read_bytes()
     file_hash = hashlib.sha256(raw).hexdigest()
