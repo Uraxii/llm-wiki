@@ -257,12 +257,11 @@ class FetchTest(unittest.TestCase):
         dirty = "https://example.com/page?FBCLID=x&REF=hn&GCLID=1&k=1"
         self.assertEqual(fetch.clean_url(dirty), "https://example.com/page?k=1")
 
-    def test_clean_url_rewrites_a_github_blob_to_raw(self) -> None:
+    def test_clean_url_leaves_a_github_blob_url_unchanged(self) -> None:
+        # No special-casing for any one site's url shape (decision
+        # agent-kb-0zf.7 amended): the sending agent picks the url.
         blob = "https://github.com/owner/repo/blob/main/path/file.py"
-        self.assertEqual(
-            fetch.clean_url(blob),
-            "https://raw.githubusercontent.com/owner/repo/main/path/file.py",
-        )
+        self.assertEqual(fetch.clean_url(blob), blob)
 
     # 14: densest_text.
 

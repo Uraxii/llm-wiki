@@ -13,6 +13,7 @@ from llmwiki.core import (
     FrontmatterValue,
     Kb,
     append_log_entry,
+    as_list,
     atomic_write_text,
     parse_frontmatter,
     render_frontmatter,
@@ -55,6 +56,17 @@ title: Example Title
 identifiers:
   - ingredient:example-value
   - isbn:9780123456789
+---
+
+A few plain sentences of abstract text go here.
+
+When no identifiers apply, write the key with an empty list, never a \
+bare key:
+
+---
+kind: summary
+title: Example Title
+identifiers: []
 ---
 
 A few plain sentences of abstract text go here.\
@@ -115,16 +127,21 @@ def _drop_reason(
     parsed: tuple[dict[str, FrontmatterValue], str] | None, title: str
 ) -> str | None:
     """Why a parsed reply must be dropped before anything reaches disk,
-    or `None` to keep it. `identifiers: []` is valid; only a missing
-    or non-list field, or a blank item, drops."""
+    or `None` to keep it. An absent `identifiers` key, or one holding a
+    non-empty scalar or a blank item, drops. A present but empty value
+    (`identifiers:` with nothing after it, or `identifiers: []`) is an
+    empty list, same as `lint` reads it through `core.as_list`."""
     if parsed is None:
         return "unparseable reply"
     if not title:
         return "blank title"
-    identifiers = parsed[0].get("identifiers")
-    if not isinstance(identifiers, list):
+    fields = parsed[0]
+    if "identifiers" not in fields:
         return "identifiers missing or not a list"
-    if any(not item.strip() for item in identifiers):
+    identifiers = fields["identifiers"]
+    if isinstance(identifiers, str) and identifiers != "":
+        return "identifiers missing or not a list"
+    if any(not item.strip() for item in as_list(identifiers)):
         return "blank identifier"
     return None
 

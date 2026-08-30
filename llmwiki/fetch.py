@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import email.message
 import ipaddress
-import re
 import socket
 import urllib.parse
 import urllib.request
@@ -32,10 +31,6 @@ USER_AGENT = "llm-wiki/1.0"
 TRACKING_PARAMS = frozenset({"fbclid", "gclid", "ref"})
 IGNORED_TAGS = frozenset({"script", "style", "nav", "header", "footer", "aside"})
 BLOCK_TAGS = frozenset({"article", "main"})
-
-_GITHUB_BLOB = re.compile(
-    r"^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$"
-)
 
 
 class FetchError(Exception):
@@ -70,14 +65,9 @@ def clean_url(url: str) -> str:
         for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
         if key.lower() not in TRACKING_PARAMS and not key.lower().startswith("utm_")
     ]
-    cleaned = urllib.parse.urlunsplit(
+    return urllib.parse.urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(kept), "")
     )
-    match = _GITHUB_BLOB.match(cleaned)
-    if match:
-        owner, repo, rest = match.groups()
-        cleaned = f"https://raw.githubusercontent.com/{owner}/{repo}/{rest}"
-    return cleaned
 
 
 def fetch(url: str) -> tuple[str, str, bytes]:
