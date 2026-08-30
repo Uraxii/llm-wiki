@@ -3,12 +3,16 @@ then reduce html to text.
 """
 from __future__ import annotations
 
+import gc
+import gzip
 import re
+import resource
 import sys
 import threading
 import time
 import unittest
 import unittest.mock
+import zlib
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -357,6 +361,144 @@ class FetchTest(unittest.TestCase):
         with self.assertRaises(fetch.FetchError) as ctx:
             fetch._require_public("http://[::1")
         self.assertIn("malformed url", str(ctx.exception))
+
+    # 21-27: Content-Encoding, agent-kb-vtc.
+
+    def test_fetch_sends_accept_encoding_gzip_and_deflate(self) -> None:
+        server = self._serve()
+        sent: dict[str, str] = {}
+
+        def capture(h: BaseHTTPRequestHandler) -> None:
+            sent["Accept-Encoding"] = h.headers.get("Accept-Encoding", "")
+            _respond(h, 200, b"hello", "text/plain")
+
+        server.routes["/"] = capture
+
+        with self._public():
+            fetch.fetch(server.url + "/")
+
+        self.assertEqual(sent["Accept-Encoding"], "gzip, deflate")
+
+    def test_fetch_decodes_a_gzip_encoded_body_and_extract_reads_it(self) -> None:
+        server = self._serve()
+        server.routes["/"] = lambda h: _respond(
+            h,
+            200,
+            gzip.compress(HTML_DOC.encode()),
+            "text/html",
+            headers={"Content-Encoding": "gzip"},
+        )
+
+        with self._public():
+            _final_url, content_type, data = fetch.fetch(server.url + "/")
+        self.assertEqual(data, HTML_DOC.encode())
+
+        content_type, data = fetch.extract(content_type, data)
+        self.assertEqual(content_type, "text/markdown")
+        self.assertIn(b"real article text", data)
+
+    def test_fetch_decodes_a_zlib_wrapped_deflate_body(self) -> None:
+        server = self._serve()
+        server.routes["/"] = lambda h: _respond(
+            h,
+            200,
+            zlib.compress(HTML_DOC.encode()),
+            "text/html",
+            headers={"Content-Encoding": "deflate"},
+        )
+
+        with self._public():
+            _final_url, _content_type, data = fetch.fetch(server.url + "/")
+
+        self.assertEqual(data, HTML_DOC.encode())
+
+    def test_fetch_decodes_a_raw_deflate_body(self) -> None:
+        compressor = zlib.compressobj(wbits=-15)
+        raw_deflate = compressor.compress(HTML_DOC.encode()) + compressor.flush()
+
+        server = self._serve()
+        server.routes["/"] = lambda h: _respond(
+            h, 200, raw_deflate, "text/html", headers={"Content-Encoding": "deflate"}
+        )
+
+        with self._public():
+            _final_url, _content_type, data = fetch.fetch(server.url + "/")
+
+        self.assertEqual(data, HTML_DOC.encode())
+
+    def test_fetch_treats_identity_encoding_same_as_no_header(self) -> None:
+        server = self._serve()
+        server.routes["/"] = lambda h: _respond(
+            h, 200, b"plain body", "text/plain", headers={"Content-Encoding": "identity"}
+        )
+
+        with self._public():
+            _final_url, _content_type, data = fetch.fetch(server.url + "/")
+
+        self.assertEqual(data, b"plain body")
+
+    def test_an_undecodable_content_encoding_is_refused_by_name(self) -> None:
+        server = self._serve()
+        server.routes["/"] = lambda h: _respond(
+            h, 200, b"whatever bytes", "text/html", headers={"Content-Encoding": "br"}
+        )
+
+        with self._public():
+            with self.assertRaises(fetch.FetchError) as ctx:
+                fetch.fetch(server.url + "/")
+
+        self.assertIn("br", str(ctx.exception))
+
+    def test_a_body_that_fails_to_decompress_is_refused(self) -> None:
+        server = self._serve()
+        server.routes["/"] = lambda h: _respond(
+            h,
+            200,
+            b"not actually gzip data",
+            "text/html",
+            headers={"Content-Encoding": "gzip"},
+        )
+
+        with self._public():
+            with self.assertRaises(fetch.FetchError) as ctx:
+                fetch.fetch(server.url + "/")
+
+        self.assertIn("gzip", str(ctx.exception))
+
+    def test_gzip_expansion_past_the_cap_is_refused_without_full_expansion(
+        self,
+    ) -> None:
+        # A highly compressible payload: ~190MB of zero bytes compresses to
+        # a few hundred KB. If decoding materialised the full expansion
+        # before checking MAX_BYTES, this call would allocate that much;
+        # bounded decompression must never get there.
+        raw = b"\x00" * 190_000_000
+        bomb = gzip.compress(raw)
+        del raw
+        gc.collect()
+
+        server = self._serve()
+        server.routes["/"] = lambda h: _respond(
+            h, 200, bomb, "text/plain", headers={"Content-Encoding": "gzip"}
+        )
+
+        before_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        with self._public():
+            with self.assertRaises(fetch.FetchError) as ctx:
+                fetch.fetch(server.url + "/")
+        after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+        self.assertIn(str(fetch.MAX_BYTES), str(ctx.exception))
+        # Generous bound: real growth from a correctly bounded decode is a
+        # few MB (input buffer plus the MAX_BYTES + 1 output cap), nowhere
+        # near the ~190MB the uncapped expansion would need.
+        grew_by_mb = (after_kb - before_kb) / 1024
+        self.assertLess(
+            grew_by_mb,
+            50,
+            f"decoding grew RSS by {grew_by_mb:.1f}MB, suggesting the full "
+            "expansion was materialised before the MAX_BYTES check",
+        )
 
 
 if __name__ == "__main__":
