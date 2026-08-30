@@ -1,0 +1,132 @@
+"""CLI entry point for llm-wiki.
+
+Usage: `python3 -m llmwiki [--kb PATH] <verb> [args]`. `--kb`, when
+given, must come before the verb and names the kb root directly (the
+`.kb` directory itself, not its parent).
+"""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Callable
+from pathlib import Path
+
+from llmwiki.core import atomic_write_text
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCHEMA_SKELETON = REPO_ROOT / "docs" / "design" / "SCHEMA.skeleton.md"
+
+GLOBAL_STORE = Path.home() / ".local" / "share" / "agent-kb"
+
+CONFIG_TOML = """\
+# Model used for each paid pipeline step. Only "summarize" is live for
+# now; embed and dedup are commented out until later phases add them.
+[models]
+summarize = "deepseek/deepseek-v3.2"
+# embed = "openai/text-embedding-3-small"
+# dedup = "..."
+
+# The API endpoint that serves the models above.
+# [endpoint]
+# url = "https://api.example.com/v1"
+
+# Identifier vocabulary. Each key can appear in a page's "identifiers"
+# field as "key:value". The CLI appends this table to the summarizer
+# prompt, so SUMMARIZE.md never repeats it. Uncomment and add your own
+# keys; delete this example first.
+# [identifiers.isbn]
+# pattern = "^\\\\d{13}$"
+# describe = "13-digit ISBN without hyphens"
+
+# Scheduled ingest jobs. Each job fetches from a feed or a list of
+# urls, in "partial" mode (skip urls already seen) or "full" mode
+# (fetch everything; unchanged bytes are skipped by their hash).
+# [jobs.example]
+# feed = "https://example.com/feed.xml"
+# mode = "partial"
+"""
+
+SUMMARIZE_STUB = """\
+# Summarize
+
+Write frontmatter with `title`, `kind: summary`, and `identifiers` (a
+flat list of `key:value` strings; only use keys declared in
+`config.toml`). The body is a short abstract of the source.
+
+The CLI appends the declared identifier vocabulary from `config.toml`
+below this prompt before it reaches the model.
+"""
+
+
+def _init_files() -> dict[str, str]:
+    return {
+        "config.toml": CONFIG_TOML,
+        "SCHEMA.md": SCHEMA_SKELETON.read_text(encoding="utf-8"),
+        "SUMMARIZE.md": SUMMARIZE_STUB,
+        "log.md": "# log\n",
+        ".gitignore": "vectors/\n",
+    }
+
+
+def resolve_root(explicit: str | None, for_init: bool) -> Path:
+    """Resolve the kb root. `explicit` (from `--kb`) is used as-is when
+    given. Otherwise `init` roots at `.kb` under the working directory;
+    every other verb walks up from the working directory for an
+    existing `.kb`, falling back to the user's global store."""
+    if explicit is not None:
+        return Path(explicit)
+    if for_init:
+        return Path.cwd() / ".kb"
+    for candidate in (Path.cwd(), *Path.cwd().parents):
+        found = candidate / ".kb"
+        if found.is_dir():
+            return found
+    return GLOBAL_STORE
+
+
+def cmd_init(root: Path) -> int:
+    if root.exists():
+        print(f"llmwiki: init: {root} already exists", file=sys.stderr)
+        return 1
+    root.mkdir(parents=True)
+    (root / "sources").mkdir()
+    (root / "wiki").mkdir()
+    for name, content in _init_files().items():
+        atomic_write_text(root / name, content)
+    return 0
+
+
+def cmd_where(root: Path) -> int:
+    print(root)
+    return 0
+
+
+Verb = Callable[[Path], int]
+VERBS: dict[str, tuple[Verb, str]] = {
+    "init": (cmd_init, "init            create a kb at the resolved root"),
+    "where": (cmd_where, "where           print the resolved kb root"),
+}
+
+
+def _usage() -> str:
+    lines = ["usage: python3 -m llmwiki [--kb PATH] <verb> [args]", ""]
+    lines.extend(usage for _fn, usage in VERBS.values())
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    args = list(argv)
+    kb_path: str | None = None
+    if args and args[0] == "--kb":
+        if len(args) < 2:
+            print(_usage(), file=sys.stderr)
+            return 2
+        kb_path, args = args[1], args[2:]
+
+    if not args or args[0] not in VERBS:
+        print(_usage(), file=sys.stderr)
+        return 2
+
+    verb, fn = args[0], VERBS[args[0]][0]
+    root = resolve_root(kb_path, for_init=verb == "init")
+    return fn(root)
