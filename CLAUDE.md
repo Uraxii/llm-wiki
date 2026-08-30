@@ -11,6 +11,22 @@ python3 -m unittest discover tests
 python3 -m compileall -q llmwiki
 ```
 
+**Interpreter.** Phases 1 to 10 run on bare `python3` (3.14.7). From phase 11
+the suite needs `trafilatura`, `pypdf` and `sqlite-vec`, which live in `.venv`,
+so run it as `.venv/bin/python -m unittest discover tests` instead. That venv
+is Python 3.14.7 and git-ignored. It exists because PEP 668 refuses
+`pip install --user` on this Homebrew Python; do not reach for
+`--break-system-packages`, which risks the Homebrew install. Rebuild it with:
+
+```bash
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python trafilatura pypdf sqlite-vec
+```
+
+`sqlite-vec` needs a SQLite extension load. This build allows it, verified: a
+`vec0` virtual table creates and a KNN query returns. A Python built without
+`enable_load_extension` would break the phase 13 store outright.
+
 The suite must be hermetic. Run it a second time with a dead proxy and get
 the identical result; anything else means a module reached the real network:
 
