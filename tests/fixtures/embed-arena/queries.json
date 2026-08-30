@@ -1,0 +1,162 @@
+[
+  {
+    "q": "The Maillard reaction and non-enzymatic browning of food",
+    "relevant": [
+      "maillard-reaction"
+    ]
+  },
+  {
+    "q": "SQL injection attacks against application database queries",
+    "relevant": [
+      "sql-injection"
+    ]
+  },
+  {
+    "q": "mirepoix, the diced onion carrot and celery aromatic base",
+    "relevant": [
+      "mirepoix"
+    ]
+  },
+  {
+    "q": "same-origin policy enforced by web browsers",
+    "relevant": [
+      "same-origin-policy"
+    ]
+  },
+  {
+    "q": "sous vide cooking in a temperature controlled water bath",
+    "relevant": [
+      "sous-vide"
+    ]
+  },
+  {
+    "q": "threat modeling methodologies such as STRIDE and attack trees",
+    "relevant": [
+      "threat-model"
+    ]
+  },
+  {
+    "q": "umami recognized as one of the five basic tastes",
+    "relevant": [
+      "umami"
+    ]
+  },
+  {
+    "q": "why do onions turn deep brown and taste sweet after cooking them slowly for a long time",
+    "relevant": [
+      "caramelization"
+    ]
+  },
+  {
+    "q": "the stretchy protein complex in wheat flour that lets bread dough hold its shape as it rises",
+    "relevant": [
+      "gluten"
+    ]
+  },
+  {
+    "q": "flaw where an application can be tricked into fetching an internal network address chosen by the attacker",
+    "relevant": [
+      "server-side-request-forgery"
+    ]
+  },
+  {
+    "q": "why should two accounts that happen to pick the same password end up with different stored hash values",
+    "relevant": [
+      "salt-cryptography"
+    ]
+  },
+  {
+    "q": "the little block of data a site leaves in your browser so it still knows who you are on the next page load",
+    "relevant": [
+      "http-cookie"
+    ]
+  },
+  {
+    "q": "raw seafood that goes firm and opaque from sitting in lime juice instead of being heated",
+    "relevant": [
+      "ceviche"
+    ]
+  },
+  {
+    "q": "keeping meat edible by packing it in salt so osmosis pulls the water out and microbes cannot grow",
+    "relevant": [
+      "curing-food-preservation"
+    ]
+  },
+  {
+    "q": "running untrusted or unknown code inside an isolated environment so it cannot touch the rest of the machine",
+    "relevant": [
+      "sandbox-computer-security"
+    ]
+  },
+  {
+    "q": "Korean and Japanese fermented staples eaten as everyday side dishes and seasonings",
+    "relevant": [
+      "kimchi",
+      "miso"
+    ]
+  },
+  {
+    "q": "how do certificates and negotiated keys make an HTTPS connection trustworthy",
+    "relevant": [
+      "transport-layer-security",
+      "certificate-authority",
+      "public-key-infrastructure"
+    ]
+  },
+  {
+    "q": "ways people kept meat from spoiling before refrigeration existed",
+    "relevant": [
+      "curing-food-preservation",
+      "smoking-cooking",
+      "confit"
+    ]
+  },
+  {
+    "q": "how an attacker can act as a user who is already signed in by stealing or riding their session cookie",
+    "relevant": [
+      "cross-site-request-forgery",
+      "session-hijacking"
+    ]
+  },
+  {
+    "q": "classic French foundations for thickening a sauce and building the flavour base of a soup",
+    "relevant": [
+      "roux",
+      "stock-food",
+      "mirepoix"
+    ]
+  },
+  {
+    "q": "techniques for finding security bugs in your own software before an attacker does",
+    "relevant": [
+      "fuzzing",
+      "static-application-security-testing",
+      "penetration-test"
+    ]
+  },
+  {
+    "q": "our login form is getting hit with script tags in the input fields",
+    "relevant": [
+      "cross-site-scripting"
+    ]
+  },
+  {
+    "q": "my pot roast came out tough and stringy after two hours in the oven, what did I do wrong",
+    "relevant": [
+      "braising"
+    ]
+  },
+  {
+    "q": "how do I get risotto creamy and loose instead of gluey and stodgy",
+    "relevant": [
+      "risotto"
+    ]
+  },
+  {
+    "q": "we need to let a third party app read our users' data without ever handing it their passwords",
+    "relevant": [
+      "oauth"
+    ]
+  }
+]

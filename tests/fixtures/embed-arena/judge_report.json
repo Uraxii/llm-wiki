@@ -1,0 +1,533 @@
+{
+  "judge_model": "openai/gpt-4o-mini",
+  "generated": "2026-08-29",
+  "spend_usd": 0.0116,
+  "paid_calls": 25,
+  "summary": {
+    "queries": 25,
+    "exact_agreement": 7,
+    "hand_only_total": 0,
+    "judge_only_total": 90,
+    "mean_jaccard": 0.4776
+  },
+  "queries": [
+    {
+      "q": "The Maillard reaction and non-enzymatic browning of food",
+      "hand": [
+        "maillard-reaction"
+      ],
+      "judge": [
+        "maillard-reaction",
+        "caramelization"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "caramelization"
+      ],
+      "jaccard": 0.5
+    },
+    {
+      "q": "SQL injection attacks against application database queries",
+      "hand": [
+        "sql-injection"
+      ],
+      "judge": [
+        "sql-injection",
+        "web-application-firewall",
+        "common-vulnerabilities-and-exposures",
+        "penetration-test",
+        "static-application-security-testing"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "common-vulnerabilities-and-exposures",
+        "penetration-test",
+        "static-application-security-testing",
+        "web-application-firewall"
+      ],
+      "jaccard": 0.2
+    },
+    {
+      "q": "mirepoix, the diced onion carrot and celery aromatic base",
+      "hand": [
+        "mirepoix"
+      ],
+      "judge": [
+        "mirepoix",
+        "stock-food"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "stock-food"
+      ],
+      "jaccard": 0.5
+    },
+    {
+      "q": "same-origin policy enforced by web browsers",
+      "hand": [
+        "same-origin-policy"
+      ],
+      "judge": [
+        "same-origin-policy",
+        "content-security-policy",
+        "cross-site-request-forgery",
+        "cross-site-scripting",
+        "session-hijacking",
+        "web-application-firewall"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "content-security-policy",
+        "cross-site-request-forgery",
+        "cross-site-scripting",
+        "session-hijacking",
+        "web-application-firewall"
+      ],
+      "jaccard": 0.1667
+    },
+    {
+      "q": "sous vide cooking in a temperature controlled water bath",
+      "hand": [
+        "sous-vide"
+      ],
+      "judge": [
+        "sous-vide"
+      ],
+      "hand_only": [],
+      "judge_only": [],
+      "jaccard": 1.0
+    },
+    {
+      "q": "threat modeling methodologies such as STRIDE and attack trees",
+      "hand": [
+        "threat-model"
+      ],
+      "judge": [
+        "threat-model"
+      ],
+      "hand_only": [],
+      "judge_only": [],
+      "jaccard": 1.0
+    },
+    {
+      "q": "umami recognized as one of the five basic tastes",
+      "hand": [
+        "umami"
+      ],
+      "judge": [
+        "umami"
+      ],
+      "hand_only": [],
+      "judge_only": [],
+      "jaccard": 1.0
+    },
+    {
+      "q": "why do onions turn deep brown and taste sweet after cooking them slowly for a long time",
+      "hand": [
+        "caramelization"
+      ],
+      "judge": [
+        "caramelization",
+        "maillard-reaction",
+        "mirepoix",
+        "risotto",
+        "confit"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "confit",
+        "maillard-reaction",
+        "mirepoix",
+        "risotto"
+      ],
+      "jaccard": 0.2
+    },
+    {
+      "q": "the stretchy protein complex in wheat flour that lets bread dough hold its shape as it rises",
+      "hand": [
+        "gluten"
+      ],
+      "judge": [
+        "gluten",
+        "sourdough",
+        "yeast"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "sourdough",
+        "yeast"
+      ],
+      "jaccard": 0.3333
+    },
+    {
+      "q": "flaw where an application can be tricked into fetching an internal network address chosen by the attacker",
+      "hand": [
+        "server-side-request-forgery"
+      ],
+      "judge": [
+        "server-side-request-forgery",
+        "cross-site-request-forgery",
+        "sql-injection",
+        "clickjacking",
+        "directory-traversal-attack",
+        "zero-day-vulnerability"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "clickjacking",
+        "cross-site-request-forgery",
+        "directory-traversal-attack",
+        "sql-injection",
+        "zero-day-vulnerability"
+      ],
+      "jaccard": 0.1667
+    },
+    {
+      "q": "why should two accounts that happen to pick the same password end up with different stored hash values",
+      "hand": [
+        "salt-cryptography"
+      ],
+      "judge": [
+        "bcrypt",
+        "salt-cryptography"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "bcrypt"
+      ],
+      "jaccard": 0.5
+    },
+    {
+      "q": "the little block of data a site leaves in your browser so it still knows who you are on the next page load",
+      "hand": [
+        "http-cookie"
+      ],
+      "judge": [
+        "http-cookie",
+        "session-hijacking",
+        "cross-site-request-forgery",
+        "cross-site-scripting",
+        "same-origin-policy",
+        "web-application-firewall"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "cross-site-request-forgery",
+        "cross-site-scripting",
+        "same-origin-policy",
+        "session-hijacking",
+        "web-application-firewall"
+      ],
+      "jaccard": 0.1667
+    },
+    {
+      "q": "raw seafood that goes firm and opaque from sitting in lime juice instead of being heated",
+      "hand": [
+        "ceviche"
+      ],
+      "judge": [
+        "ceviche"
+      ],
+      "hand_only": [],
+      "judge_only": [],
+      "jaccard": 1.0
+    },
+    {
+      "q": "keeping meat edible by packing it in salt so osmosis pulls the water out and microbes cannot grow",
+      "hand": [
+        "curing-food-preservation"
+      ],
+      "judge": [
+        "curing-food-preservation",
+        "confit"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "confit"
+      ],
+      "jaccard": 0.5
+    },
+    {
+      "q": "running untrusted or unknown code inside an isolated environment so it cannot touch the rest of the machine",
+      "hand": [
+        "sandbox-computer-security"
+      ],
+      "judge": [
+        "sandbox-computer-security",
+        "fuzzing",
+        "static-application-security-testing",
+        "web-application-firewall",
+        "sql-injection",
+        "cross-site-scripting",
+        "clickjacking",
+        "denial-of-service-attack",
+        "privilege-escalation",
+        "supply-chain-attack",
+        "server-side-request-forgery",
+        "common-vulnerabilities-and-exposures",
+        "transport-layer-security",
+        "threat-model",
+        "json-web-token",
+        "oauth"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "clickjacking",
+        "common-vulnerabilities-and-exposures",
+        "cross-site-scripting",
+        "denial-of-service-attack",
+        "fuzzing",
+        "json-web-token",
+        "oauth",
+        "privilege-escalation",
+        "server-side-request-forgery",
+        "sql-injection",
+        "static-application-security-testing",
+        "supply-chain-attack",
+        "threat-model",
+        "transport-layer-security",
+        "web-application-firewall"
+      ],
+      "jaccard": 0.0625
+    },
+    {
+      "q": "Korean and Japanese fermented staples eaten as everyday side dishes and seasonings",
+      "hand": [
+        "kimchi",
+        "miso"
+      ],
+      "judge": [
+        "kimchi",
+        "miso",
+        "fermentation-in-food-processing",
+        "tofu"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "fermentation-in-food-processing",
+        "tofu"
+      ],
+      "jaccard": 0.5
+    },
+    {
+      "q": "how do certificates and negotiated keys make an HTTPS connection trustworthy",
+      "hand": [
+        "transport-layer-security",
+        "certificate-authority",
+        "public-key-infrastructure"
+      ],
+      "judge": [
+        "certificate-authority",
+        "public-key-infrastructure",
+        "transport-layer-security"
+      ],
+      "hand_only": [],
+      "judge_only": [],
+      "jaccard": 1.0
+    },
+    {
+      "q": "ways people kept meat from spoiling before refrigeration existed",
+      "hand": [
+        "curing-food-preservation",
+        "smoking-cooking",
+        "confit"
+      ],
+      "judge": [
+        "curing-food-preservation",
+        "smoking-cooking",
+        "confit"
+      ],
+      "hand_only": [],
+      "judge_only": [],
+      "jaccard": 1.0
+    },
+    {
+      "q": "attacks that abuse the session of a user who is already logged in",
+      "hand": [
+        "cross-site-request-forgery",
+        "session-hijacking"
+      ],
+      "judge": [
+        "clickjacking",
+        "cross-site-request-forgery",
+        "session-hijacking",
+        "sql-injection",
+        "supply-chain-attack"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "clickjacking",
+        "sql-injection",
+        "supply-chain-attack"
+      ],
+      "jaccard": 0.4
+    },
+    {
+      "q": "classic French foundations for thickening a sauce and building the flavour base of a soup",
+      "hand": [
+        "roux",
+        "stock-food",
+        "mirepoix"
+      ],
+      "judge": [
+        "mirepoix",
+        "roux",
+        "stock-food"
+      ],
+      "hand_only": [],
+      "judge_only": [],
+      "jaccard": 1.0
+    },
+    {
+      "q": "techniques for finding security bugs in your own software before an attacker does",
+      "hand": [
+        "fuzzing",
+        "static-application-security-testing",
+        "penetration-test"
+      ],
+      "judge": [
+        "buffer-overflow",
+        "clickjacking",
+        "common-vulnerabilities-and-exposures",
+        "content-security-policy",
+        "cross-site-request-forgery",
+        "cross-site-scripting",
+        "denial-of-service-attack",
+        "directory-traversal-attack",
+        "fuzzing",
+        "penetration-test",
+        "privilege-escalation",
+        "sql-injection",
+        "static-application-security-testing",
+        "supply-chain-attack",
+        "threat-model",
+        "web-application-firewall",
+        "zero-day-vulnerability"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "buffer-overflow",
+        "clickjacking",
+        "common-vulnerabilities-and-exposures",
+        "content-security-policy",
+        "cross-site-request-forgery",
+        "cross-site-scripting",
+        "denial-of-service-attack",
+        "directory-traversal-attack",
+        "privilege-escalation",
+        "sql-injection",
+        "supply-chain-attack",
+        "threat-model",
+        "web-application-firewall",
+        "zero-day-vulnerability"
+      ],
+      "jaccard": 0.1765
+    },
+    {
+      "q": "our login form is getting hit with script tags in the input fields",
+      "hand": [
+        "cross-site-scripting"
+      ],
+      "judge": [
+        "cross-site-scripting",
+        "sql-injection",
+        "clickjacking",
+        "web-application-firewall",
+        "content-security-policy",
+        "session-hijacking",
+        "server-side-request-forgery",
+        "denial-of-service-attack",
+        "directory-traversal-attack",
+        "common-vulnerabilities-and-exposures"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "clickjacking",
+        "common-vulnerabilities-and-exposures",
+        "content-security-policy",
+        "denial-of-service-attack",
+        "directory-traversal-attack",
+        "server-side-request-forgery",
+        "session-hijacking",
+        "sql-injection",
+        "web-application-firewall"
+      ],
+      "jaccard": 0.1
+    },
+    {
+      "q": "my pot roast came out tough and stringy after two hours in the oven, what did I do wrong",
+      "hand": [
+        "braising"
+      ],
+      "judge": [
+        "braising",
+        "confit",
+        "marination",
+        "pressure-cooking",
+        "stock-food",
+        "sous-vide",
+        "maillard-reaction",
+        "mirepoix",
+        "risotto",
+        "roux"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "confit",
+        "maillard-reaction",
+        "marination",
+        "mirepoix",
+        "pressure-cooking",
+        "risotto",
+        "roux",
+        "sous-vide",
+        "stock-food"
+      ],
+      "jaccard": 0.1
+    },
+    {
+      "q": "how do I get risotto creamy and loose instead of gluey and stodgy",
+      "hand": [
+        "risotto"
+      ],
+      "judge": [
+        "risotto",
+        "marination",
+        "mirepoix",
+        "roux",
+        "stock-food",
+        "sous-vide"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "marination",
+        "mirepoix",
+        "roux",
+        "sous-vide",
+        "stock-food"
+      ],
+      "jaccard": 0.1667
+    },
+    {
+      "q": "we need to let a third party app read our users' data without ever handing it their passwords",
+      "hand": [
+        "oauth"
+      ],
+      "judge": [
+        "oauth",
+        "json-web-token",
+        "http-cookie",
+        "session-hijacking",
+        "web-application-firewall"
+      ],
+      "hand_only": [],
+      "judge_only": [
+        "http-cookie",
+        "json-web-token",
+        "session-hijacking",
+        "web-application-firewall"
+      ],
+      "jaccard": 0.2
+    }
+  ]
+}
