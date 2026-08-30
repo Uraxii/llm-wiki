@@ -4,28 +4,13 @@ This file provides instructions and context for AI coding agents working on this
 
 ## Build & Test
 
-Python 3.14, stdlib only until a phase adds its dependency (see `docs/plans/01-llm-wiki-poc/overview.md`).
+Python 3.14, standard library only. No third party package, in any phase.
+See the Dependencies rule below.
 
 ```bash
 python3 -m unittest discover tests
 python3 -m compileall -q llmwiki
 ```
-
-**Interpreter.** Phases 1 to 10 run on bare `python3` (3.14.7). From phase 11
-the suite needs `trafilatura`, `pypdf` and `sqlite-vec`, which live in `.venv`,
-so run it as `.venv/bin/python -m unittest discover tests` instead. That venv
-is Python 3.14.7 and git-ignored. It exists because PEP 668 refuses
-`pip install --user` on this Homebrew Python; do not reach for
-`--break-system-packages`, which risks the Homebrew install. Rebuild it with:
-
-```bash
-uv venv --python 3.14 .venv
-uv pip install --python .venv/bin/python trafilatura pypdf sqlite-vec
-```
-
-`sqlite-vec` needs a SQLite extension load. This build allows it, verified: a
-`vec0` virtual table creates and a KNN query returns. A Python built without
-`enable_load_extension` would break the phase 13 store outright.
 
 The suite must be hermetic. Run it a second time with a dead proxy and get
 the identical result; anything else means a module reached the real network:
@@ -82,9 +67,18 @@ around as that dict. Do not re-type it into dataclasses.
 
 ## Conventions & Patterns
 
-**Dependencies.** Standard library first, always. A dependency arrives only
-in the phase that needs it (`trafilatura` and `pypdf` in phase 11,
-`sqlite-vec` in 13). Never argparse, pyyaml, numpy, or requests.
+**Dependencies.** The standard library, and nothing else. This is not
+"standard library first"; it is standard library only, by the user's
+instruction. No third party package, in any phase, for any reason.
+
+Two consequences that have already been paid for. HTML extraction is a small
+`html.parser` densest-block reader, not `trafilatura`, and anything it cannot
+read is stored as raw bytes. There is no PDF text extraction, because the
+standard library has none; do not hand-roll one. Vector search is `sqlite3`
+alone, storing vectors as blobs and scoring them in Python, not `sqlite-vec`.
+
+If a task seems to need a package, that is a signal the task is too ambitious
+for this PoC. Cut the task, do not add the package.
 
 **Network.** Never `urllib.request.urlopen` anywhere in this project. It
 reads `http_proxy` from the environment and follows redirects, and both
