@@ -1,0 +1,26 @@
+# Recipe box, acceptance rung 1.
+#
+# The endpoint url is appended at run time by run_rung1.py from the
+# LLM_WIKI_ENDPOINT_URL environment variable, so no host and no
+# credential is ever checked in here.
+
+[models]
+# NOT the project default. The default summarizer (deepseek/deepseek-v3.2)
+# corrupts this kb's cook_time_minutes field on roughly two pages in three
+# through the live endpoint: "方式和45", "Sheet 45", "procedurally
+# incorrect", and once a plausible but wrong "154" where the source says 3.
+# The same prompt on two other models returns "3" exactly. Every other field
+# comes back clean, so this is token corruption on that route, not a
+# prompting failure. Measured in phase 10; see the beads ticket on the
+# summarizer default. Revisit this line when that is settled.
+summarize = "google/gemini-2.5-flash"
+
+# No identifier vocabulary. A recipe box has nothing an identifier
+# would buy: no catalogue number, no advisory id, no stable external
+# key. Every fact worth grepping is a plain frontmatter field instead,
+# named in SUMMARIZE.md.
+#
+# The table is present and empty on purpose. The CLI renders it into
+# the summarizer prompt as "No identifier keys are declared", and the
+# lint rejects any page that emits a key anyway.
+[identifiers]

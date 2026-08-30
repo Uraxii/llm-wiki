@@ -1,0 +1,10 @@
+
+# Vocab pass only (run_rung1.py --vocab). Appended to the config above
+# to answer one question the empty vocabulary cannot: which two sources
+# describe the same dish. Story membership joins on shared identifiers
+# and on nothing else, so with no key declared every story is a
+# singleton. One key, and it has to be a discriminating one: an
+# ingredient key would put every recipe sharing salt into one story.
+[identifiers.dish]
+pattern = "^[a-z ]+$"
+describe = "the dish's plain common name, lowercase, no accents, same value as the dish field"
