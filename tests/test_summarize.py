@@ -246,6 +246,40 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(page_path.read_text(), before)
 
+    def test_rollback_restores_non_utf8_previous_page_byte_for_byte(self) -> None:
+        digest = self._store_source()
+        original = (
+            b"---\n"
+            b"kind: summary\n"
+            b"title: Old Widget\n"
+            b"source: " + digest.encode() + b"\n"
+            b"identifiers:\n"
+            b"  - isbn:1234567890123\n"
+            b"---\n\n"
+            b"body with \xff\xfe bad bytes\n"
+        )
+        page_path = self.root / "wiki" / "old-widget.md"
+        page_path.write_bytes(original)
+
+        bad_reply = (
+            "---\n"
+            "title: Bad Widget\n"
+            "identifiers:\n"
+            "  - asin:B000123\n"
+            "---\n\n"
+            "Bad abstract.\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": bad_reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url, ISBN_TABLE)
+            code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(page_path.read_bytes(), original)
+
     def test_model_error_aborts_run_and_writes_nothing(self) -> None:
         digest = self._store_source()
 

@@ -14,8 +14,10 @@ from llmwiki.core import (
     Kb,
     append_log_entry,
     as_list,
+    atomic_write_bytes,
     atomic_write_text,
     parse_frontmatter,
+    read_page_text,
     render_frontmatter,
     slugify,
 )
@@ -103,7 +105,7 @@ def _summary_index(kb: Kb) -> dict[str, tuple[Path, str]]:
     every existing summary page."""
     index: dict[str, tuple[Path, str]] = {}
     for path in sorted(kb.wiki.glob("*.md")):
-        parsed = parse_frontmatter(path.read_text(encoding="utf-8"))
+        parsed = parse_frontmatter(read_page_text(path))
         if parsed is None:
             continue
         fields, _body = parsed
@@ -215,13 +217,13 @@ def _process_digest(
     reply_fields, body = parsed
     page_path = _target_path(kb, digest, title, index)
     fields = _build_fields(reply_fields, digest, provenance, kb, fingerprint)
-    previous = page_path.read_text(encoding="utf-8") if page_path.is_file() else None
+    previous = page_path.read_bytes() if page_path.is_file() else None
     atomic_write_text(page_path, render_frontmatter(fields, body))
 
     findings = lint_pages(kb.root, [page_path])
     if findings:
         if previous is not None:
-            atomic_write_text(page_path, previous)
+            atomic_write_bytes(page_path, previous)
         else:
             page_path.unlink()
         finding = findings[0]
