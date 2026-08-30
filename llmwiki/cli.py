@@ -1,6 +1,6 @@
 """CLI entry point for llm-wiki.
 
-Usage: `python3 -m llmwiki [--kb PATH] <verb> [args]`. `--kb`, when
+Usage: `llmwiki [--kb PATH] <verb> [args]`. `--kb`, when
 given, must come before the verb and names the kb root directly (the
 `.kb` directory itself, not its parent).
 """
@@ -210,7 +210,7 @@ VERBS: dict[str, tuple[Verb, str]] = {
 
 
 def _usage() -> str:
-    lines = ["usage: python3 -m llmwiki [--kb PATH] <verb> [args]", ""]
+    lines = ["usage: llmwiki [--kb PATH] <verb> [args]", ""]
     lines.extend(usage for _fn, usage in VERBS.values())
     return "\n".join(lines)
 
