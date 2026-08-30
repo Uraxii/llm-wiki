@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from importlib import resources
 from pathlib import Path
 
 from llmwiki.core import Kb, append_log_entry, atomic_write_text
 from llmwiki.lint import lint_pages, select_pages
 from llmwiki import dedup, ingest, summarize, vectors
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_SKELETON = REPO_ROOT / "docs" / "design" / "SCHEMA.skeleton.md"
+SCHEMA_SKELETON = resources.files("llmwiki").joinpath("SCHEMA.skeleton.md")
 
 GLOBAL_STORE = Path.home() / ".local" / "share" / "agent-kb"
 
