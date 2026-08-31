@@ -1,0 +1,21 @@
+{
+  "name": "agent-kb",
+  "interface": {
+    "displayName": "agent-kb"
+  },
+  "plugins": [
+    {
+      "name": "llm-wiki",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/Uraxii/agent-kb.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
