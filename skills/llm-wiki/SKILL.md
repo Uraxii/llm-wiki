@@ -44,6 +44,21 @@ In order:
 `llmwiki where` prints the one that resolved. Run it first when you are
 unsure, and before any verb that writes.
 
+**Which one to reach for.** Knowledge about one project lives in that
+project's `.kb`, at the repo root, one per project, the way `.beads/`
+does. Knowledge that is not tied to a repo goes to the global store.
+If you are in a repo, the knowledge belongs to it, and there is no
+`.kb` yet, create it once from the repo root:
+
+```
+llmwiki init
+```
+
+`init` writes `.kb/.gitignore` excluding `vectors/`, which is the
+rebuildable part, so the rest of the kb can be committed with the
+project. Sources and pages are worth keeping in history; the vector
+store is not.
+
 ## Starting a kb
 
 ```
