@@ -122,6 +122,11 @@ that needs it. Never write it to a file, never put it in
 `config.toml`, never print it, never leave it exported in a shell other
 agents share.
 
+A shell may already do this for you: a wrapper function that fetches the
+key per command and passes it to that one process. If a plain `llmwiki
+search` works without you handling a key, that is why, and you should
+not go looking for one.
+
 Which verbs need it: `ingest`, `summarize`, `embed`, `search`, and
 `dedup` only when a judge model is configured, which you should not do.
 `init`, `where`, `lint` and `status` never call a model and work with
