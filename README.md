@@ -31,6 +31,44 @@ Sources, summary pages, story pages, `log.md` and the vector store are the
 CLI's. Everything else under `wiki/`, `index.md` included, belongs to the
 agent, and the CLI never overwrites it.
 
+## Install as a plugin
+
+The plugin ships one skill, `llm-wiki`. It does not ship the `llmwiki` binary,
+because no plugin format for these harnesses can declare or install an external
+program. Install the plugin, then install the CLI as described under CLI above.
+
+Claude Code:
+
+```bash
+claude plugin marketplace add Uraxii/agent-kb
+claude plugin install llm-wiki@agent-kb
+```
+
+Codex:
+
+```bash
+codex plugin marketplace add Uraxii/agent-kb
+codex plugin add llm-wiki@agent-kb
+```
+
+Copilot CLI:
+
+```bash
+copilot plugin install Uraxii/agent-kb
+```
+
+To load the skill from a local clone without installing anything, pass the
+clone to the harness for one session:
+
+```bash
+claude --plugin-dir /path/to/agent-kb
+copilot --plugin-dir /path/to/agent-kb
+```
+
+`scripts/check-skill-sync.sh` fails if the manifest versions drift from
+`pyproject.toml`, or if this repo's copy of the skill drifts from the copy in
+a `dotai` checkout.
+
 ## Status
 
 The pipeline runs end to end against a real endpoint: ingest, summarize,
