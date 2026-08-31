@@ -83,7 +83,7 @@ declare no key you cannot write a real pattern for.
 [models]
 summarize = "<chat model id>"
 embed = "<embedding model id>"
-dedup = "<chat model id>"      # optional, see Sharp edges
+# Leave `dedup` unset. See Sharp edges.
 
 [endpoint]
 url = "https://api.example.com/v1"
@@ -169,13 +169,17 @@ it would have replaced survives.
 
 Verified, and open on the tracker at the time of writing.
 
-- **A kb with no identifier vocabulary never joins anything.**
-  Configuring `[models] dedup` does not rescue it. The judge is
-  prompted with an incident-tracker definition of sameness, "one
-  real-world occurrence", so it correctly refuses to merge two sources
-  that are merely about the same subject. Measured: two documents on
-  one subject, vector similarity 0.7579, judged NONE. Declare the
-  vocabulary. `agent-kb-zn6`, `agent-kb-d1w`.
+- **Declare an identifier vocabulary and leave `[models] dedup` unset.**
+  Those are the settings under which sources join into one story. With
+  no vocabulary, nothing ever joins. With a judge configured, nothing
+  ever joins either, because the judge is prompted with an
+  incident-tracker definition of sameness, "one real-world occurrence",
+  and two sources merely about the same subject are correctly NONE
+  under it. Measured on one kb, three sources, `dish` declared: judge
+  configured gave three singleton stories despite two pages carrying an
+  identical `dish:creme brulee`; the same kb with the judge removed and
+  `dedup --rebuild` joined those two into one story, no model call.
+  `agent-kb-zn6`, `agent-kb-d1w`.
 - **One unreadable source makes a bare `llmwiki summarize` exit 1 for
   good**, with the reason only in `log.md`. Read the log before you
   believe the kb is broken, and pass explicit digests to work around
