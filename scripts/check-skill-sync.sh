@@ -14,7 +14,6 @@ manifests=(
   ".claude-plugin/plugin.json"
   ".codex-plugin/plugin.json"
   "plugin.json"
-  ".github/plugin/plugin.json"
 )
 
 failures=0
