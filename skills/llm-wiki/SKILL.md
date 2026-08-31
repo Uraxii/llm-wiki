@@ -89,9 +89,28 @@ embed = "<embedding model id>"
 url = "https://api.example.com/v1"
 ```
 
-The credential comes from the environment and nowhere else:
-`LLM_WIKI_API_KEY` as a value, or `LLM_WIKI_API_KEY_FILE` as a path to
-one. Never put it in `config.toml`. Never print it.
+## The credential
+
+Read from the environment and nowhere else: `LLM_WIKI_API_KEY` as a
+value, or `LLM_WIKI_API_KEY_FILE` as a path to one.
+
+**Nothing sets it for you.** A fresh shell has no key, and every verb
+that calls a model then stops with
+
+```
+llmwiki: search: no API key: set LLM_WIKI_API_KEY or LLM_WIKI_API_KEY_FILE
+```
+
+and exit 2. Fetch the key from wherever this machine keeps its secrets,
+this user has a skill for it, and pass it inline to the one command
+that needs it. Never write it to a file, never put it in
+`config.toml`, never print it, never leave it exported in a shell other
+agents share.
+
+Which verbs need it: `ingest`, `summarize`, `embed`, `search`, and
+`dedup` only when a judge model is configured, which you should not do.
+`init`, `where`, `lint` and `status` never call a model and work with
+no key at all.
 
 ## Keeping something
 
