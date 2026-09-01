@@ -46,14 +46,16 @@ class Principal:
 class Refusal:
     """Why a caller got nothing. Every authentication failure returns
     the one `UNAUTHORIZED` value, so a caller cannot tell an unknown id
-    from a wrong secret, a revoked row, or an expired one."""
+    from a wrong secret, a revoked row, or an expired one. A
+    `rate_limited` refusal carries `retry_after`, the whole seconds the
+    caller should wait; every other reason leaves it `None`."""
 
     reason: str
+    retry_after: int | None = None
 
 
 ANONYMOUS = Principal(token_id="", label="anonymous", role="reader")
 UNAUTHORIZED = Refusal("unauthorized")
-RATE_LIMITED = Refusal("rate_limited")
 
 
 class FailureLimiter:
@@ -80,11 +82,16 @@ class FailureLimiter:
         # expiry, which is what makes `_forget_expired` below cheap.
         self._windows: OrderedDict[str, tuple[float, int]] = OrderedDict()
 
-    def blocked(self, client: str, now: float | None = None) -> bool:
-        """True while `client` has spent its budget in the open window."""
+    def retry_after(self, client: str, now: float | None = None) -> int | None:
+        """`None` while `client` has budget left in the open window;
+        otherwise the whole seconds, rounded up and floored at 1, until
+        that window closes."""
         started, count = self._windows.get(client, (0.0, 0))
         moment = time.monotonic() if now is None else now
-        return count >= self.limit and moment - started < self.window_sec
+        remaining = self.window_sec - (moment - started)
+        if count >= self.limit and remaining > 0:
+            return max(1, math.ceil(remaining))
+        return None
 
     def record_failure(self, client: str, now: float | None = None) -> None:
         moment = time.monotonic() if now is None else now
@@ -144,12 +151,20 @@ class SearchLimiter:
     phase 3 spec's own test drives: sixty requests spanning a minute
     boundary in two seconds must return 429.
 
-    Same eviction discipline as `FailureLimiter`, and for the same
-    reason: when the table is saturated with clients that are ALL still
-    inside their window, there is nothing safely reclaimable, so a new
-    client goes untracked (and unlimited) for that stretch rather than
-    evicting a live client's window, which would be the reset attack
+    Same eviction discipline as `FailureLimiter`: when the table is
+    saturated with clients that are ALL still inside their window,
+    there is nothing safely reclaimable, so a new client is never
+    tracked by evicting a live one, which would be the reset attack
     `FailureLimiter` already refuses.
+
+    Past that point the two limiters diverge. An untracked
+    `FailureLimiter` client only gets more guesses at a password, a
+    bounded cost. An untracked `SearchLimiter` client gets unlimited
+    calls against a paid embed, an unbounded one, and a flood of
+    distinct addresses (an IPv6 /64 makes them free) can saturate the
+    table on purpose. So a client this limiter cannot track is refused,
+    not admitted: `check` returns a `Retry-After` value instead of
+    `None`.
     """
 
     def __init__(self, limit: int, window_sec: int = SEARCH_WINDOW_SEC) -> None:
@@ -170,10 +185,17 @@ class SearchLimiter:
         else:
             self._forget_expired(moment)
             if len(self._calls) >= MAX_TRACKED_SEARCH_CLIENTS:
-                return None  # untracked while saturated, same cut as FailureLimiter
+                # A client this table cannot track is refused, not
+                # admitted; see the class docstring. No window is on
+                # record for it, so the full window is the Retry-After.
+                return self.window_sec
             timestamps = deque()
             self._calls[client] = timestamps
         if len(timestamps) >= self.limit:
+            if not timestamps:
+                # `limit` of zero or less: no call is ever allowed, and
+                # there is no oldest call to measure a shorter wait from.
+                return self.window_sec
             return max(1, math.ceil(self.window_sec - (moment - timestamps[0])))
         timestamps.append(moment)
         return None
@@ -226,8 +248,9 @@ def authorize(
     required = ROLE_FOR_OPERATION.get(operation)
     if required is None:
         return UNAUTHORIZED
-    if limiter.blocked(client):
-        return RATE_LIMITED
+    retry_after = limiter.retry_after(client)
+    if retry_after is not None:
+        return Refusal("rate_limited", retry_after)
     token = bearer_token(header)
     if token is None:
         if operation == "read" and access.get("read") == OPEN:

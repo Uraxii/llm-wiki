@@ -477,18 +477,22 @@ def rank(kb: Kb, query: str, n: int = TOP_K, kind: str | None = None) -> Ranking
     survives an embed whose page has since been unlinked; those are
     skipped, exactly as `search` skips them today. Makes ONE paid
     embedding call, for the query, and only after the staleness check
-    passes. Raises StaleVectors, carrying `missing`, the number of
-    pages lacking a current vector, because the route's 503 body has to
-    report it; NoEmbedModel when [models] embed is unset; and ModelError
-    from the endpoint. ONE _plan walk and ONE connection, per _plan's
-    own contract at vectors.py:180."""
+    passes. Raises NoEmbedModel when [models] embed is unset, checked
+    before staleness so an empty wiki still raises it instead of
+    reaching the paid embed call below; `missing` is the stale count at
+    that point, 0 on an empty wiki. Raises StaleVectors, carrying
+    `missing`, the number of pages lacking a current vector, when an
+    embed model IS set but pages are stale, because the route's 503
+    body has to report it. Raises ModelError from the endpoint. ONE
+    _plan walk and ONE connection, per _plan's own contract at
+    vectors.py:180."""
     model_id = _model_id(kb)
     conn = _connect(kb, model_id) if model_id is not None else None
     try:
         stale, _to_delete, seen = _plan(kb, conn)
+        if model_id is None:
+            raise NoEmbedModel(len(stale))
         if stale:
-            if model_id is None:
-                raise NoEmbedModel(len(stale))
             raise StaleVectors(len(stale))
         unsummarized = len(_unsummarized(kb, seen))
 

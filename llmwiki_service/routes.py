@@ -13,8 +13,10 @@ carries `missing`:
   revoked token id, or a role below `reader`. One body for all of them,
   per phase 3's own rule that a caller cannot tell "you are nobody"
   from "you are somebody with no access here".
-- `rate_limited` (429): the caller's `search` budget for this window is
-  spent. Carries a `Retry-After` header, never a body field.
+- `rate_limited` (429): too many failed authentications from the caller
+  in the current window, or the caller's `search` budget for this
+  window is spent. Every 429 carries a `Retry-After` header; none
+  carries a body field.
 - `not_found` (404): reused for every "there is nothing here" case an
   attacker could otherwise use to enumerate the deployment: an unknown
   kb name, a rejected or missing page name, and a kb with no
@@ -36,7 +38,11 @@ carries `missing`:
 - `no_embed_model` (501): the kb has no `[models] embed`.
 - `model_error` (502): the embedding endpoint failed.
 - `internal_error` (500): `SCHEMA.md` exists but a read failed for a
-  reason other than "missing" (a permissions fault, say).
+  reason other than "missing" (a permissions fault, say), or any other
+  unhandled fault a route raises. `schema_route` emits the first case
+  itself; `app.py`'s `Exception` handler emits the second for every
+  route, so one bad page or one dropped database lock never answers
+  plain text.
 """
 from __future__ import annotations
 
@@ -61,9 +67,16 @@ def _error(status: int, code: str, **extra) -> JSONResponse:
     return JSONResponse({"error": code, **extra}, status_code=status)
 
 
+def _rate_limited(retry_after: int) -> JSONResponse:
+    response = _error(429, "rate_limited")
+    response.headers["Retry-After"] = str(retry_after)
+    return response
+
+
 def _refusal_response(refusal: Refusal) -> JSONResponse:
-    status = 429 if refusal.reason == "rate_limited" else 401
-    return _error(status, refusal.reason)
+    if refusal.reason == "rate_limited":
+        return _rate_limited(refusal.retry_after)
+    return _error(401, refusal.reason)
 
 
 def _parse_n(raw: str | None, default: int) -> int | None:
@@ -152,14 +165,15 @@ def make_routes(
 
         kind = request.query_params.get("kind") or None
 
-        limiter_key = (
-            principal.token_id if access.get("read") == "token" else client
-        )
+        # Keyed on the auth result, not a second read of `[access]
+        # read`: `principal.token_id` is "" for `auth.ANONYMOUS`, so
+        # open read falls through to the address by construction and
+        # a token read never shares the address bucket with another
+        # token, whatever `[access] read` is spelled or left unset.
+        limiter_key = principal.token_id or client
         retry_after = search_limiter.check(limiter_key)
         if retry_after is not None:
-            response = _error(429, "rate_limited")
-            response.headers["Retry-After"] = str(retry_after)
-            return response
+            return _rate_limited(retry_after)
 
         try:
             ranking = rank(kb, q, n, kind)
@@ -198,6 +212,13 @@ def make_routes(
         try:
             body = candidate.read_bytes()
         except OSError:
+            # Deliberately 404, not 500, unlike schema_route's split of
+            # "missing" from "exists but unreadable": a page name is
+            # caller-chosen, so a distinct status here would let an
+            # attacker enumerate which names exist but are locked down,
+            # the same oracle the token-before-kb-name check order
+            # already closes. Pinned by
+            # test_an_unreadable_page_404s_rather_than_500ing.
             return _error(404, "not_found")
         # No charset: passing headers directly bypasses Starlette's
         # automatic "; charset=utf-8" append for any text/* media type
@@ -231,12 +252,27 @@ def make_routes(
             path = kb.wiki / filename
             try:
                 stat = path.stat()
+            except OSError:
+                continue  # unlinked between the glob and this stat
+            try:
                 text = read_page_text(path)
             except FileNotFoundError:
-                continue  # unlinked between the glob and this read
-            parsed = parse_frontmatter(text)
-            page_kind = parsed[0].get("kind") if parsed else None
-            title = parsed[0].get("title") if parsed else None
+                continue  # unlinked between the stat and this read
+            except OSError:
+                # The name exists but its bytes do not: a directory
+                # named "*.md" (wiki/ is the user's agent's to
+                # populate, and the spec lets it hold a subdirectory)
+                # or a permissions fault. Listed with kind and title
+                # both null, same as unparseable frontmatter, per the
+                # spec: "A page the wiki holds and the listing hides
+                # is worse than a page the listing admits it cannot
+                # read" (phase-03-read-endpoints.md).
+                page_kind = None
+                title = None
+            else:
+                parsed = parse_frontmatter(text)
+                page_kind = parsed[0].get("kind") if parsed else None
+                title = parsed[0].get("title") if parsed else None
             if kind is not None and page_kind != kind:
                 continue
             entries.append(
