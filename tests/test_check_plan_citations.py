@@ -30,7 +30,7 @@ class ScanTest(unittest.TestCase):
     def test_correct_citation_is_not_flagged(self) -> None:
         self.write(
             "doc.md",
-            "`NEIGHBOUR_FLOOR = 0.35` (`vectors.py:46`) is the standing "
+            "`NEIGHBOUR_FLOOR = 0.35` (`vectors.py:47`) is the standing "
             "proof.\n",
         )
         self.assertEqual(checker.scan(self.tmp), [])
@@ -43,7 +43,7 @@ class ScanTest(unittest.TestCase):
         )
         stale = checker.scan(self.tmp)
         self.assertEqual(len(stale), 1)
-        self.assertIn("vectors.py:46-46", stale[0][1])
+        self.assertIn("vectors.py:47-47", stale[0][1])
 
     def test_deleted_symbol_is_flagged(self) -> None:
         self.write(

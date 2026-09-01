@@ -148,6 +148,88 @@ class VectorsTest(unittest.TestCase):
         self.assertEqual(embedded, 1)
         self.assertEqual(len(fake.requests), 2)
 
+    def test_frontmatter_only_change_does_not_reembed(self) -> None:
+        """A field the embedding never reads (dedup's `story:`
+        back-reference, standing in here) must not force a re-embed:
+        the staleness key covers kind, title and embed text, never the
+        whole file."""
+        path = self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+            self.assertEqual(len(fake.requests), 1)
+
+            path.write_text(
+                render_frontmatter(
+                    {"kind": "note", "title": "North Page", "story": "some-story"},
+                    "Body text.",
+                )
+            )
+            embedded = vectors.sweep(kb)
+
+        self.assertEqual(embedded, 0)
+        self.assertEqual(len(fake.requests), 1)  # no new call at all
+
+    def test_summary_field_change_reembeds(self) -> None:
+        path = self.root / "wiki" / "north.md"
+        path.write_text(
+            render_frontmatter(
+                {"kind": "summary", "title": "North Page", "summary": "Old summary."},
+                "Body text.",
+            )
+        )
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+            self.assertEqual(len(fake.requests), 1)
+
+            path.write_text(
+                render_frontmatter(
+                    {"kind": "summary", "title": "North Page", "summary": "New summary."},
+                    "Body text.",
+                )
+            )
+            embedded = vectors.sweep(kb)
+
+        self.assertEqual(embedded, 1)
+        self.assertEqual(len(fake.requests), 2)
+
+    def test_body_change_reembeds_when_no_summary_field(self) -> None:
+        path = self._write_page("north", "North Page", body="Old body.")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+            self.assertEqual(len(fake.requests), 1)
+
+            path.write_text(
+                render_frontmatter({"kind": "note", "title": "North Page"}, "New body.")
+            )
+            embedded = vectors.sweep(kb)
+
+        self.assertEqual(embedded, 1)
+        self.assertEqual(len(fake.requests), 2)
+
     def test_sweep_deletes_row_for_vanished_page(self) -> None:
         north = self._write_page("north", "North Page")
         self._write_page("south", "South Page")

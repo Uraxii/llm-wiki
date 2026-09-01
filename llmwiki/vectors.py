@@ -27,6 +27,7 @@ from llmwiki.core import (
     as_list,
     flatten,
     parse_frontmatter,
+    read_page_text,
 )
 from llmwiki.lint import select_pages
 from llmwiki.model import ModelError, embed, model_name
@@ -111,6 +112,8 @@ def _ensure_table(conn: sqlite3.Connection, dim: int, db_file: Path) -> None:
     sqlite3 dimension-mismatch error; read the stored dimension back
     from `sqlite_master` and raise an actionable error here instead."""
     conn.execute(
+        # file_hash: historical name, now holds the embed-input hash
+        # (kind + title + embed text), not a whole-file hash.
         "CREATE VIRTUAL TABLE IF NOT EXISTS pages USING vec0("
         "path TEXT PRIMARY KEY, kind TEXT, +file_hash TEXT, +title TEXT, "
         f"embedding FLOAT[{dim}] distance_metric=cosine)"
@@ -148,37 +151,48 @@ def _embed_text(fields: dict, body: str) -> str:
     return "\n".join([title, identifiers, tail])
 
 
+def _embed_hash(kind: str, title: str, embed_text: str) -> str:
+    """sha256 over exactly what a row stores and what the embedding
+    depends on: `kind`, `title`, `embed_text`, NUL-joined so no field
+    boundary is ambiguous. A frontmatter field the embedding never
+    reads (dedup's `story:` back-reference, say) changes the file
+    without changing this."""
+    joined = "\x00".join([kind, title, embed_text])
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
 def _page_row(path: Path) -> tuple[str, str, str, str, str, str]:
-    """Read `path` once: `(name, kind, file_hash, title, embed_text,
-    source)`. file_hash is sha256 of the WHOLE file, frontmatter
-    included; staleness is judged by this, never by mtime.
+    """Read `path` once: `(name, kind, embed_hash, title, embed_text,
+    source)`. embed_hash covers `kind`, `title` and `embed_text`, the
+    row's own semantic content, never the whole file; staleness is
+    judged by this, never by mtime.
 
     An unparseable page is NOT skipped: skipping it would mean it never
     gets a vector, so `search`'s refusal would fire forever with no way
     to clear it. It gets kind="", title=path.name, and its embed text
     is the filename plus the first BODY_HEAD_CHARS of raw text.
 
-    Cannot use `core.read_page_text` here: file_hash below is sha256
-    of the raw bytes, so this needs the bytes themselves, not a decoded
-    (and possibly replaced) copy.
+    Uses `core.read_page_text`: the hash no longer needs the raw bytes
+    themselves, only the same decoded text `parse_frontmatter` reads.
     """
-    raw = path.read_bytes()
-    file_hash = hashlib.sha256(raw).hexdigest()
-    text = raw.decode("utf-8", errors="replace")
+    text = read_page_text(path)
     parsed = parse_frontmatter(text)
     if parsed is None:
         embed_text = f"{path.name}\n{text[:BODY_HEAD_CHARS]}"
-        return path.name, "", file_hash, path.name, embed_text, ""
+        embed_hash = _embed_hash("", path.name, embed_text)
+        return path.name, "", embed_hash, path.name, embed_text, ""
 
     fields, body = parsed
     kind = str(fields.get("kind", ""))
     title = str(fields.get("title") or path.name)
     source = str(fields.get("source", "")) if kind == "summary" else ""
-    return path.name, kind, file_hash, title, _embed_text(fields, body), source
+    embed_text = _embed_text(fields, body)
+    embed_hash = _embed_hash(kind, title, embed_text)
+    return path.name, kind, embed_hash, title, embed_text, source
 
 
 def _plan(kb: Kb, conn: sqlite3.Connection | None) -> tuple[list[Path], list[str], set[str]]:
-    """ONE walk of wiki/*.md: pages needing an embed (new or file_hash
+    """ONE walk of wiki/*.md: pages needing an embed (new or embed_hash
     changed), row paths (filenames) to delete because their page is
     gone, and every source digest a summary page claims. `status`,
     `sweep` and `search`'s refusal all call this; no second walk
@@ -192,11 +206,11 @@ def _plan(kb: Kb, conn: sqlite3.Connection | None) -> tuple[list[Path], list[str
     current_names: set[str] = set()
     for path in pages:
         try:
-            name, _kind, file_hash, _title, _text, source = _page_row(path)
+            name, _kind, embed_hash, _title, _text, source = _page_row(path)
         except FileNotFoundError:
             continue  # unlinked between select_pages and this read
         current_names.add(name)
-        if stored.get(name) != file_hash:
+        if stored.get(name) != embed_hash:
             stale.append(path)
         if source:
             seen_sources.add(source)
@@ -215,13 +229,13 @@ def _write_page(conn: sqlite3.Connection, row: tuple, vector: list[float]) -> No
     """`INSERT OR REPLACE` does not work on vec0 (UNIQUE constraint
     failure): re-embedding a page is delete then insert, both in one
     transaction so a crash mid-write never leaves an orphaned half-row."""
-    name, kind, file_hash, title, _text, _source = row
+    name, kind, embed_hash, title, _text, _source = row
     with conn:
         conn.execute("DELETE FROM pages WHERE path = ?", (name,))
         conn.execute(
             "INSERT INTO pages(path, kind, file_hash, title, embedding) "
             "VALUES (?, ?, ?, ?, ?)",
-            (name, kind, file_hash, title, _pack(vector)),
+            (name, kind, embed_hash, title, _pack(vector)),
         )
 
 

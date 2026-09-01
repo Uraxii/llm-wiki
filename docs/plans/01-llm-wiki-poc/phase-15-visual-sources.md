@@ -14,7 +14,7 @@ logging "cannot read source". Nothing retries it, because nothing knows it is
 retryable.
 
 The observable symptom is a source that never leaves the backlog.
-`vectors._unsummarized` (`vectors.py:207-211`) lists every stored digest with
+`vectors._unsummarized` (`vectors.py:221-225`) lists every stored digest with
 no summary page, so `llmwiki status` reports the image forever and `search`
 prints its "N sources without a summary" warning forever. PDFs are already in
 this state today: `sources.EXTENSIONS` maps `application/pdf` to `.pdf`
@@ -48,7 +48,7 @@ same frontmatter keys, same `source:` digest, same identifiers, same body. So:
   source.
 - `embed` and `search` embed the summary page. There is no image embedding
   here, and no second vector space to keep calibrated. `NEIGHBOUR_FLOOR`
-  (`vectors.py:46`) keeps its meaning.
+  (`vectors.py:47`) keeps its meaning.
 - Phase 14's commit path is unchanged. The lock window, the live
   `_summary_index` re-read, and `_carry_story` all sit after the model call and
   do not care what the model was shown.

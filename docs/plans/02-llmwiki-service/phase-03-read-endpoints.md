@@ -119,7 +119,7 @@ cannot.
 
 ## Ranking moves into `llmwiki`, and this is the only change there
 
-`vectors.search` (`vectors.py:350`) is a CLI verb. It prints tab separated
+`vectors.search` (`vectors.py:364`) is a CLI verb. It prints tab separated
 lines and returns an exit code: 0 when the search ran, including when it
 matched nothing, 1 for stale vectors, and 2 for a model failure. A service
 cannot call it, and reimplementing it inside the service breaks the constraint
@@ -161,9 +161,9 @@ make:
 
 - **`rank` returns `Ranking`, not a bare list.** `search`'s "sources without a
   summary" warning needs the `seen` set `_plan` returns, bound inside
-  `vectors.search` (`vectors.py:356`).
+  `vectors.search` (`vectors.py:370`).
   `_plan`'s docstring pins one walk of `wiki/*.md` for the whole module and
-  says so in as many words (`vectors.py:180-187`). A bare `list[Hit]` would
+  says so in as many words (`vectors.py:194-201`). A bare `list[Hit]` would
   force `search` to walk a second time to rebuild that count. `unsummarized`
   rides back on the return value instead.
 - **`rank` raises where `search` returns an exit code.** Exit codes are a CLI
@@ -179,7 +179,7 @@ make:
 
 `Hit` and `StaleVectors` are new names; neither exists in `llmwiki` today.
 `vectors.neighbours` keeps its current `list[tuple[float, Path]]`
-(`vectors.py:393`) and is not converted: it answers a different question,
+(`vectors.py:407`) and is not converted: it answers a different question,
 page-to-page sameness rather than query-to-page relevance, and the two are
 measured differently.
 
@@ -200,12 +200,12 @@ implementation is wrong, and it is wrong in the way that looks right, so pin
 the rule here, where the scores are, rather than where the fan-out is.
 
 Similarity scores are comparable only within one embedding model's
-distribution. `NEIGHBOUR_FLOOR = 0.35` (`vectors.py:46`) is the standing proof.
+distribution. `NEIGHBOUR_FLOOR = 0.35` (`vectors.py:47`) is the standing proof.
 It is calibrated to one model, measured over all 1653 page pairs of the arena
 corpus, where cross-domain pairs top out at 0.3123 and within-domain pairs run
 a p50 of 0.3025. Change the model and every number in that comment moves.
 `vectors._model_id` reads the embedding model from each kb's own `config.toml`
-(`vectors.py:67-72`), so two kbs on one service can already name different
+(`vectors.py:68-73`), so two kbs on one service can already name different
 models, and their scores already mean different things.
 
 **The rule this pins for phase 4.** The CLI client fans out over the single-kb
@@ -352,8 +352,8 @@ subject it has pages for. That is the same reasoning that rejected a degrade
 path when `sqlite-vec` is missing, recorded in the project's dependency rule.
 
 A kb with no `[models] embed` is a different fault and gets a different answer.
-`vectors._model_id` returns `None` there (`vectors.py:67-72`), and `_plan` then
-treats every page as stale (`vectors.py:186`), so a naive route reports the
+`vectors._model_id` returns `None` there (`vectors.py:68-73`), and `_plan` then
+treats every page as stale (`vectors.py:200`), so a naive route reports the
 whole wiki as missing vectors. That names the wrong problem, and an operator
 chasing it re-runs `embed` forever. `rank` raises `NoEmbedModel`, and the route
 answers 501 with a distinct code. The other three routes still answer normally,
