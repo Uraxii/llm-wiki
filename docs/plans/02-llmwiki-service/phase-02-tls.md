@@ -36,15 +36,9 @@ dependency is a server and a router, not an ecosystem.
 *Terminate TLS in-process by default, and support upstream termination
 explicitly.* Most real deployments end up behind something, whether that is a
 reverse proxy in a homelab or an ingress in a cluster. Supporting both is
-nearly free; discovering later that only one works is not.
-
-```toml
-[tls]
-mode     = "terminate"          # or "upstream"
-cert     = "/etc/llmwiki/tls/fullchain.pem"
-key      = "/etc/llmwiki/tls/privkey.pem"
-min_version = "1.2"             # 1.3 where every client supports it
-```
+nearly free; discovering later that only one works is not. `[tls] mode` picks
+between them, and the whole `[tls]` section is listed with the rest of the
+deployment file below.
 
 *Trust forwarded headers only when told to.* Under `mode = "upstream"` the
 service still needs the caller's scheme and address for logging and rate
@@ -80,36 +74,49 @@ until a human notices.
 - `SIGHUP` forces the same reload, so an operator never has to wait for or
   trust the watch.
 
-**Fail closed at startup.** The service refuses to start, with a message naming
-the setting, when any of these hold. None of them are warnings.
+**The deployment file, defined here and nowhere else.** One file, supplied by
+the maintainer, holding everything that describes this deployment rather than
+any wiki. It is the answer to the split recorded in plan 02: `config.toml`
+describes a wiki, this file describes a machine.
 
-| Condition | Why refusing beats starting |
-|---|---|
-| no pepper supplied | every token would fail to verify, silently, at request time instead of at boot |
-| no bootstrap admin token and no existing admin row | an unadministrable service |
-| `[access] write = "open"` | there is no deployment where this is intended |
-| `mode = "terminate"` and the certificate or key is missing or unreadable | otherwise the failure surfaces on the first request |
-| certificate is expired at boot | it will not fix itself, and it is better known now |
-| `mode = "upstream"` and no listener address is bound to a private interface | prevents accidentally exposing the plaintext port to the network |
+Every key below is defined here, and so is every startup refusal in the table
+that follows. Later phases argue for the keys they need and point back at this
+listing. None of them adds a key or a refusal of its own, because a deployment
+file specified in four documents is a deployment file nobody can read.
 
-**The deployment file.** One file, supplied by the maintainer, holding
-everything that describes this deployment rather than any wiki. It is the
-answer to the split recorded in plan 02: `config.toml` describes a wiki,
-this file describes a machine.
+*The service is invoked as `python -m llmwiki_service <deployment-file>`.* Not
+a console script. `pyproject.toml` does declare one for the CLI, but every
+documented invocation of `llmwiki` is `.venv/bin/python -m llmwiki`, so the
+module form is the one an operator has already read. It also works the same
+from a checkout and from an install, where a console script needs the
+distribution installed before the name exists.
+
+The deployment file is a required positional argument with no default path. A
+service that falls back to `/etc/llmwiki/service.toml` starts against a file
+nobody named, which is the restrictive-default rule read backwards: nothing
+should ever serve a deployment the operator did not point at. There is no
+search path, no working-directory lookup, and no environment variable holding
+the path.
 
 ```toml
 [server]
-bind = "0.0.0.0:8443"
+bind  = "0.0.0.0:8443"
+state = "/var/lib/llmwiki"      # holds tokens.sqlite; mount it or lose every token
 
 [tls]
-mode = "terminate"
-cert = "/etc/llmwiki/tls/fullchain.pem"
-key  = "/etc/llmwiki/tls/privkey.pem"
+mode        = "terminate"       # or "upstream"
+cert        = "/etc/llmwiki/tls/fullchain.pem"
+key         = "/etc/llmwiki/tls/privkey.pem"
+min_version = "1.2"             # 1.3 where every client supports it
+# trusted_proxy = "10.0.0.1"    # unset by default, and forwarded headers are ignored while it is
 
 [access]
-read  = "open"
-write = "token"
+read  = "open"                  # or "token"
+write = "token"                 # always "token"; "open" is refused at startup
 admin = "token"
+
+[limits]
+search_per_minute = 30          # a budget guard, not a defense
 
 [kbs.homelab]
 path = "/srv/kb/homelab"
@@ -121,17 +128,45 @@ path = "/srv/kb/recipes"
 `[kbs]` is what phase 3's routes hang off: one service serves several kbs, and
 the table name is the name in the URL, so `/kb/homelab/search`. Defining it
 here rather than in phase 3 keeps the deployment file settled in one place.
+`[limits] search_per_minute` caps what one caller can spend on `search`, and
+phase 3 argues why a search read needs a cap at all. `[server] state` is where
+the token database lives, and phase 5 argues what it costs to leave it
+unmounted.
 
 Secrets are not in this file. The pepper and the bootstrap admin token arrive
-from the environment, unchanged from phase 1.
+from the environment, unchanged from phase 1. `[endpoint]` is not in this file
+either. It lives in the environment in both modes, per phase 5, so it has one
+home rather than two and no precedence rule between them.
+
+**Fail closed at startup.** The service refuses to start, with a message naming
+the setting or the path at fault, when any of these hold. None of them are
+warnings, and every one of them is checked before a socket is bound. The first
+three fire before the file is parsed at all.
+
+| Condition | Why refusing beats starting |
+|---|---|
+| no deployment file argument | the alternative is a default path, and a service that starts against a file nobody named |
+| the deployment file path does not exist | otherwise it reads as an empty deployment, and an empty deployment is every default at once |
+| the deployment file exists and cannot be read | a permissions fault at boot is a fixable mistake; the same fault discovered as a missing setting is not |
+| no pepper supplied | every token would fail to verify, silently, at request time instead of at boot |
+| no bootstrap admin token and no existing admin row | an unadministrable service |
+| `[access] write = "open"` | there is no deployment where this is intended |
+| `mode = "terminate"` and the certificate or key is missing or unreadable | otherwise the failure surfaces on the first request |
+| certificate is expired at boot | it will not fix itself, and it is better known now |
+| `mode = "upstream"` and no listener address is bound to a private interface | prevents accidentally exposing the plaintext port to the network |
+| `[access] read = "open"` and `mode = "upstream"` and `trusted_proxy` is unset | every caller then arrives from the proxy's address, so `[limits]` collapses into one global bucket. Phase 3 argues it |
+| `[server] state` missing, or not writable by the running user | the token database is silently recreated empty, and every token minted before the restart reads as unknown. Phase 5 argues it |
+| any `[kbs.<name>] path` not writable by the running user | the first `search` against a never-embedded kb fails on `mkdir`, and nothing else in the deployment reports it. Phase 5 argues it |
+| a kb in `[kbs]` whose `config.toml` still holds a legacy `[endpoint]` section | the kb would keep working against whatever model the ambient environment names, and a summary written by the wrong model is a valid summary. Phase 5 argues it |
 
 **An unauthenticated health endpoint.** `/health` returns liveness only: no kb
 names, no version, no counts, nothing that describes the deployment. Containers
 need it, and it is the one route that must work before auth does.
 
-**Changes.** `llmwiki_service`: the TLS context builder and its reload watch,
-the deployment file parser, the startup refusal checks, and `/health`. Nothing
-in `llmwiki` changes.
+**Changes.** `llmwiki_service`: the `__main__` entry point and its one
+positional argument, the TLS context builder and its reload watch, the
+deployment file parser, the startup refusal checks, and `/health`. Nothing in
+`llmwiki` changes.
 
 **Verification.** Observed on a running service, never argued. Each test is
 seen failing before its code exists.
@@ -146,6 +181,10 @@ seen failing before its code exists.
 - With `mode = "upstream"` and no `trusted_proxy`, a request carrying a forged
   `X-Forwarded-Proto: https` and a forged `X-Forwarded-For` is not believed.
 - Each startup refusal in the table above is driven once, and the process exits
-  nonzero with the setting named in the message.
+  nonzero with the setting or the path named in the message. The three argument
+  refusals are driven too: no argument at all, a path that does not exist, and
+  a path that exists and cannot be read. Confirm nothing is listening on the
+  bind address afterwards, because a refusal that fires after the socket is
+  bound is a refusal that already accepted a connection.
 - `/health` answers before any token exists, and its body is checked to contain
   no kb name, no path, and no version string.

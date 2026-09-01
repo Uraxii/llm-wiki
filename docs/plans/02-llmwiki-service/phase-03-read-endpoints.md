@@ -34,8 +34,16 @@ multi-kb route: one request names one kb.
 **Check the token before the kb name.** An implementer who looks up `[kbs]`
 first hands an unauthenticated caller a kb enumerator: an unknown name answers
 404 and a known one answers 401, and the difference is the list of kbs. Under
-`[access] read = "token"` the token check runs first, and an unknown kb and a
-kb the caller may not see return the same 404 with the same body.
+`[access] read = "token"` the token check runs first, so a caller with no
+valid token gets the same refusal whatever kb name it wrote, and learns
+nothing. A caller holding a valid reader token reaches every kb in `[kbs]`:
+there is no per-kb grant in this design, and none is added here. A kb name
+absent from `[kbs]` returns 404 with a body naming no kb.
+
+The refusal is 401 with `{"error": "unauthorized"}`, identically for an absent
+token, a malformed one, an unknown id, a wrong secret, a revoked token, and a
+role below `reader`. One status and one body, so the caller cannot separate
+"you are nobody" from "you are somebody with no access here".
 
 **Encoding.** Every response body is JSON, except `page` and `schema`, which
 return bytes. Errors are JSON with one shape everywhere, `{"error": "<code>"}`,
@@ -44,8 +52,48 @@ an exception message, or a count of anything into an error body. The one
 exception is the 503 from `search`, which carries the number of pages missing a
 vector, because an operator cannot act on it otherwise.
 
-**Content types.** `page` and `schema` return `text/markdown; charset=utf-8`,
-not `application/octet-stream`, which browsers download instead of showing.
+**Content types.** `page` and `schema` return `text/markdown`, with no
+`charset` parameter, and not `application/octet-stream`, which browsers
+download instead of showing. The omission is load bearing. Both routes serve
+the file's bytes, and `page` reads them with `Path.read_bytes` precisely so a
+byte that is not valid UTF-8 survives the trip. A `charset=utf-8` parameter
+would be a claim about those bytes that the route does not check and cannot
+make. A client that wants text decodes and owns the failure.
+
+**Response shapes.** Named here because two independent implementers, one
+per side of the wire, cannot agree on a table of column headings.
+
+```json
+// GET /kb/<name>/search
+{"hits": [
+  {"score": 0.6142, "name": "cross-site-request-forgery.md",
+   "title": "Cross-site request forgery", "updated": "2026-08-31T09:14:02Z",
+   "size": 4821}
+]}
+
+// GET /kb/<name>/list
+{"pages": [
+  {"name": "index.md", "kind": "topic", "title": "Index",
+   "updated": "2026-08-31T09:14:02Z", "size": 311}
+], "next": "index.md"}
+
+// the 503 from search, the one error body carrying a number
+{"error": "index_stale", "missing": 37}
+```
+
+`hits` is ordered best first, and that order is part of the contract: a
+client's only honest cross-wiki key is a position within one wiki's own list,
+which it can only read off the order. `hits` holds at most `n` entries and may
+hold fewer: `search` skips a row whose page has been unlinked since the last
+embed, so a caller that asserts an exact length is wrong. `score` is the raw
+float, unrounded; the CLI's 2dp formatting is a printer's business. Every
+field is present on every entry, `null` only where the sections below say so.
+
+`search` carries no `next` and no total, and that asymmetry with `list` is
+deliberate. `n` goes straight into vec0's `k`, so the route already returns
+the whole answer it was asked for. A second page would need a cursor over a
+distance ordering that changes on every embed, and a total would be a count of
+the whole corpus, which is what `list` is for.
 
 ## `schema` is what makes a remote usable at all
 
@@ -97,19 +145,23 @@ class Ranking(NamedTuple):
 
 
 def rank(kb: Kb, query: str, n: int = TOP_K, kind: str | None = None) -> Ranking:
-    """The `n` pages nearest `query`, best first. Makes ONE paid
+    """At most `n` pages nearest `query`, best first. Fewer when a row
+    survives an embed whose page has since been unlinked; those are
+    skipped, exactly as `search` skips them today. Makes ONE paid
     embedding call, for the query, and only after the staleness check
-    passes. Raises StaleVectors when any page lacks a current vector,
-    NoEmbedModel when [models] embed is unset, and ModelError from the
-    endpoint. ONE _plan walk and ONE connection, per _plan's own
-    contract at vectors.py:180."""
+    passes. Raises StaleVectors, carrying `missing`, the number of
+    pages lacking a current vector, because the route's 503 body has to
+    report it; NoEmbedModel when [models] embed is unset; and ModelError
+    from the endpoint. ONE _plan walk and ONE connection, per _plan's
+    own contract at vectors.py:180."""
 ```
 
 Four rules on that split, each one a mistake a later reader would otherwise
 make:
 
 - **`rank` returns `Ranking`, not a bare list.** `search`'s "sources without a
-  summary" warning needs the `seen` set that `_plan` builds (`vectors.py:369`).
+  summary" warning needs the `seen` set `_plan` returns, bound inside
+  `vectors.search` (`vectors.py:356`).
   `_plan`'s docstring pins one walk of `wiki/*.md` for the whole module and
   says so in as many words (`vectors.py:180-187`). A bare `list[Hit]` would
   force `search` to walk a second time to rebuild that count. `unsummarized`
@@ -210,24 +262,29 @@ request. Under `read = "open"`, an unauthenticated caller can spend the
 operator's budget in a loop, and the service has no token to attribute the
 spend to or to revoke.
 
-Answer it with a per-caller rate limit on `search`, in the service. This
-amends phase 2's deployment file with one section:
-
-```toml
-[limits]
-search_per_minute = 30
-```
+Answer it with a per-caller rate limit on `search`, in the service.
+`[limits] search_per_minute` is defined in [phase 2](phase-02-tls.md). It
+exists because an open read route that embeds spends the operator's money on
+every request from anyone.
 
 The limit is per caller, in a sliding window, and never a single global
 counter. Under `read = "token"` the caller is the token id, which is already
 the unit `revoke` operates on. Under `read = "open"` the caller is the source
 address. Exceeding the limit returns 429 and never a partial ranking.
 
-This is a budget guard, not a defense. Say so in the deployment file comment,
-so nobody later mistakes it for one.
+This is a budget guard, not a defense. Phase 2's listing says so in the file's
+own comment, so nobody later mistakes it for one.
 
-**A new startup refusal, added to phase 2's table.** Refuse to start when
-`[access] read = "open"` and `[tls] mode = "upstream"` and `trusted_proxy` is
+A 429 carries `Retry-After` with the whole seconds until the caller's window
+frees. The header is the only number any error response carries besides the
+503's, and it is a header rather than a body field, so the closed-set error
+body rule is untouched. Phase 4's client reads it and does not act on it: it
+reports `rate_limited` and never retries. It is there for every other client,
+which otherwise has to guess.
+
+**Why phase 2 refuses `read = "open"` under an upstream proxy it does not
+trust.** That refusal is defined in [phase 2](phase-02-tls.md), which covers
+`[access] read = "open"` with `[tls] mode = "upstream"` and `trusted_proxy`
 unset. Phase 2 blesses that TLS combination as the safe default, and it is,
 because a forged `X-Forwarded-For` is worse than none. But it also means every
 caller arrives from the proxy's address, so an address-keyed limit collapses
@@ -250,7 +307,16 @@ limiting it.
 `n` defaults to 200 and is capped at 1000. `after` takes the last name from the
 previous response and the listing continues from there, in name order. A
 response carries a `next` field holding the name to pass back, or null at the
-end. Name order is stable, cheap, and needs no cursor state on the server.
+end. `after` is exclusive: the listing resumes at the first name strictly
+greater than it. Name order is stable, cheap, and needs no cursor state on the
+server.
+
+The guarantee that buys is exact and worth stating, because the alternative
+reading is stronger than it can be. A page present for the whole of a paging
+run appears exactly once. A page created or removed mid-run may be seen or
+missed depending on where its name sorts against the caller's position. There
+is no snapshot, and adding one would mean server-side cursor state, which is
+the cost this design declines.
 
 A page whose frontmatter does not parse has no `kind` and no `title`:
 `core.parse_frontmatter` returns `None` on any malformed block
@@ -258,9 +324,23 @@ A page whose frontmatter does not parse has no `kind` and no `title`:
 dropping it. A page the wiki holds and the listing hides is worse than a page
 the listing admits it cannot read.
 
+`search` answers differently for that same page and it is not a bug to fix
+here. Its title comes from the row stored at embed time, and `_page_row` falls
+back to the filename on a failed parse (`vectors.py:169-171`), so `search`
+reports the filename where `list` reports null. `list` reads the file now and
+can say it failed; `search` reads a row written earlier and cannot. Do not
+loosen either to match: an agent that sees both learns the page is
+unparseable, which is true.
+
 `search`'s own `n` is capped the same way, at 1000. It goes straight into
 vec0's `k` parameter (`vectors.py:242`), and an unvalidated one is a query the
 caller sizes. Reject a non-integer, a negative, and a zero with 400.
+
+`q` is checked the same way and before anything else. An absent `q`, an empty
+one, and one that is only whitespace each return 400, and none of them reaches
+`embed`. This is the same reasoning as the check-before-embed order above:
+every path that spends the operator's money is refused before it spends it,
+not after.
 
 ## What a stale or unconfigured index does
 
@@ -298,6 +378,13 @@ races a write returns content one write stale, which is not damage. State it
 here so a later reader does not add a lock that would let any reader stall
 every writer.
 
+One write does survive on the read path and is not removed here: `_connect`
+opens with `kb.vectors.mkdir(parents=True, exist_ok=True)` (`vectors.py:76`),
+so a `search` against a kb that has never been embedded creates an empty
+`vectors/`. It takes no lock, races nothing, and destroys nothing, and
+`vectors/` is the CLI's own directory rather than the agent's. Named so the
+next reader sees a known cost rather than a violation of the sentence above.
+
 ## Changes
 
 `llmwiki`: `vectors.rank` extracted, `vectors.search` reduced to a printer over
@@ -305,8 +392,9 @@ it, and the `Hit`, `Ranking`, `StaleVectors`, and `NoEmbedModel` names added.
 No behaviour change to any CLI verb.
 
 `llmwiki_service`: the four routes, the token-then-name check order, the page
-name check, the per-caller `search` limit, the `list` bound, the new startup
-refusal, and the response shapes.
+name check, the per-caller `search` limit, the `list` bound, and the response
+shapes. The `[limits]` section and the startup refusal that guards it are
+defined in [phase 2](phase-02-tls.md).
 
 ## Verification
 
