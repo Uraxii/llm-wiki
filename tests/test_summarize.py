@@ -431,6 +431,66 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(list((self.root / "wiki").glob("*.md")), [])
         self.assertIn(digest, (self.root / "log.md").read_text())
 
+    def test_malformed_sidecar_returns_1_no_page_no_call_logs_digest(self) -> None:
+        digest = self._store_source()
+        (self.root / "sources" / f"{digest}.toml").write_text(
+            "content_type = = broken\n[[[\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            code = _run_quiet(self.root, [digest])
+            self.assertEqual(fake.requests, [])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(list((self.root / "wiki").glob("*.md")), [])
+        log = (self.root / "log.md").read_text()
+        self.assertIn(digest, log)
+        self.assertIn("provenance", log)
+
+    def test_missing_sidecar_does_not_disturb_existing_good_page(self) -> None:
+        good_digest = self._store_source("A good widget's source text.")
+        reply = (
+            "---\n"
+            "title: Good Widget\n"
+            "identifiers: []\n"
+            "---\n\n"
+            "Good abstract.\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            self.assertEqual(_run_quiet(self.root, [good_digest]), 0)
+
+        pages = list((self.root / "wiki").glob("*.md"))
+        self.assertEqual(len(pages), 1)
+        good_page_before = pages[0].read_bytes()
+
+        broken_digest = self._store_source("A different, broken widget.")
+        (self.root / "sources" / f"{broken_digest}.toml").unlink()
+
+        def respond_unused(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        with FakeEndpoint(respond_unused) as fake:
+            self._write_config(fake.url)
+            code = _run_quiet(self.root, [good_digest, broken_digest])
+            self.assertEqual(fake.requests, [])
+
+        self.assertEqual(code, 1)
+        pages = list((self.root / "wiki").glob("*.md"))
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0].read_bytes(), good_page_before)
+        log = (self.root / "log.md").read_text()
+        self.assertIn(broken_digest, log)
+        self.assertIn("cannot read source", log)
+
     def test_identifiers_not_a_list_drops_page_and_logs_digest(self) -> None:
         digest = self._store_source()
         reply = (
