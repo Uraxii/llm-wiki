@@ -3,19 +3,36 @@ loading, frontmatter parse/render, slugify, atomic write, log entries.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import re
 import tempfile
+import time
 import tomllib
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from os import fchmod, fdopen, replace as os_replace, umask
+from os import (
+    O_CREAT,
+    O_RDWR,
+    close as os_close,
+    fchmod,
+    fdopen,
+    open as os_open,
+    replace as os_replace,
+    umask,
+)
 from pathlib import Path
 
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 MAX_SLUG_LEN = 120
 SLUG_HASH_LEN = 12  # hex chars of fallback hash when a title strips to nothing
+
+LOCK_FILE_NAME = ".lock"
+LOCK_WAIT_TIMEOUT_SEC = 30  # bounded wait for the kb lock, see kb_lock()
+LOCK_POLL_INTERVAL_SEC = 0.05  # flock has no native timeout; poll for it
 
 FrontmatterValue = str | list[str]
 
@@ -37,6 +54,45 @@ class Kb:
         self.vectors = root / "vectors"
         self.log = root / "log.md"
         self.config = load_config(root)
+
+
+class KbBusy(Exception):
+    """Raised when the kb lock is not free within LOCK_WAIT_TIMEOUT_SEC.
+    Never carries retry or recovery logic: the caller's process exits
+    nonzero and whatever retried it decides what to do next."""
+
+
+@contextlib.contextmanager
+def kb_lock(root: Path) -> Iterator[None]:
+    """Exclusive lock over the kb at `root`, held by the caller for the
+    span it names. `fcntl.flock` on one file in the kb root, standard
+    library only; the kernel releases it automatically if this process
+    dies, so no stale-lock reaping is needed. The wait is bounded: past
+    LOCK_WAIT_TIMEOUT_SEC this raises KbBusy rather than blocking
+    forever, since an unbounded wait would outlive an agent's tool
+    timeout and the resulting retry would only pile onto the same
+    contention.
+    """
+    fd = os_open(str(root / LOCK_FILE_NAME), O_CREAT | O_RDWR, 0o666)
+    try:
+        deadline = time.monotonic() + LOCK_WAIT_TIMEOUT_SEC
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise KbBusy(
+                        f"{root}: kb busy, timed out after "
+                        f"{LOCK_WAIT_TIMEOUT_SEC}s waiting for the lock"
+                    ) from None
+                time.sleep(LOCK_POLL_INTERVAL_SEC)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os_close(fd)
 
 
 def load_config(root: Path) -> dict:

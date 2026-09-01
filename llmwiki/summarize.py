@@ -6,7 +6,9 @@ page.
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from llmwiki.core import (
@@ -23,7 +25,7 @@ from llmwiki.core import (
 )
 from llmwiki.lint import lint_pages, prompt_block
 from llmwiki.model import ModelError, chat, model_name
-from llmwiki.sources import read_provenance
+from llmwiki.sources import _link_exclusive, read_provenance
 
 # The CLI's own summarizing rules (decision agent-kb-0zf.4): a
 # SUMMARIZE.md never has to restate these to get a workable reply.
@@ -75,6 +77,7 @@ A few plain sentences of abstract text go here.\
 """
 
 SOURCE_DELIMITER = "\n\n=== SOURCE TEXT FOLLOWS ===\n\n"
+SLUG_SUFFIX_LEN = 12  # hex chars of the digest, for a title-slug collision
 
 
 def prompt_prefix(kb: Kb) -> str:
@@ -102,10 +105,15 @@ def _all_digests(kb: Kb) -> list[str]:
 
 def _summary_index(kb: Kb) -> dict[str, tuple[Path, str]]:
     """digest -> (page path, its recorded prompt_fingerprint), for
-    every existing summary page."""
+    every existing summary page. A page unlinked between the glob and
+    this read is skipped, not raised on."""
     index: dict[str, tuple[Path, str]] = {}
     for path in sorted(kb.wiki.glob("*.md")):
-        parsed = parse_frontmatter(read_page_text(path))
+        try:
+            text = read_page_text(path)
+        except FileNotFoundError:
+            continue
+        parsed = parse_frontmatter(text)
         if parsed is None:
             continue
         fields, _body = parsed
@@ -155,20 +163,24 @@ def _source_path(kb: Kb, digest: str) -> Path:
     raise FileNotFoundError(f"no source bytes for {digest}")
 
 
-def _target_path(kb: Kb, digest: str, title: str, index: dict) -> Path:
-    """Where to write `digest`'s page. A digest already in the index
-    keeps its existing path. Otherwise the slug is free to take only if
-    nothing occupies it on disk right now: a file already there is
-    either another digest's summary or a page the CLI does not own,
-    and both are off limits. Checked at write time, not against the
-    pre-run index, so two collisions inside one run each land on their
-    own path."""
-    if digest in index:
-        return index[digest][0]
+def _claim_new_summary_path(kb: Kb, digest: str, title: str) -> Path:
+    """Atomically claim a filename for a digest with no existing
+    summary page: the plain slug if free, else the slug suffixed with
+    this digest's own hex digits, which no other digest can collide
+    on. Reuses `sources._link_exclusive`, the package's one atomic
+    exclusive-create primitive, so two processes whose model-chosen
+    titles slugify identically can never both believe they claimed the
+    plain slug and let one destroy the other's page."""
     candidate = kb.wiki / f"{slugify(title)}.md"
-    if candidate.exists():
-        return kb.wiki / f"{slugify(title)}-{digest[:12]}.md"
-    return candidate
+    fd, tmp_name = tempfile.mkstemp(dir=kb.wiki, prefix=f".{candidate.name}.")
+    tmp_path = Path(tmp_name)
+    try:
+        os.close(fd)
+        if _link_exclusive(tmp_path, candidate):
+            return candidate
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return kb.wiki / f"{slugify(title)}-{digest[:SLUG_SUFFIX_LEN]}.md"
 
 
 def _build_fields(
@@ -189,6 +201,29 @@ def _build_fields(
     for key, value in reply_fields.items():
         fields.setdefault(key, value)
     return fields
+
+
+def _commit_summary_page(
+    kb: Kb, digest: str, page_path: Path, previous: bytes | None, content: str
+) -> bool:
+    """Write `content` to `page_path`, self-lint, and roll back on any
+    finding: previous bytes restored, or the file unlinked when there
+    was none (including a just-claimed path holding only the empty
+    placeholder `_claim_new_summary_path` left behind). Returns True
+    iff the write was dropped."""
+    atomic_write_text(page_path, content)
+    findings = lint_pages(kb.root, [page_path])
+    if not findings:
+        return False
+    if previous is not None:
+        atomic_write_bytes(page_path, previous)
+    else:
+        page_path.unlink()
+    finding = findings[0]
+    append_log_entry(
+        kb.log, "summarize", f"{digest}: dropped ({finding.check}: {finding.detail})"
+    )
+    return True
 
 
 def _process_digest(
@@ -215,21 +250,17 @@ def _process_digest(
         return True
 
     reply_fields, body = parsed
-    page_path = _target_path(kb, digest, title, index)
     fields = _build_fields(reply_fields, digest, provenance, kb, fingerprint)
-    previous = page_path.read_bytes() if page_path.is_file() else None
-    atomic_write_text(page_path, render_frontmatter(fields, body))
+    content = render_frontmatter(fields, body)
 
-    findings = lint_pages(kb.root, [page_path])
-    if findings:
-        if previous is not None:
-            atomic_write_bytes(page_path, previous)
-        else:
-            page_path.unlink()
-        finding = findings[0]
-        append_log_entry(
-            kb.log, "summarize", f"{digest}: dropped ({finding.check}: {finding.detail})"
-        )
+    if digest in index:
+        page_path = index[digest][0]
+        previous = page_path.read_bytes()
+    else:
+        page_path = _claim_new_summary_path(kb, digest, title)
+        previous = None
+
+    if _commit_summary_page(kb, digest, page_path, previous, content):
         return True
 
     append_log_entry(kb.log, "summarize", f"{fields['title']}: {digest}")

@@ -104,6 +104,7 @@ After rung 1:
 11. [fetch](phase-11-fetch.md)
 12. [feeds and jobs](phase-12-feeds.md)
 13. [vectors](phase-13-vectors.md) (needs `.21` for the shipped default; builds against any model name)
+14. [concurrent writers](phase-14-concurrency.md)
 
 Phases 3, 4, 5 are independent after 2 and may run in parallel sessions on
 disjoint files. `cli.py` is provisional scaffolding in phase 2 and takes its

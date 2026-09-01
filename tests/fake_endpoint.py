@@ -19,13 +19,19 @@ that needs a failing endpoint constructs a second instance with
 `status=500`. `headers` (default none) are extra response headers merged
 into every response, e.g. `headers={"Location": other.url}` to act as a
 redirector in front of a second `FakeEndpoint`.
+
+`concurrent=True` serves requests on one thread per connection
+(`ThreadingHTTPServer`) instead of one at a time, so `respond` can block
+inside a `threading.Event`/`Barrier` to hold one request open while a
+second, real, concurrent request arrives, e.g. to pin an interleave
+across two real OS processes that both call the endpoint.
 """
 from __future__ import annotations
 
 import json
 import threading
 from collections.abc import Callable
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 
 class Request:
@@ -46,20 +52,23 @@ class FakeEndpoint:
         respond: Callable[[str, dict], dict],
         status: int = 200,
         headers: dict[str, str] | None = None,
+        concurrent: bool = False,
     ) -> None:
         self.requests: list[Request] = []
         self.url = ""
         fake = self
         extra_headers = headers or {}
+        requests_lock = threading.Lock()
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802 (http.server API name)
                 length = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(length)
                 body = json.loads(raw) if raw else {}
-                fake.requests.append(
-                    Request(self.path, self.command, body, self.headers)
-                )
+                with requests_lock:
+                    fake.requests.append(
+                        Request(self.path, self.command, body, self.headers)
+                    )
                 payload = json.dumps(respond(self.path, body)).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -71,7 +80,8 @@ class FakeEndpoint:
             def log_message(self, format: str, *args) -> None:
                 pass  # keep test output free of one line per request
 
-        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        server_cls = ThreadingHTTPServer if concurrent else HTTPServer
+        self._server = server_cls(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self._server.server_port}"
         self._thread = threading.Thread(
             target=self._server.serve_forever,
