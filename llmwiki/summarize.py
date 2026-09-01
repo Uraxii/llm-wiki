@@ -138,23 +138,6 @@ def _pdf_part(config: dict) -> str:
     return value
 
 
-def _expected_fingerprint(
-    kb: Kb, digest: str, text_fingerprint: str, visual_fingerprint: str
-) -> str:
-    """The fingerprint a summary of `digest` should carry today: the
-    text one for a text source, the visual one otherwise. A digest
-    whose sidecar cannot be read returns a fingerprint no real page
-    ever carries, so it is always treated as needing (re)processing;
-    `_process_digest` is what actually explains why."""
-    try:
-        content_type = str(read_provenance(kb, digest).get("content_type", ""))
-    except (FileNotFoundError, OSError, ValueError):
-        return ""
-    if _content_kind(content_type) == "text":
-        return text_fingerprint
-    return visual_fingerprint
-
-
 def _all_digests(kb: Kb) -> list[str]:
     return sorted(
         p.stem for p in kb.sources.glob("*") if p.is_file() and p.suffix != ".toml"
@@ -354,8 +337,7 @@ def _process_digest(
     kb: Kb,
     digest: str,
     prefix: str,
-    text_fingerprint: str,
-    visual_fingerprint: str,
+    fingerprint: str,
     pdf_part: str,
 ) -> bool:
     """Summarize one source. Returns True if it was dropped. Source
@@ -370,10 +352,8 @@ def _process_digest(
 
     if step == "summarize_image":
         model_used = _image_model(kb)
-        fingerprint = visual_fingerprint
     else:
         model_used = model_name(kb.config, "summarize", None)
-        fingerprint = text_fingerprint
 
     reply = chat(kb.config, step, prompt, model=model_used, attachment=attachment)
     parsed = parse_frontmatter(_unwrap_fence(reply))
@@ -413,8 +393,7 @@ def run(root: Path, digests: list[str] | None) -> int:
     targets = digests if digests is not None else _all_digests(kb)
     index = _summary_index(kb)
     prefix = prompt_prefix(kb)
-    text_fingerprint = prompt_fingerprint(prefix)
-    visual_fingerprint = prompt_fingerprint(prefix + SOURCE_ATTACHMENT_NOTE)
+    fingerprint = prompt_fingerprint(prefix)
 
     try:
         pdf_part = _pdf_part(kb.config)
@@ -423,10 +402,7 @@ def run(root: Path, digests: list[str] | None) -> int:
         return 1
 
     remaining = [
-        d
-        for d in targets
-        if index.get(d, (None, None))[1]
-        != _expected_fingerprint(kb, d, text_fingerprint, visual_fingerprint)
+        d for d in targets if index.get(d, (None, None))[1] != fingerprint
     ]
     print(f"summarize: {len(remaining)} planned")
 
@@ -434,10 +410,7 @@ def run(root: Path, digests: list[str] | None) -> int:
     for digest in remaining:
         try:
             dropped = (
-                _process_digest(
-                    kb, digest, prefix, text_fingerprint, visual_fingerprint, pdf_part
-                )
-                or dropped
+                _process_digest(kb, digest, prefix, fingerprint, pdf_part) or dropped
             )
         except ModelError as exc:
             print(f"llmwiki: summarize: {exc}", file=sys.stderr)
