@@ -313,6 +313,8 @@ def _resolve_content(
         provenance = read_provenance(kb, digest)
     except FileNotFoundError as exc:
         return f"cannot read source: {exc}"
+    except (OSError, ValueError) as exc:
+        return f"cannot read provenance: {exc}"
 
     content_type = str(provenance.get("content_type", ""))
     kind = _content_kind(content_type)
