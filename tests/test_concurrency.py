@@ -438,7 +438,7 @@ class Hazard4RollbackDeletesRival(unittest.TestCase):
             )
         )
         # Same title on both summaries: `_story_path`
-        # (pre-fix)/`_claim_new_story_path` (post-fix) computes the
+        # (pre-fix)/`_free_story_path` (post-fix) computes the
         # SAME candidate slug for both once each rejects the decoy,
         # which is what gives the pre-fix TOCTOU something to collide
         # on. `digest_a`'s summary alone carries `bogus:oops`, an

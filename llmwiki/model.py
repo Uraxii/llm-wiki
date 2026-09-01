@@ -4,6 +4,8 @@ here instead of talking to the network itself.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import urllib.request
@@ -14,6 +16,19 @@ REQUEST_TIMEOUT_SEC = 60  # a hung endpoint must not wedge a cron job forever
 
 API_KEY_VAR = "LLM_WIKI_API_KEY"
 API_KEY_FILE_VAR = "LLM_WIKI_API_KEY_FILE"
+
+# Unmeasured default (agent-kb phase 15): no probe has run against a
+# real endpoint in this environment, since no credentials exist here.
+# Base64 inflates raw bytes by about a third on the wire, so this caps
+# the JSON body around 13.3MB. Replace it with the largest attachment
+# the probe script (.nikki-agents/probe-attachments.py) finds the
+# configured endpoint actually accepts, rounded down.
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+# The three settings [endpoint].pdf_part accepts (decision D2). "file"
+# and "image_url" are content-part shapes a probed endpoint may take a
+# PDF as; "none" means PDFs are not sent at all.
+PDF_PART_SHAPES = frozenset({"file", "image_url", "none"})
 
 
 class ModelError(Exception):
@@ -106,10 +121,67 @@ def _post(config: dict, path: str, body: dict) -> dict:
         raise ModelError(f"request to {url} failed: {exc}") from None
 
 
-def chat(config: dict, step: str, prompt: str, model: str | None = None) -> str:
-    """One chat completion for pipeline `step` (e.g. "summarize")."""
+def _attachment_content_part(config: dict, media_type: str, data: bytes) -> dict:
+    """One content part carrying `data` as `media_type`: an `image_url`
+    data URL for an image (D1), or the `[endpoint].pdf_part` shape for
+    a PDF (D2). "none" reaching here is a config error, not a silent
+    send: the caller is expected to have already dropped a PDF digest
+    rather than call this for it."""
+    encoded = base64.b64encode(data).decode("ascii")
+    if media_type != "application/pdf":
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+        }
+    pdf_part = config.get("endpoint", {}).get("pdf_part", "file")
+    if pdf_part not in PDF_PART_SHAPES:
+        raise ModelError(f"unrecognized [endpoint].pdf_part: {pdf_part!r}")
+    if pdf_part == "none":
+        raise ModelError("PDF attachments disabled: set [endpoint].pdf_part")
+    if pdf_part == "image_url":
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:application/pdf;base64,{encoded}"},
+        }
+    filename = f"{hashlib.sha256(data).hexdigest()}.pdf"
+    return {
+        "type": "file",
+        "file": {
+            "filename": filename,
+            "file_data": f"data:application/pdf;base64,{encoded}",
+        },
+    }
+
+
+def chat(
+    config: dict,
+    step: str,
+    prompt: str,
+    model: str | None = None,
+    attachment: tuple[str, bytes] | None = None,
+) -> str:
+    """One chat completion for pipeline `step` (e.g. "summarize"). With
+    no `attachment`, `content` is the plain prompt string, byte-
+    identical to a call built before attachments existed. With one
+    (`media_type`, raw bytes), `content` becomes a text part carrying
+    `prompt` plus one attachment part. Over `MAX_ATTACHMENT_BYTES`,
+    raises `ModelError` naming the size and the cap before any byte is
+    base64-encoded or sent."""
     name = model_name(config, step, model)
-    body = {"model": name, "messages": [{"role": "user", "content": prompt}]}
+    if attachment is None:
+        content: str | list[dict] = prompt
+    else:
+        media_type, data = attachment
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            raise ModelError(
+                f"attachment too large: {len(data)} bytes exceeds the "
+                f"{MAX_ATTACHMENT_BYTES} byte cap"
+            )
+        content = [
+            {"type": "text", "text": prompt},
+            _attachment_content_part(config, media_type, data),
+        ]
+    body = {"model": name, "messages": [{"role": "user", "content": content}]}
     response = _post(config, "/chat/completions", body)
     try:
         return response["choices"][0]["message"]["content"]

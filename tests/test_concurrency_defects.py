@@ -225,16 +225,39 @@ class D2ReaderTocTou(_KbTestCase):
         self.assertEqual(code, 0)
 
 
-class D3ZeroByteClaim(_KbTestCase):
-    """D3: `_claim_new_summary_path` links an empty `mkstemp` file into
-    place as its claim step; content lands only on the caller's next
-    write. A crash in that window is simulated here by calling the
-    claim alone and never reaching the content write -- the exact
-    window the audit names."""
+class D3NoZeroByteClaim(_KbTestCase):
+    """D3: the pre-fix `_claim_new_summary_path` linked an empty
+    `mkstemp` file into place as its claim step, content landing only
+    on the caller's next write; a crash in that window left a
+    permanent 0-byte page. The claim step is gone: `_free_summary_path`
+    only computes a filename under `kb_lock` and never touches disk, so
+    no code path can create a page before its content exists. Proven
+    here by driving the real `summarize.run` path end to end and
+    checking the wiki for any 0-byte page afterward."""
 
-    def test_d3_claim_new_summary_path_leaves_zero_byte_page(self) -> None:
-        kb = Kb(self.root)
-        summarize._claim_new_summary_path(kb, "deadbeef", "New Title")
+    def test_summarize_never_leaves_a_zero_byte_page(self) -> None:
+        digest = "deadbeef" * 8
+        (self.root / "sources" / f"{digest}.md").write_text("Some source text.")
+        (self.root / "sources" / f"{digest}.toml").write_text(
+            'url = "https://example.com/x"\n'
+            'fetched = "2024-01-01T00:00:00Z"\n'
+            'content_type = "text/markdown"\n'
+            'job = "manual"\n'
+        )
+        reply = (
+            "---\n"
+            "title: New Title\n"
+            "identifiers: []\n"
+            "---\n\n"
+            "An abstract.\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            summarize.run(self.root, [digest])
 
         zero_byte_pages = [
             p for p in (self.root / "wiki").glob("*.md") if p.stat().st_size == 0

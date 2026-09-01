@@ -8,16 +8,15 @@ shares an identifier with a page the CLI does not own.
 """
 from __future__ import annotations
 
-import os
 import re
 import sys
-import tempfile
 import unicodedata
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
 from llmwiki.core import (
+    LOCK_WAIT_TIMEOUT_SEC,
     FrontmatterValue,
     Kb,
     Page,
@@ -33,7 +32,6 @@ from llmwiki.core import (
 )
 from llmwiki.lint import lint_pages
 from llmwiki.model import ModelError, chat, model_name
-from llmwiki.sources import _link_exclusive
 from llmwiki import vectors
 
 # The judge's own contract (decision agent-kb-0zf.5): a SUMMARIZE.md
@@ -213,23 +211,12 @@ def _story_body(story: Story, summaries: dict[str, Page]) -> str:
     return "\n\n".join(sections)
 
 
-def _claim_new_story_path(kb: Kb, digest: str, title: str) -> Path:
-    """Atomically claim a filename for a brand-new story: the plain
-    slug if free, else the slug suffixed with this digest's first
-    SLUG_SUFFIX_LEN hex chars, which no other digest can collide on.
-    Reuses `sources._link_exclusive`, the package's one atomic
-    exclusive-create primitive, instead of a second one, so two
-    processes racing the same slug can never both believe they claimed
-    it."""
+def _free_story_path(kb: Kb, digest: str, title: str) -> Path:
+    """Replaces _claim_new_story_path. Plain slug when free, else the
+    digest-suffixed fallback. CALLER MUST HOLD kb_lock."""
     candidate = kb.wiki / f"{slugify(title)}.md"
-    fd, tmp_name = tempfile.mkstemp(dir=kb.wiki, prefix=f".{candidate.name}.")
-    tmp_path = Path(tmp_name)
-    try:
-        os.close(fd)
-        if _link_exclusive(tmp_path, candidate):
-            return candidate
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    if not candidate.exists():
+        return candidate
     return kb.wiki / f"{slugify(title)}-{digest[:SLUG_SUFFIX_LEN]}.md"
 
 
@@ -254,11 +241,9 @@ def _write_story(
     the pair, and roll both back on any finding (previous text restored,
     or the file unlinked when there was none). Returns False, leaving
     the summary story-less, when the write was dropped. `is_new` names
-    whether `story.path` is a brand-new story (its filename was just
-    claimed by `_claim_new_story_path`, or is the guaranteed-unique
-    digest-suffixed fallback) rather than whether a file happens to
-    exist there right now: a just-claimed path may already hold a file
-    this same call is about to overwrite with its real content."""
+    whether `story.path` is a brand-new story (its path came from
+    `_free_story_path`) rather than whether a file happens to exist
+    there right now."""
     story_prev = None if is_new else story.path.read_bytes()
     summary_prev = summary.path.read_bytes()
 
@@ -375,7 +360,7 @@ def _place_summary(
     if is_new:
         members = [digest]
         title = str(summary.fields.get("title", ""))
-        path = _claim_new_story_path(kb, digest, title)
+        path = _free_story_path(kb, digest, title)
         action = "new"
     else:
         members = target.members if digest in target.members else [*target.members, digest]
@@ -504,19 +489,34 @@ def rebuild(root: Path) -> int:
     return 0 if placed == len(targets) else 1
 
 
-def run(root: Path, digests: list[str] | None) -> int:
+def place(kb: Kb, digests: list[str] | None) -> tuple[int, int]:
     """Place a story for each of `digests`, or every summary lacking a
-    `story:` field when `None`, in `(fetched, hash)` order. Returns 1 if
-    anything was dropped, else 0. Runs under the kb lock spanning
-    `_load_wiki` through the last write: narrower would let a second
-    process act on a snapshot this run has already invalidated, the
-    lost-update and duplicate-story hazards the lock exists to close.
-    With `[models] dedup` unset (recommended), `judge` makes no model
-    call, so the lock only ever serializes local disk I/O."""
+    `story:` field when `None`. Returns (placed, attempted).
+
+    CALLER MUST HOLD kb_lock. This loads the whole wiki and writes from
+    that load; a second writer inside the span reinstates the
+    lost-update and duplicate-story races verbatim.
+
+    Prints one stderr line when [models] dedup is set: the run then
+    holds the lock across one model call per target, and a second
+    writer gets KbBusy after LOCK_WAIT_TIMEOUT_SEC."""
+    if _dedup_model_id(kb) is not None:
+        print(
+            "llmwiki: dedup: [models] dedup is set, so this run holds the "
+            "kb lock across one model call per target; a second writer "
+            f"gets KbBusy after {LOCK_WAIT_TIMEOUT_SEC}s",
+            file=sys.stderr,
+        )
+    summaries, stories, agent_pages = _load_wiki(kb)
+    targets = _ordered(_target_digests(digests, summaries), summaries)
+    print(f"dedup: {len(targets)} planned")
+    placed = _replay(kb, targets, summaries, stories, agent_pages)
+    return placed, len(targets)
+
+
+def run(root: Path, digests: list[str] | None) -> int:
+    """CLI `dedup`."""
     kb = Kb(root)
     with kb_lock(kb.root):
-        summaries, stories, agent_pages = _load_wiki(kb)
-        targets = _ordered(_target_digests(digests, summaries), summaries)
-        print(f"dedup: {len(targets)} planned")
-        placed = _replay(kb, targets, summaries, stories, agent_pages)
-    return 0 if placed == len(targets) else 1
+        placed, attempted = place(kb, digests)
+    return 0 if placed == attempted else 1
