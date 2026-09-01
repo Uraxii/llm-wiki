@@ -125,9 +125,13 @@ means a leaked key is permanent, which is not an operable system.
 seen failing before the code existed, per the standing rule from plan 01 that
 a guard never seen failing proves nothing.
 
-- A writer token is refused by a service started without the write flag. This
-  is the restrictive-default proof and it must be observed on a running
-  service, not reasoned about.
+- The gate opens only `read`, and only on the exact word `open`. A write is
+  refused whatever `[access]` says, because phase 2 offers no way to open one
+  and a deployment file that slips past its own startup checks must still not
+  get a write through. An earlier version of this bullet asked for a writer
+  token to be refused by "a service started without the write flag"; no such
+  flag exists in phase 2's `[access]`, and the running-service half of that
+  proof belongs to phase 2's startup refusals.
 - A revoked token is refused on the next request, and the refusal is
   indistinguishable from an unknown one.
 - A token minted under pepper version 1 still verifies after the service is
