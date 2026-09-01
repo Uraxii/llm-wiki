@@ -4,8 +4,8 @@ This file provides instructions and context for AI coding agents working on this
 
 ## Build & Test
 
-Python 3.14, standard library only, with `sqlite-vec` the single measured
-exception. See the Dependencies rule below.
+Python 3.14. Dependencies are allowed; see the Dependencies rule below for the
+bar they clear. `sqlite-vec` is the one currently in use.
 
 **Use `.venv/bin/python`, not bare `python3`.** From phase 13 the whole CLI
 requires `sqlite-vec`: `llmwiki/vectors.py` imports it at module level and
@@ -74,17 +74,41 @@ around as that dict. Do not re-type it into dataclasses.
 
 ## Conventions & Patterns
 
-**Dependencies.** The standard library, plus `sqlite-vec` and nothing else.
-Convenience never justifies a package; only a property the standard library
-cannot provide does, and that case is argued with a measurement, to the user,
-before anything is added.
+**Dependencies. The stdlib-only mandate is dropped, by user directive.** It is
+superseded twice over and neither earlier version binds: not "stdlib plus
+`sqlite-vec` and nothing else", and not the pure-Python-only relaxation that
+briefly replaced it. The CLI and the service may both take any dependency.
 
-HTML extraction is a small `html.parser` densest-block reader, not
-`trafilatura`, and anything it cannot read is stored as raw bytes. There is no
-PDF text extraction, because the standard library has none; do not hand-roll
-one. Both were dropped by user directive.
+The rationale that held the old rule up was that the CLI is a skill tool that
+installs anywhere. That stopped being true at phase 13, where `vectors.py`
+began importing `sqlite-vec` at module level. The CLI already requires
+`.venv/bin/python` and already ships a venv, so the marginal cost of the next
+wheel is close to zero.
 
-`sqlite-vec` (phase 13) is the single exception, kept for a measured reason.
+What survives is judgment, not a ban. A package earns its place by doing
+something worth more than the reading, the pinning, and the failure modes it
+adds. Prefer the standard library when it is genuinely adequate, because fewer
+moving parts is still a real property. Reach for a package when it is not, and
+say in one line what it bought.
+
+**A dropped constraint is not a mandate to rewrite.** The measured constants,
+the concurrency work in phase 14, and the six lint checks are the value in this
+repo, and none of them gets better by being rebuilt on a library. Swap a piece
+out when the library is better at that piece, one piece at a time, each with
+its own tests staying green.
+
+HTML extraction is currently a small `html.parser` densest-block reader, and
+anything it cannot read is stored as raw bytes. `trafilatura` was dropped by
+user directive under the old rule; that rule is gone, so this is now the
+strongest candidate in the repo for a library swap, not a settled decision.
+
+**PDFs and images do not get parsed at all.** Phase 15 hands the raw bytes to a
+vision model, which reads scans, charts, and diagrams that no text extractor
+sees. Never hand-roll a PDF parser. `pypdf` is the recorded fallback if, and
+only if, the endpoint probe in `docs/plans/01-llm-wiki-poc/phase-15-visual-sources.md`
+shows the endpoint refuses PDF parts; reach for it then, not before.
+
+`sqlite-vec` (phase 13) was the first dependency, kept for a measured reason.
 A stdlib scan using `math.sumprod` over normalized `array('f')` vectors runs
 about 43x slower at ten thousand pages, 911 ms against 21 ms, because sumprod
 boxes every element through the iterator protocol while `sqlite-vec` runs SIMD
@@ -96,8 +120,9 @@ whole project runs under `.venv/bin/python`, not just its suite: a degrade
 path was rejected because it would let `ingest` skip embedding silently and
 let `search` claim the wiki has nothing on a subject it has pages for.
 
-If any other task seems to need a package, that is a signal the task is too
-ambitious for this PoC. Cut the task, do not add the package.
+`sqlite-vec` is no longer an exception to anything; it is simply the first
+dependency, and its 43x measurement above is the shape of argument a new one
+should come with.
 
 **Network.** Never `urllib.request.urlopen` anywhere in this project. It
 reads `http_proxy` from the environment and follows redirects, and both
