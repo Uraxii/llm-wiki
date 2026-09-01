@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import ssl
 import subprocess
 import tempfile
@@ -78,9 +79,23 @@ class BuildContextTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             tls.build_context(str(self.cert), str(self.key), "1.1")
 
-    def test_missing_cert_raises(self) -> None:
-        with self.assertRaises((ssl.SSLError, OSError)):
-            tls.build_context(str(self.dir.name + "/nope.pem"), str(self.key), "1.2")
+    def test_missing_cert_raises_naming_the_path(self) -> None:
+        missing = self.dir.name + "/nope.pem"
+        with self.assertRaises(ValueError) as caught:
+            tls.build_context(missing, str(self.key), "1.2")
+        self.assertIn(missing, str(caught.exception))
+
+    def test_a_key_that_does_not_match_its_cert_names_both_paths(self) -> None:
+        """`load_cert_chain` raises `ssl.SSLError` here, and that error
+        names neither file. It reached the operator as a traceback."""
+        _other_cert, other_key = _make_cert(
+            Path(self.dir.name), "other", "subject-other"
+        )
+        with self.assertRaises(ValueError) as caught:
+            tls.build_context(str(self.cert), str(other_key), "1.2")
+        message = str(caught.exception)
+        self.assertIn(str(self.cert), message)
+        self.assertIn(str(other_key), message)
 
 
 class ContextHolderReloadTest(unittest.TestCase):
@@ -151,6 +166,78 @@ class WatchCertificatesTest(unittest.TestCase):
                 break
             threading.Event().wait(0.05)
         self.assertIsNot(holder.current, before)
+
+
+class WatchRetryTest(unittest.TestCase):
+    """The watcher's baseline advances only on a reload that took
+    effect. It used to advance on every change, so a reload that failed
+    for a reason the files would not change again, a transient OSError
+    or a momentary permission fault, was logged once and never retried,
+    and the service kept serving the pre-renewal certificate until it
+    expired."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+        self.cert, self.key = _make_cert(self.root, "one", "subject-one")
+        self.logger = _silent_logger()
+        self.holder = tls.ContextHolder(
+            tls.build_context(str(self.cert), str(self.key), "1.2")
+        )
+
+    def _watch(self) -> None:
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=tls.watch_certificates,
+            args=(
+                self.holder, str(self.cert), str(self.key), "1.2",
+                self.logger, stop,
+            ),
+            kwargs={"interval_sec": 0.05},
+            daemon=True,
+        )
+        thread.start()
+        self.addCleanup(lambda: (stop.set(), thread.join(timeout=2)))
+
+    def _wait_for_swap(self, before: ssl.SSLContext, tries: int = 60) -> bool:
+        for _ in range(tries):
+            if self.holder.current is not before:
+                return True
+            threading.Event().wait(0.05)
+        return False
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores the mode bits this uses")
+    def test_a_failure_with_no_later_file_change_is_retried(self) -> None:
+        before = self.holder.current
+        cert2, key2 = _make_cert(self.root, "two", "subject-two")
+
+        # Write-only: the renewal below still lands, and reading the key
+        # back fails, which is the shape of a transient permission fault
+        # while a renewal tool fixes ownership.
+        os.chmod(self.key, 0o200)
+        self.addCleanup(os.chmod, self.key, 0o600)
+        self._watch()
+
+        self.cert.write_bytes(cert2.read_bytes())
+        self.key.write_bytes(key2.read_bytes())
+        self.assertFalse(self._wait_for_swap(before, tries=8))
+
+        # Nothing writes to either file again; only the mode changes, and
+        # chmod does not move an mtime. The retry is the whole point.
+        os.chmod(self.key, 0o600)
+        self.assertTrue(self._wait_for_swap(before))
+
+    def test_a_cert_landing_before_its_key_still_heals(self) -> None:
+        before = self.holder.current
+        cert2, key2 = _make_cert(self.root, "two", "subject-two")
+
+        self._watch()
+        self.cert.write_bytes(cert2.read_bytes())
+        self.assertFalse(self._wait_for_swap(before, tries=6))
+
+        self.key.write_bytes(key2.read_bytes())
+        self.assertTrue(self._wait_for_swap(before))
 
 
 class LiveReloadProofTest(unittest.TestCase):

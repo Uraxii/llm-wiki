@@ -1,4 +1,4 @@
-"""The deployment file parser and the 13-row startup refusal table."""
+"""The deployment file parser and the 14-row startup refusal table."""
 from __future__ import annotations
 
 import os
@@ -278,6 +278,70 @@ class WriteOpenCheckTest(DeploymentTestBase):
                 self.assertIsNone(deployment._check_write_open(depl, {}))
 
 
+class TlsModeCheckTest(DeploymentTestBase):
+    """Row 7. Before this row existed, every mode-conditioned check
+    short-circuited on a mode it did not recognise and `_serve` fell
+    through to a plaintext listener, so a typo or a missing `[tls]`
+    section served bearer tokens in the clear on whatever `bind` named.
+    """
+
+    def test_the_two_defined_modes_are_not_refused(self) -> None:
+        self.assertIsNone(deployment.tls_mode_refusal(self.terminate_deployment()))
+        self.assertIsNone(deployment.tls_mode_refusal(self.upstream_deployment()))
+
+    def test_no_tls_section_at_all_is_refused(self) -> None:
+        message = deployment.tls_mode_refusal({"server": {"bind": "0.0.0.0:8443"}})
+        self.assertIn("[tls] mode", message)
+
+    def test_every_unrecognised_mode_is_refused_by_name(self) -> None:
+        depl = self.terminate_deployment()
+        for mode in ("Terminate", "upstrem", "", "TERMINATE", " terminate", "none"):
+            with self.subTest(mode=mode):
+                depl["tls"]["mode"] = mode
+                message = deployment.tls_mode_refusal(depl)
+                self.assertIsNotNone(message)
+                self.assertIn("[tls] mode", message)
+                self.assertIn(repr(mode), message)
+
+    def test_tls_mode_reads_only_the_two_defined_values(self) -> None:
+        self.assertEqual(
+            deployment.tls_mode(self.terminate_deployment()), deployment.TERMINATE
+        )
+        self.assertEqual(
+            deployment.tls_mode(self.upstream_deployment()), deployment.UPSTREAM
+        )
+        self.assertIsNone(deployment.tls_mode({"tls": {"mode": "Terminate"}}))
+        self.assertIsNone(deployment.tls_mode({}))
+
+    def test_an_unrecognised_mode_does_not_switch_the_other_rows_off(self) -> None:
+        """The bypass itself: with `mode` unrecognised, the four
+        mode-conditioned rows stay silent, so row 7 has to be the one
+        that speaks or the deployment reads as clean."""
+        depl = self.terminate_deployment()
+        depl["tls"]["mode"] = "Terminate"
+        depl["tls"]["cert"] = str(self.root / "nope.pem")
+        refusals = deployment.check_deployment(depl, base_environ())
+        self.assertTrue(any("[tls] mode" in r for r in refusals), refusals)
+
+
+class TrustedProxyAddressTest(DeploymentTestBase):
+    """The one predicate row 11 and `ForwardedHeaderMiddleware` share."""
+
+    def test_an_address_parses(self) -> None:
+        depl = self.upstream_deployment(trusted_proxy="10.0.0.1")
+        self.assertEqual(
+            str(deployment.trusted_proxy_address(depl)), "10.0.0.1"
+        )
+
+    def test_a_hostname_is_not_an_address(self) -> None:
+        depl = self.upstream_deployment(trusted_proxy="ingress.internal")
+        self.assertIsNone(deployment.trusted_proxy_address(depl))
+
+    def test_unset_is_not_an_address(self) -> None:
+        self.assertIsNone(deployment.trusted_proxy_address({}))
+        self.assertIsNone(deployment.trusted_proxy_address(self.upstream_deployment()))
+
+
 class CertFilesCheckTest(DeploymentTestBase):
     def test_missing_cert_refused(self) -> None:
         depl = self.terminate_deployment()
@@ -441,6 +505,21 @@ class OpenReadNeedsProxyCheckTest(DeploymentTestBase):
             deployment._check_open_read_needs_proxy(self.terminate_deployment(), {})
         )
 
+    def test_a_hostname_trusted_proxy_is_refused_by_name(self) -> None:
+        """A hostname passed this row on truthiness while the middleware
+        ignored it forever, so the deployment read as clean in exactly
+        the state this row exists to prevent."""
+        depl = self.upstream_deployment(trusted_proxy="ingress.internal")
+        self.assertEqual(
+            deployment._check_open_read_needs_proxy(depl, {}),
+            "[tls] trusted_proxy is not an IP address: 'ingress.internal'; it "
+            "is compared against the transport peer, which is always a literal",
+        )
+
+    def test_an_ipv6_trusted_proxy_satisfies_it(self) -> None:
+        depl = self.upstream_deployment(trusted_proxy="fd00::1")
+        self.assertIsNone(deployment._check_open_read_needs_proxy(depl, {}))
+
     def test_a_typo_on_read_does_not_trip_it(self) -> None:
         depl = self.upstream_deployment()
         depl["access"]["read"] = "opn"
@@ -571,15 +650,15 @@ class CheckDeploymentTest(DeploymentTestBase):
         self.assertIn(str(self.state), joined)
         self.assertIn(str(self.kb), joined)
 
-    def test_registry_covers_exactly_the_ten_parsed_dict_rows(self) -> None:
-        self.assertEqual([check.row for check in deployment.REGISTRY], list(range(4, 14)))
+    def test_registry_covers_exactly_the_eleven_parsed_dict_rows(self) -> None:
+        self.assertEqual([check.row for check in deployment.REGISTRY], list(range(4, 15)))
 
 
 class StartupRefusalsTest(DeploymentTestBase):
     def test_no_argument_short_circuits_the_registry(self) -> None:
         self.assertEqual(
             deployment.startup_refusals(None, base_environ()),
-            [deployment.pre_parse_refusal(None)],
+            ([deployment.pre_parse_refusal(None)], {}),
         )
 
     def test_a_clean_deployment_file_passes(self) -> None:
@@ -587,14 +666,18 @@ class StartupRefusalsTest(DeploymentTestBase):
         depl["server"]["bind"] = "127.0.0.1:8443"
         path = self.root / "deploy.toml"
         path.write_text(_toml(depl))
-        self.assertEqual(deployment.startup_refusals(str(path), base_environ()), [])
+        refusals, parsed = deployment.startup_refusals(str(path), base_environ())
+        self.assertEqual(refusals, [])
+        # The caller serves this dict rather than reopening the file, so
+        # the bytes that get served are the bytes that were checked.
+        self.assertEqual(parsed, deployment.load_deployment(str(path)))
 
     def test_a_faulty_deployment_file_is_refused_by_setting_name(self) -> None:
         depl = self.terminate_deployment()
         depl["access"]["write"] = "open"
         path = self.root / "deploy.toml"
         path.write_text(_toml(depl))
-        refusals = deployment.startup_refusals(str(path), base_environ())
+        refusals, _parsed = deployment.startup_refusals(str(path), base_environ())
         self.assertTrue(any("write" in r for r in refusals))
 
 

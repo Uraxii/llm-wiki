@@ -2,10 +2,11 @@
 
 The startup order is the contract phase 2 names: resolve the argument,
 run every startup refusal (`deployment.startup_refusals`, which covers
-the three pre-parse refusals and the ten-row registry in one call),
+the three pre-parse refusals and the eleven-row registry in one call),
 and only once that list is empty does anything build a TLS context or
 bind a socket. `main` below reads top to bottom in that order; nothing
-after the refusal check can run before it.
+after the refusal check can run before it, and it serves the parsed
+deployment that call handed back rather than reopening the file.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import os
 import signal
 import sys
 import threading
+from collections.abc import Callable
 
 import uvicorn
 
@@ -24,19 +26,45 @@ from llmwiki_service import deployment, tls
 logger = logging.getLogger("llmwiki_service")
 
 
-def _parse_bind(bind: str) -> tuple[str, int]:
+def _parse_bind(bind: str | None) -> tuple[str, int]:
     """`"host:port"` split the same way `deployment._bind_is_private`
     reads it: the last colon separates the port, and an IPv6 host
     keeps the brackets `[server] bind` was written with until they are
-    stripped here."""
+    stripped here.
+
+    Raises `ValueError` naming `[server] bind`. No refusal row covers a
+    missing or malformed bind under `mode = "terminate"`, so the fault
+    lands on `main`'s error boundary, which needs a sentence rather
+    than a `KeyError`.
+    """
+    if not bind:
+        raise ValueError("[server] bind is not set")
     host, sep, port = bind.rpartition(":")
-    if not sep:
+    if not sep or not port.isdigit():
         raise ValueError(f"[server] bind is not host:port: {bind!r}")
     return host.strip("[]"), int(port)
 
 
+def _install_sighup(reload_in_background: Callable[[], None]) -> None:
+    """Wire `SIGHUP` to `reload_in_background`, in both modes.
+
+    Installed for `mode = "upstream"` too. Registering it only in
+    terminate mode left SIGHUP with its default disposition there,
+    which kills the process, and the phase teaches SIGHUP as the way to
+    force a reload, so an operator sweeping a host would take the
+    service down with it.
+    """
+    asyncio.get_running_loop().add_signal_handler(
+        signal.SIGHUP, reload_in_background
+    )
+
+
 def _terminate_mode_config(
-    tls_cfg: dict, host: str, port: int, stop_event: threading.Event
+    tls_cfg: dict,
+    host: str,
+    port: int,
+    trusted_proxy: app_module.IPAddress | None,
+    stop_event: threading.Event,
 ) -> tuple[uvicorn.Config, threading.Thread]:
     """The `uvicorn.Config` for `mode = "terminate"`, and the watcher
     thread it started.
@@ -45,15 +73,23 @@ def _terminate_mode_config(
     `ContextHolder.reload`, and hands uvicorn a context whose identity
     never changes (`tls.server_context`), so the reload path has one
     place that publishes and the serving path has one place that reads.
+
+    `SIGHUP` runs the reload on a thread, not inline. A signal handler
+    added to the loop runs on the loop thread, and `reload` reads and
+    parses two files, which would stall every in-flight request for as
+    long as that takes. The watcher already does this work off the loop.
     """
     cert, key = tls_cfg["cert"], tls_cfg["key"]
     min_version = tls_cfg.get("min_version")
     holder = tls.ContextHolder(tls.build_context(cert, key, min_version))
     server_ctx = tls.server_context(holder)
 
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(
-        signal.SIGHUP, holder.reload, cert, key, min_version, logger
+    _install_sighup(
+        lambda: threading.Thread(
+            target=holder.reload,
+            args=(cert, key, min_version, logger),
+            daemon=True,
+        ).start()
     )
 
     watcher = threading.Thread(
@@ -64,7 +100,7 @@ def _terminate_mode_config(
     watcher.start()
 
     config = uvicorn.Config(
-        app_module.build_app(tls_cfg.get("trusted_proxy")),
+        app_module.build_app(trusted_proxy),
         host=host,
         port=port,
         proxy_headers=False,  # ForwardedHeaderMiddleware owns this, gated on trusted_proxy
@@ -74,24 +110,37 @@ def _terminate_mode_config(
 
 
 async def _serve(depl: dict) -> int:
-    host, port = _parse_bind(depl["server"]["bind"])
+    host, port = _parse_bind(depl.get("server", {}).get("bind"))
     tls_cfg = depl.get("tls", {})
+    trusted_proxy = deployment.trusted_proxy_address(depl)
     stop_event = threading.Event()
     watcher: threading.Thread | None = None
+    mode = deployment.tls_mode(depl)
 
-    if tls_cfg.get("mode") == "terminate":
-        config, watcher = _terminate_mode_config(tls_cfg, host, port, stop_event)
-    else:
-        # mode == "upstream": the deployment's own startup refusal
-        # (row 9) already required `bind` to be a private interface,
-        # so a plaintext listener here is the reverse proxy's backend,
-        # never a port exposed to the network directly.
+    if mode == deployment.TERMINATE:
+        config, watcher = _terminate_mode_config(
+            tls_cfg, host, port, trusted_proxy, stop_event
+        )
+    elif mode == deployment.UPSTREAM:
+        # Row 10 already required `bind` to be a private interface, so
+        # this plaintext listener is the reverse proxy's backend, never
+        # a port exposed to the network directly.
+        _install_sighup(
+            lambda: logger.info(
+                'SIGHUP: no in-process certificate to reload under mode = "upstream"'
+            )
+        )
         config = uvicorn.Config(
-            app_module.build_app(tls_cfg.get("trusted_proxy")),
+            app_module.build_app(trusted_proxy),
             host=host,
             port=port,
             proxy_headers=False,  # ForwardedHeaderMiddleware owns this, gated on trusted_proxy
         )
+    else:
+        # Unreachable: row 7 refuses every other mode before anything
+        # gets here. Explicit anyway, because the branch that used to
+        # be `else` served plaintext for a mode nobody recognised.
+        raise ValueError(deployment.tls_mode_refusal(depl))
 
     server = uvicorn.Server(config)
     try:
@@ -107,15 +156,24 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
     arg = argv[1] if len(argv) > 1 else None
 
-    refusals = deployment.startup_refusals(arg, os.environ)
-    if refusals:
-        for message in refusals:
-            print(message, file=sys.stderr)
-        return 1
+    try:
+        refusals, depl = deployment.startup_refusals(arg, os.environ)
+        if refusals:
+            for message in refusals:
+                print(message, file=sys.stderr)
+            return 1
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    depl = deployment.load_deployment(arg)
-    return asyncio.run(_serve(depl))
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        return asyncio.run(_serve(depl))
+    except ValueError as exc:
+        # The refusal table's blind spots land here instead of on the
+        # operator as a traceback: a malformed file, an unknown
+        # `min_version`, a missing bind, a key that does not match its
+        # certificate. Each already carries a sentence naming the
+        # setting or the path, and each still exits nonzero with
+        # nothing bound.
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
