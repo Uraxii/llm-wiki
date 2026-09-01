@@ -483,6 +483,183 @@ class VectorsTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out.getvalue(), "")
 
+    def test_search_prints_unsummarized_warning_before_endpoint_failure(self) -> None:
+        """Pre-split, `search` computed and printed the unsummarized
+        count BEFORE calling embed, so a dead endpoint still produced
+        both stderr lines. The split moved that count inside `rank`,
+        where an embed failure raised it away unprinted; this pins the
+        line back."""
+        self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            vectors.sweep(Kb(self.root))  # north.md now has a current vector
+
+        # one source with no summary page; the endpoint above is dead now
+        (self.root / "sources" / ("a" * 64 + ".md")).write_text("orphan source")
+
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = vectors.search(self.root, "anything", n=5)
+
+        self.assertEqual(code, 2)
+        lines = err.getvalue().splitlines()
+        self.assertEqual(lines[0], "llmwiki: search: 1 sources without a summary page")
+        self.assertTrue(lines[1].startswith("llmwiki: search: request to"))
+
+    # -- rank: phase-03 split -----------------------------------------
+
+    def test_rank_makes_exactly_one_embedding_call_for_the_query(self) -> None:
+        self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)  # one call, embedding north.md
+            self.assertEqual(len(fake.requests), 1)
+
+            vectors.rank(kb, "query", n=5)
+            self.assertEqual(len(fake.requests), 2)  # exactly one more
+
+    def test_rank_checks_staleness_before_embedding(self) -> None:
+        """Reversing check-before-embed would cost a paid call on every
+        503; only reading the endpoint's call count back after the
+        raise catches that."""
+        self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            raise AssertionError("must not embed before the staleness check")
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)  # never swept: north.md is stale
+            with self.assertRaises(vectors.StaleVectors) as ctx:
+                vectors.rank(kb, "query", n=5)
+
+        self.assertEqual(ctx.exception.missing, 1)
+        self.assertEqual(fake.requests, [])
+
+    def test_rank_raises_no_embed_model_when_embed_is_unset(self) -> None:
+        self._write_page("north", "North Page")
+        (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\n')
+        from llmwiki.core import Kb
+
+        with self.assertRaises(vectors.NoEmbedModel) as ctx:
+            vectors.rank(Kb(self.root), "query", n=5)
+
+        self.assertEqual(ctx.exception.missing, 1)
+
+    def test_rank_propagates_model_error_from_the_endpoint(self) -> None:
+        self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)  # not stale, so rank reaches the query embed
+
+        with FakeEndpoint(_respond(vector_for), status=500) as broken:
+            self._write_config(broken.url)
+            with self.assertRaises(vectors.ModelError):
+                vectors.rank(kb, "query", n=5)
+
+    def test_rank_skips_a_page_unlinked_since_its_embed(self) -> None:
+        north = self._write_page("north", "North Page")
+        self._write_page("south", "South Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+            north.unlink()  # row survives; sweep never ran again to drop it
+
+            ranking = vectors.rank(kb, "query", n=5)
+
+        self.assertEqual([hit.name for hit in ranking.hits], ["south.md"])
+
+    def test_rank_score_is_unrounded(self) -> None:
+        self._write_page("va", "Alpha VA")
+
+        table = {"Alpha VA": [1.0, 1.0], "query": [1.0, 2.0]}
+
+        def vector_for(text: str) -> list[float]:
+            for marker, vec in table.items():
+                if marker in text:
+                    return vec
+            raise AssertionError(f"no vector fixture for {text!r}")
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+            ranking = vectors.rank(kb, "query", n=1)
+
+        self.assertEqual(len(ranking.hits), 1)
+        score = ranking.hits[0].score
+        self.assertNotEqual(score, round(score, 2))  # not truncated to 2dp
+
+    def test_rank_plans_exactly_once_and_opens_one_connection(self) -> None:
+        self._write_page("north", "North Page")
+
+        def vector_for(_text):
+            return [1.0, 0.0]
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            self._write_config(fake.url)
+            from llmwiki.core import Kb
+
+            kb = Kb(self.root)
+            vectors.sweep(kb)
+
+            plan_calls = []
+            real_plan = vectors._plan
+
+            def counting_plan(*args, **kwargs):
+                plan_calls.append(1)
+                return real_plan(*args, **kwargs)
+
+            connect_calls = []
+            real_connect = vectors._connect
+
+            def counting_connect(*args, **kwargs):
+                connect_calls.append(1)
+                return real_connect(*args, **kwargs)
+
+            original_plan, original_connect = vectors._plan, vectors._connect
+            vectors._plan = counting_plan
+            vectors._connect = counting_connect
+            try:
+                vectors.rank(kb, "query", n=5)
+            finally:
+                vectors._plan = original_plan
+                vectors._connect = original_connect
+
+        self.assertEqual(plan_calls, [1])
+        self.assertEqual(connect_calls, [1])
+
 
 class DedupVectorSeamTest(unittest.TestCase):
     """The live defect fix: a vector neighbour with zero shared
