@@ -17,3 +17,4 @@ scratch/
 
 # decision log, kept local per the user
 docs/plans/01-llm-wiki-poc/decisions.tsv
+.nikki-agents/
