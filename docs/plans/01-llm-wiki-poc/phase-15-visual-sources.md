@@ -251,10 +251,10 @@ hide a real defect in three consecutive phases.
 ## What landed
 
 The four changes shipped, plus the probe script, against `.venv/bin/python`
-only. Step 0 did not run: no endpoint credential exists in this environment,
-so `MAX_ATTACHMENT_BYTES` ships as the labelled guess D4 describes, not a
-measurement. See `decisions.tsv` for the specific calls made while
-implementing.
+only. `MAX_ATTACHMENT_BYTES` still ships as the labelled guess D4 describes,
+not a measurement: step 0 tested which content-part shapes the endpoint
+accepts, never how large an attachment it accepts. See `decisions.tsv` for the
+specific calls made while implementing.
 
 - `sources.EXTENSIONS` gained the four image types.
 - `model.chat` gained `attachment`, byte-identical for the no-attachment
@@ -262,16 +262,25 @@ implementing.
   `MAX_ATTACHMENT_BYTES` and the D1/D2 content-part shapes.
 - `summarize` branches on provenance `content_type` via a `_content_kind`
   helper reusing `fetch.ACCEPTED_TYPES`, with `SOURCE_ATTACHMENT_NOTE` as
-  the visual sibling of `SOURCE_DELIMITER`. The fingerprint is now two
-  values (text, visual) so a future edit to either prompt invalidates only
-  the pages built under it.
+  the visual sibling of `SOURCE_DELIMITER`. The two prompt fingerprints
+  this phase introduced were later collapsed back into one in `cbdc38c`,
+  because both derived from the same prefix, so nothing at runtime could
+  move one without moving the other.
 - `[models] summarize_image` falls back to `[models] summarize` through
   `model_name`, no parallel lookup.
-- `.nikki-agents/probe-attachments.py` exists, unrun, for the user to run
-  with their own key.
+- `.nikki-agents/probe-attachments.py` exists and has now been run
+  (2026-09-01, `https://openrouter.ai/api/v1`). It confirms the D2 default:
+  `google/gemini-2.5-flash` accepted all three shapes, `openai/gpt-4o-mini`
+  accepted the image as `image_url` and the PDF as `file`/`file_data` but
+  refused the PDF as `image_url` with HTTP 400 `invalid_image_format`. Both
+  models read the word PROBE back out of the PDF, so the part was parsed and
+  not merely accepted. `pdf_part` keeps its `"file"` default, `"image_url"`
+  stays a real but provider-specific option, and the `pypdf` fallback
+  condition is not met.
 
-Not driven: the phase-14 two-process concurrency reproducer against a
-visual source specifically. `_process_digest`'s lock window is untouched by
-this phase (the attachment decision sits before it, same as the text path
-sat before it), so the existing phase-14 reproducers should still hold, but
-that is an argument from the diff, not a fresh observation.
+Since driven: the phase-14 two-process concurrency reproducer against a
+visual source specifically. `.nikki-agents/repro-visual-lock.py` races two
+real OS subprocesses on one kb. It was proven RED first, 9 corruptions in 9
+runs against a lock-disabled copy in a tempdir, then GREEN 15 of 15 against
+the real code across image/image, pdf/pdf, and image/pdf. The lock holding
+here is now an observation, not an argument from the diff.
