@@ -1,17 +1,21 @@
-# Known mutmut survivors for llmwiki_service/auth.py and tokens.py.
+# Known mutmut survivors for llmwiki_service/auth.py, tokens.py, and
+# deployment.py.
 #
 # This is the mutation testing gate's ratchet: `check-mutation-gate.py`
-# fails only when a survivor appears that is NOT on this list. It does
-# not fail for the 60 survivors already here; killing those is separate
-# follow-up work, not this gate's job.
+# fails only when a survivor appears that is NOT on this list. Every
+# entry here has been checked by hand and is an equivalent mutant: a
+# change with no test-observable effect on behavior, so no test can
+# kill it. The trailing `# reason` comment on each line is that check,
+# not a note for later; an entry with no reason is not finished.
 #
-# Regenerate after deliberately killing some of these (never to hide a
-# new one):
-#   rm -rf mutants .venv/lib/*/site-packages/mutmut/__pycache__
-#   .venv/bin/python -m mutmut run
-#   .venv/bin/python -m mutmut results | sed -e 's/: survived$//' \
-#     -e 's/^[[:space:]]*//' | sort > scripts/mutation-survivor-baseline.txt
-#   (then restore this header comment, the command above overwrites it)
+# Regenerate with this command. It rewrites the survivor list below
+# while preserving this header and every entry's `# reason` comment:
+#   .venv/bin/python scripts/check-mutation-gate.py --update-baseline
+#
+# A mutant that regenerates with no prior entry is written bare and
+# printed to stderr as needing a reason. Read its diff with
+# `mutmut show <id>` before adding one: if it turns out to be killable,
+# write the test instead of a reason.
 #
 # Stability: each id is `<module>.<qualified_name>__mutmut_<N>`, where N
 # is assigned in the order mutmut's mutation generator visits that one
@@ -19,79 +23,44 @@
 # operator, a call) can renumber every mutant after it in that same
 # function, even though nothing about the surviving mutant's behavior
 # changed. An edit to an unrelated function, or anywhere outside
-# auth.py/tokens.py, does not renumber these ids. A red run after an
-# edit to a function named below is expected: regenerate the baseline,
-# read the diff, confirm every entry that changed id still represents
-# the same surviving mutation, and only then commit it.
-#
-# One entry, x__base62__mutmut_14, is flaky rather than a stable
-# survivor: it strips the "0" fill character from
-# `digits.rjust(CHECKSUM_CHARS, "0")`, and the tests only distinguish
-# that from the default space fill when a randomly generated token's
-# CRC32 checksum happens to base62-encode shorter than CHECKSUM_CHARS.
-# A clean tree with no test changes was observed to kill or survive it
-# on different runs (2 of 3 full regenerations survived it). It is
-# listed here so that coin flip cannot fail the gate on its own; a
-# deterministic test for the padding branch would kill it for good,
-# which is follow-up work, not part of this gate.
-llmwiki_service.auth.x_authorize__mutmut_17
-llmwiki_service.auth.x_authorize__mutmut_25
-llmwiki_service.auth.x_authorize__mutmut_27
-llmwiki_service.auth.x_authorize__mutmut_28
-llmwiki_service.auth.x_bearer_token__mutmut_4
-llmwiki_service.auth.xǁFailureLimiterǁblocked__mutmut_13
-llmwiki_service.auth.xǁFailureLimiterǁblocked__mutmut_6
-llmwiki_service.auth.xǁFailureLimiterǁblocked__mutmut_7
-llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_4
-llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_5
-llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_6
-llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_7
-llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_8
-llmwiki_service.auth.xǁFailureLimiterǁrecord_failure__mutmut_10
-llmwiki_service.auth.xǁFailureLimiterǁrecord_failure__mutmut_11
-llmwiki_service.auth.xǁFailureLimiterǁrecord_failure__mutmut_8
-llmwiki_service.auth.xǁFailureLimiterǁrecord_failure__mutmut_9
-llmwiki_service.tokens.x__base62__mutmut_14
-llmwiki_service.tokens.x__base62__mutmut_15
-llmwiki_service.tokens.x_new_token__mutmut_4
-llmwiki_service.tokens.x_peppers_from_env__mutmut_19
-llmwiki_service.tokens.x_peppers_from_env__mutmut_23
-llmwiki_service.tokens.x_peppers_from_env__mutmut_6
-llmwiki_service.tokens.x_peppers_from_env__mutmut_9
-llmwiki_service.tokens.x_token_id__mutmut_1
-llmwiki_service.tokens.xǁTokenStoreǁ_connect__mutmut_5
-llmwiki_service.tokens.xǁTokenStoreǁ_connect__mutmut_6
-llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_5
-llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_6
-llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_8
-llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_9
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_10
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_11
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_2
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_20
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_21
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_23
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_24
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_4
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_5
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_6
-llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_9
-llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_11
-llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_12
-llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_8
-llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_9
-llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_15
-llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_16
-llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_18
-llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_19
-llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_8
-llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_9
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_13
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_14
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_16
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_17
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_19
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_20
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_38
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_48
-llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_49
+# auth.py/tokens.py/deployment.py, does not renumber these ids. A red
+# run after an edit to a function named below is expected: regenerate
+# the baseline, read the diff, confirm every entry that changed id
+# still represents the same surviving mutation, and only then commit it.
+llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_6  # break->return: nothing follows the while loop in _forget_expired, so returning early on the first still-open window behaves identically to breaking out of the loop
+llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_7  # popitem(last=None) equals popitem(last=False): OrderedDict.popitem treats `last` as a plain truthiness check in CPython, and None is falsy the same as False
+llmwiki_service.deployment.x__admin_row_exists__mutmut_11  # sqlite3.connect(..., uri=True) dropped or changed: this build's SQLite (3.53.4, compiled with SQLITE_USE_URI) parses the "file:" prefix and its mode=ro query param on every connect regardless of the uri= flag, verified empirically; the mutated call opens the same read-only view of the same file
+llmwiki_service.deployment.x__admin_row_exists__mutmut_12  # same SQLITE_USE_URI equivalence as mutmut_11, with uri=False instead of dropped
+llmwiki_service.deployment.x__admin_row_exists__mutmut_16  # SQL keyword casing: sqlite parses keywords and unquoted identifiers case-insensitively, so the lowercased query is behaviorally identical
+llmwiki_service.deployment.x__admin_row_exists__mutmut_19  # same SQL casing equivalence as mutmut_16
+llmwiki_service.deployment.x__admin_row_exists__mutmut_20  # same SQL casing equivalence as mutmut_16
+llmwiki_service.deployment.x__admin_row_exists__mutmut_9  # same SQLITE_USE_URI equivalence as mutmut_11, with uri=None instead of dropped
+llmwiki_service.tokens.x_new_token__mutmut_4  # secrets.token_urlsafe(None) equals secrets.token_urlsafe(SECRET_BYTES): secrets.DEFAULT_ENTROPY is 32, the same value as SECRET_BYTES today, so the default-entropy call yields the same output length and randomness; would stop being equivalent only if SECRET_BYTES were changed to diverge from the stdlib default
+llmwiki_service.tokens.x_token_id__mutmut_1  # len(token) <= CHECKSUM_CHARS changed to <: a token of exactly CHECKSUM_CHARS length always has an empty body (token[:-CHECKSUM_CHARS] == ""), and "" can never split into the three "_"-joined parts token_id requires, so the mutant still returns None for every such input
+llmwiki_service.tokens.xǁTokenStoreǁ_connect__mutmut_5  # PRAGMA casing: sqlite PRAGMA names and values are case-insensitive, so the lowercased pragma is behaviorally identical
+llmwiki_service.tokens.xǁTokenStoreǁ_connect__mutmut_6  # same PRAGMA casing equivalence as mutmut_5
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_15  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_16  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_18  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_19  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_8  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_9  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_5  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_6  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_8  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_9  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_20  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_21  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_23  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_24  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_11  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_12  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_8  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_9  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_13  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_14  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_16  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_17  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_19  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_20  # SQL casing equivalence, same reasoning as x__admin_row_exists__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_38  # _stamp_use's version arg forced to None: version is only read in `if version == current`; forcing the else branch recomputes token_hash under peppers.keys[current] and rewrites pepper_version to current, which are exactly the values already stored when version was truly current, so the row ends up identical either way

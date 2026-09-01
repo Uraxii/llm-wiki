@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from llmwiki_service import deployment, tokens
 
@@ -113,6 +114,29 @@ class PreParseRefusalTest(unittest.TestCase):
             self.assertIsNone(deployment.pre_parse_refusal(str(path)))
 
 
+class TokenDbPathTest(unittest.TestCase):
+    def test_no_server_table_gives_no_path(self) -> None:
+        self.assertIsNone(deployment._token_db_path({}))
+
+    def test_state_path_gets_the_token_db_name_appended(self) -> None:
+        path = deployment._token_db_path({"server": {"state": "/var/lib/x"}})
+        self.assertEqual(path, Path("/var/lib/x") / deployment.TOKEN_DB_NAME)
+
+
+class BindIsPrivateTest(unittest.TestCase):
+    def test_an_unparseable_host_is_not_private(self) -> None:
+        self.assertFalse(deployment._bind_is_private("not-an-ip:8443"))
+
+    def test_ipv6_loopback_in_brackets_is_private(self) -> None:
+        self.assertTrue(deployment._bind_is_private("[::1]:8443"))
+
+    def test_only_brackets_are_stripped_not_arbitrary_characters(self) -> None:
+        """The docstring names brackets specifically, for IPv6 hosts.
+        Stripping a wider character set would let an address like this
+        pass as private by accident."""
+        self.assertFalse(deployment._bind_is_private("X10.0.0.5:8443"))
+
+
 class LoadDeploymentTest(unittest.TestCase):
     def test_parses_to_a_plain_dict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,6 +176,35 @@ class PepperCheckTest(DeploymentTestBase):
         )
 
 
+class AdminRowExistsTest(DeploymentTestBase):
+    """`_admin_row_exists` backs row 5's fallback: an existing admin row
+    lets a deployment start without the bootstrap token."""
+
+    def test_no_state_configured_reads_as_no_admin_row(self) -> None:
+        self.assertFalse(deployment._admin_row_exists({}))
+
+    def test_missing_database_reads_as_no_admin_row(self) -> None:
+        self.assertFalse(
+            deployment._admin_row_exists(self.terminate_deployment())
+        )
+
+    def test_an_existing_admin_row_is_found(self) -> None:
+        store = tokens.TokenStore(
+            self.state / deployment.TOKEN_DB_NAME, tokens.Peppers({1: b"pepper-one"})
+        )
+        store.mint("first-admin", "admin")
+        self.assertTrue(
+            deployment._admin_row_exists(self.terminate_deployment())
+        )
+
+    def test_a_corrupt_token_database_reads_as_no_admin_row(self) -> None:
+        """A row 5 check that mistakes a corrupt database for a live
+        admin row would let an unadministrable service start."""
+        depl = self.terminate_deployment()
+        (self.state / deployment.TOKEN_DB_NAME).write_bytes(b"not a database")
+        self.assertFalse(deployment._admin_row_exists(depl))
+
+
 class AdminBootstrapCheckTest(DeploymentTestBase):
     def test_no_token_and_no_admin_row_refused(self) -> None:
         environ = base_environ()
@@ -159,8 +212,11 @@ class AdminBootstrapCheckTest(DeploymentTestBase):
         message = deployment._check_admin_bootstrap(
             self.terminate_deployment(), environ
         )
-        self.assertIsNotNone(message)
-        self.assertIn(ADMIN_ENV, message)
+        self.assertEqual(
+            message,
+            f"no admin access: set {ADMIN_ENV}, or this deployment has no "
+            "existing admin token to mint one with",
+        )
 
     def test_bootstrap_token_alone_satisfies_it(self) -> None:
         self.assertIsNone(
@@ -198,13 +254,18 @@ class WriteOpenCheckTest(DeploymentTestBase):
         depl = self.terminate_deployment()
         depl["access"]["write"] = "open"
         message = deployment._check_write_open(depl, {})
-        self.assertIsNotNone(message)
-        self.assertIn("write", message)
+        self.assertEqual(
+            message,
+            '[access] write = "open" is refused; write is always "token"',
+        )
 
     def test_write_token_is_not_refused(self) -> None:
         self.assertIsNone(
             deployment._check_write_open(self.terminate_deployment(), {})
         )
+
+    def test_no_access_table_is_not_refused(self) -> None:
+        self.assertIsNone(deployment._check_write_open({}, {}))
 
     def test_a_typo_is_not_treated_as_open(self) -> None:
         """Acceptance: only the exact word "open" trips this refusal.
@@ -250,6 +311,9 @@ class CertFilesCheckTest(DeploymentTestBase):
         depl = self.upstream_deployment()
         self.assertIsNone(deployment._check_cert_files(depl, {}))
 
+    def test_no_tls_table_is_not_refused(self) -> None:
+        self.assertIsNone(deployment._check_cert_files({}, {}))
+
 
 class CertExpiryCheckTest(DeploymentTestBase):
     def test_expired_cert_refused(self) -> None:
@@ -273,6 +337,26 @@ class CertExpiryCheckTest(DeploymentTestBase):
 
     def test_upstream_mode_skips_this_check(self) -> None:
         self.assertIsNone(deployment._check_cert_expiry(self.upstream_deployment(), {}))
+
+    def test_no_tls_table_is_not_refused(self) -> None:
+        self.assertIsNone(deployment._check_cert_expiry({}, {}))
+
+    def test_a_cert_path_that_check_cert_files_already_caught_is_skipped(self) -> None:
+        """`_check_cert_files` already refuses a missing cert; this
+        function must not also try to decode a file that is not there."""
+        depl = self.terminate_deployment()
+        depl["tls"]["cert"] = str(self.root / "nope.pem")
+        self.assertIsNone(deployment._check_cert_expiry(depl, {}))
+
+    def test_a_cert_expiring_at_exactly_this_instant_is_refused(self) -> None:
+        with (
+            mock.patch.object(deployment.time, "time", return_value=1000.0),
+            mock.patch.object(
+                deployment.ssl, "cert_time_to_seconds", return_value=1000.0
+            ),
+        ):
+            message = deployment._check_cert_expiry(self.terminate_deployment(), {})
+        self.assertIsNotNone(message)
 
 
 class UpstreamBindCheckTest(DeploymentTestBase):
@@ -313,13 +397,35 @@ class UpstreamBindCheckTest(DeploymentTestBase):
         depl["server"]["bind"] = "0.0.0.0:8443"
         self.assertIsNone(deployment._check_upstream_bind(depl, {}))
 
+    def test_no_tls_table_is_not_refused(self) -> None:
+        self.assertIsNone(deployment._check_upstream_bind({}, {}))
+
+    def test_upstream_mode_with_no_server_table(self) -> None:
+        depl = {"tls": {"mode": "upstream"}}
+        self.assertEqual(
+            deployment._check_upstream_bind(depl, {}),
+            "[server] bind is not set",
+        )
+
 
 class OpenReadNeedsProxyCheckTest(DeploymentTestBase):
     def test_open_read_upstream_no_proxy_refused(self) -> None:
         depl = self.upstream_deployment()
         message = deployment._check_open_read_needs_proxy(depl, {})
-        self.assertIsNotNone(message)
-        self.assertIn("trusted_proxy", message)
+        self.assertEqual(
+            message,
+            '[access] read = "open" needs [tls] trusted_proxy set under '
+            'mode = "upstream", or every caller shares one rate limit',
+        )
+
+    def test_no_tls_or_access_table_is_not_refused(self) -> None:
+        self.assertIsNone(deployment._check_open_read_needs_proxy({}, {}))
+
+    def test_open_read_with_no_tls_table_is_not_refused(self) -> None:
+        """`read = "open"` alone must not crash when `[tls]` is absent:
+        the mode check still has to run before this refusal applies."""
+        depl = {"access": {"read": "open"}}
+        self.assertIsNone(deployment._check_open_read_needs_proxy(depl, {}))
 
     def test_trusted_proxy_satisfies_it(self) -> None:
         depl = self.upstream_deployment(trusted_proxy="10.0.0.1")
@@ -345,7 +451,16 @@ class StateWritableCheckTest(DeploymentTestBase):
     def test_missing_state_setting_refused(self) -> None:
         depl = self.terminate_deployment()
         del depl["server"]["state"]
-        self.assertIsNotNone(deployment._check_state_writable(depl, {}))
+        self.assertEqual(
+            deployment._check_state_writable(depl, {}),
+            "[server] state is not set",
+        )
+
+    def test_no_server_table_is_refused_as_state_not_set(self) -> None:
+        self.assertEqual(
+            deployment._check_state_writable({}, {}),
+            "[server] state is not set",
+        )
 
     def test_nonexistent_state_dir_refused(self) -> None:
         depl = self.terminate_deployment()
@@ -389,6 +504,9 @@ class KbsWritableCheckTest(DeploymentTestBase):
             deployment._check_kbs_writable(self.terminate_deployment(), {})
         )
 
+    def test_no_kbs_table_is_not_refused(self) -> None:
+        self.assertIsNone(deployment._check_kbs_writable({}, {}))
+
 
 class KbsLegacyEndpointCheckTest(DeploymentTestBase):
     def test_legacy_endpoint_section_refused(self) -> None:
@@ -409,6 +527,19 @@ class KbsLegacyEndpointCheckTest(DeploymentTestBase):
         self.assertIsNone(
             deployment._check_kbs_legacy_endpoint(self.terminate_deployment(), {})
         )
+
+    def test_no_kbs_table_is_not_refused(self) -> None:
+        self.assertIsNone(deployment._check_kbs_legacy_endpoint({}, {}))
+
+    def test_an_entry_with_no_path_does_not_stop_the_scan(self) -> None:
+        """A kb entry with no path must not `break` the loop: a legacy
+        section on a later kb has to be found regardless."""
+        (self.kb / "config.toml").write_text('[endpoint]\nurl = "http://x"\n')
+        depl = self.terminate_deployment()
+        depl["kbs"] = {"broken": {}, "demo": {"path": str(self.kb)}}
+        message = deployment._check_kbs_legacy_endpoint(depl, {})
+        self.assertIsNotNone(message)
+        self.assertIn("demo", message)
 
 
 class CheckDeploymentTest(DeploymentTestBase):

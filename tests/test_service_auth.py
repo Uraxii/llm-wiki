@@ -85,6 +85,32 @@ class GateTest(unittest.TestCase):
             auth.UNAUTHORIZED,
         )
 
+    def test_an_unknown_role_stored_on_the_row_is_refused_not_crashed(self) -> None:
+        """`ROLE_RANK` only knows reader, writer, admin. A row somehow
+        carrying any other role string must be refused like any other
+        failure, not raise past the gate."""
+        token = self.store.mint("mystery", "reader")
+        with contextlib.closing(sqlite3.connect(self.path)) as conn, conn:
+            conn.execute(
+                "UPDATE tokens SET role = ? WHERE label = ?",
+                ("mystery-role", "mystery"),
+            )
+        self.assertIs(self.gate(bearer(token), "read"), auth.UNAUTHORIZED)
+
+    def test_a_missing_token_records_the_failure_under_the_real_client(self) -> None:
+        """Two different clients sending a headerless request must not
+        share one rate-limit bucket."""
+        self.gate(None, "read", client="noisy")
+        self.assertIn("noisy", self.limiter.tracked())
+
+
+class BearerTokenTest(unittest.TestCase):
+    def test_only_the_first_space_splits_scheme_from_token(self) -> None:
+        """A token is never generated with a space in it, but the
+        parser must still split on the first space, not the last, or a
+        token that happened to contain one would be truncated."""
+        self.assertEqual(auth.bearer_token("Bearer abc def"), "abc def")
+
 
 class UniformRefusalTest(unittest.TestCase):
     """Four different reasons, one indistinguishable answer."""
@@ -202,6 +228,57 @@ class FailureLimiterTest(unittest.TestCase):
 
     def test_an_unseen_caller_is_never_blocked(self) -> None:
         self.assertFalse(auth.FailureLimiter().blocked("stranger", now=0.0))
+
+    def test_the_open_window_boundary_itself_is_not_blocked(self) -> None:
+        """A window is open while `moment - started < window_sec`,
+        matching `_forget_expired`'s own boundary: the instant equal to
+        `window_sec` is already outside the window, not inside it."""
+        limiter = auth.FailureLimiter(limit=1, window_sec=60)
+        limiter.record_failure("peer", now=0.0)
+        self.assertFalse(limiter.blocked("peer", now=60.0))
+
+    def test_an_unseen_client_at_zero_limit_is_measured_from_time_zero(self) -> None:
+        limiter = auth.FailureLimiter(limit=0, window_sec=60)
+        self.assertFalse(limiter.blocked("stranger", now=60.0))
+
+    def test_an_unseen_client_has_no_recorded_failures(self) -> None:
+        limiter = auth.FailureLimiter(limit=1, window_sec=60)
+        self.assertFalse(limiter.blocked("stranger", now=0.0))
+
+    def test_a_fresh_window_after_reset_starts_its_count_at_one(self) -> None:
+        limiter = auth.FailureLimiter(limit=2, window_sec=60)
+        limiter.record_failure("peer", now=0.0)
+        limiter.record_failure("peer", now=0.0)
+        limiter.record_failure("peer", now=100.0)  # window resets here
+        self.assertFalse(limiter.blocked("peer", now=100.0))
+
+    def test_the_window_resets_at_exactly_the_boundary_not_after_it(self) -> None:
+        limiter = auth.FailureLimiter(limit=1, window_sec=60)
+        limiter.record_failure("peer", now=0.0)
+        limiter.record_failure("peer", now=60.0)
+        self.assertTrue(limiter.blocked("peer", now=61.0))
+
+    def test_a_still_open_window_is_not_evicted_when_a_new_client_arrives(self) -> None:
+        limiter = auth.FailureLimiter(window_sec=60)
+        limiter.record_failure("a", now=100.0)
+        limiter.record_failure("b", now=100.5)
+        self.assertEqual(set(limiter.tracked()), {"a", "b"})
+
+    def test_a_window_exactly_at_the_boundary_is_evicted(self) -> None:
+        limiter = auth.FailureLimiter(window_sec=60)
+        limiter.record_failure("a", now=0.0)
+        limiter.record_failure("b", now=60.0)
+        self.assertEqual(list(limiter.tracked()), ["b"])
+
+    def test_only_the_oldest_expired_window_is_evicted_not_the_newest(self) -> None:
+        """`_forget_expired` sweeps oldest first from the front. A pop
+        from the wrong end would evict a window that is still live."""
+        limiter = auth.FailureLimiter(window_sec=60)
+        limiter.record_failure("old", now=0.0)
+        limiter.record_failure("fresh", now=10.0)
+        limiter.record_failure("new", now=65.0)
+        self.assertIn("fresh", limiter.tracked())
+        self.assertNotIn("old", limiter.tracked())
 
     def test_expired_callers_are_forgotten_once_the_table_is_full(self) -> None:
         limiter = auth.FailureLimiter(limit=2, window_sec=60)

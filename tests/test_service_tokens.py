@@ -28,6 +28,19 @@ ONE = ((1, b"pepper-one"),)
 TWO = ((1, b"pepper-one"), (2, b"pepper-two"))
 
 
+class Base62Test(unittest.TestCase):
+    """Deterministic coverage of the padding branch. `checksum` exercises
+    it too, but only through a randomly generated token, so whether it
+    hits a short encoding is a coin flip; a chosen input pins it down."""
+
+    def test_a_short_encoding_is_zero_padded_on_the_left(self) -> None:
+        self.assertEqual(tokens._base62(0), "000000")
+        self.assertEqual(tokens._base62(1), "000001")
+
+    def test_padding_never_defaults_to_a_space(self) -> None:
+        self.assertNotIn(" ", tokens._base62(0))
+
+
 class TokenFormatTest(unittest.TestCase):
     def test_shape_is_prefix_id_secret_checksum(self) -> None:
         row_id, token = tokens.new_token()
@@ -91,6 +104,11 @@ class TokenFormatTest(unittest.TestCase):
         body = "llmwiki_" + "a" * 16 + "_"
         self.assertIsNone(tokens.token_id(body + tokens.checksum(body)))
 
+    def test_a_token_that_is_only_a_checksum_is_rejected(self) -> None:
+        """`checksum("")` is `"000000"`, so a bare 6 zero token is the
+        edge case the length guard exists to catch."""
+        self.assertIsNone(tokens.token_id("000000"))
+
 
 class HashTest(unittest.TestCase):
     def test_hash_is_keyed_blake2b_at_32_bytes(self) -> None:
@@ -135,6 +153,17 @@ class PeppersTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tokens.peppers_from_env(value)
 
+    def test_a_missing_variable_is_treated_as_empty_not_as_one_entry(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            tokens.peppers_from_env({})
+        self.assertIn("unset or empty", str(caught.exception))
+
+    def test_a_secret_containing_a_colon_is_still_one_entry(self) -> None:
+        """`entry.partition(":")` must split on the first colon, so a
+        secret is free to contain one."""
+        parsed = tokens.peppers_from_env({tokens.PEPPER_ENV_VAR: "1:sec:ret"})
+        self.assertEqual(parsed.keys, {1: b"sec:ret"})
+
     def test_env_malformed_refused_without_quoting_the_secret(self) -> None:
         with self.assertRaises(ValueError) as caught:
             tokens.peppers_from_env({tokens.PEPPER_ENV_VAR: "notaversion"})
@@ -152,8 +181,9 @@ class PeppersTest(unittest.TestCase):
         self.assertNotIn("²", message)
 
     def test_env_duplicate_version_refused(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as caught:
             tokens.peppers_from_env({tokens.PEPPER_ENV_VAR: "1:a 1:b"})
+        self.assertIn("duplicate", str(caught.exception))
 
     def test_an_oversized_pepper_is_not_a_representable_state(self) -> None:
         with self.assertRaises(ValueError):
@@ -209,19 +239,38 @@ class StoreTest(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual((row.label, row.role), ("laptop", "writer"))
 
+    def test_verify_returns_the_original_created_at(self) -> None:
+        token = self.store.mint("laptop", "reader")
+        created = self.store.list_tokens()[0].created_at
+        row = self.store.verify(token)
+        self.assertEqual(row.created_at, created)
+
+    def test_verify_returns_the_freshly_stamped_last_used_at(self) -> None:
+        token = self.store.mint("laptop", "reader")
+        row = self.store.verify(token, now="2026-09-01T10:00:00Z")
+        self.assertEqual(row.last_used_at, "2026-09-01T10:00:00Z")
+
     def test_mint_rejects_an_unknown_role(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as caught:
             self.store.mint("laptop", "superuser")
+        self.assertIn("superuser", str(caught.exception))
 
     def test_mint_rejects_an_empty_label(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as caught:
             self.store.mint("", "reader")
+        self.assertEqual(
+            str(caught.exception), "a token needs a label to be revoked by"
+        )
 
     def test_mint_rejects_a_label_that_could_forge_a_log_line(self) -> None:
         for label in ("two\nlines", "tab\there", "bell\a"):
             with self.subTest(label=label):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(ValueError) as caught:
                     self.store.mint(label, "reader")
+                self.assertEqual(
+                    str(caught.exception),
+                    "a label must hold no control characters",
+                )
 
     def test_a_non_ascii_token_verifies_to_none(self) -> None:
         self.assertIsNone(self.store.verify("\U0001f600" * 12))
