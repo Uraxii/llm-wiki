@@ -75,9 +75,10 @@ class BuildContextTest(unittest.TestCase):
         context = tls.build_context(str(self.cert), str(self.key), None)
         self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
 
-    def test_unknown_minimum_version_raises(self) -> None:
-        with self.assertRaises(ValueError):
+    def test_unknown_minimum_version_raises_naming_the_version(self) -> None:
+        with self.assertRaises(ValueError) as caught:
             tls.build_context(str(self.cert), str(self.key), "1.1")
+        self.assertIn("1.1", str(caught.exception))
 
     def test_missing_cert_raises_naming_the_path(self) -> None:
         missing = self.dir.name + "/nope.pem"
@@ -124,12 +125,36 @@ class ContextHolderReloadTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIs(self.holder.current, before)
 
-    def test_a_broken_reload_logs_loudly(self) -> None:
+    def test_a_broken_reload_logs_the_failure_reason(self) -> None:
         garbage = self.root / "garbage.pem"
         garbage.write_text("not a certificate\n")
         with self.assertLogs("test-llmwiki-service-tls", level="ERROR") as caught:
             self.holder.reload(str(garbage), str(self.key), "1.2", self.logger)
-        self.assertTrue(any("reload failed" in line for line in caught.output))
+        [message] = caught.output
+        self.assertTrue(
+            message.startswith(
+                "ERROR:test-llmwiki-service-tls:certificate reload failed, "
+                "keeping the previous context: "
+            )
+        )
+        # The wrapped ValueError names both paths; a log missing them
+        # is a log an operator cannot act on.
+        self.assertIn(str(garbage), message)
+        self.assertIn(str(self.key), message)
+
+    def test_a_good_reload_respects_the_requested_min_version(self) -> None:
+        cert2, key2 = _make_cert(self.root, "two", "subject-two")
+        self.holder.reload(str(cert2), str(key2), "1.3", self.logger)
+        self.assertEqual(self.holder.current.minimum_version, ssl.TLSVersion.TLSv1_3)
+
+    def test_a_good_reload_logs_the_cert_path(self) -> None:
+        cert2, key2 = _make_cert(self.root, "two", "subject-two")
+        with self.assertLogs("test-llmwiki-service-tls", level="INFO") as caught:
+            self.holder.reload(str(cert2), str(key2), "1.2", self.logger)
+        self.assertEqual(
+            caught.output,
+            [f"INFO:test-llmwiki-service-tls:certificate reloaded from {cert2}"],
+        )
 
 
 class WatchCertificatesTest(unittest.TestCase):
@@ -166,6 +191,109 @@ class WatchCertificatesTest(unittest.TestCase):
                 break
             threading.Event().wait(0.05)
         self.assertIsNot(holder.current, before)
+
+    def test_default_poll_interval_is_one_second(self) -> None:
+        # inspect.signature on tls.watch_certificates always reports the
+        # trampoline's original, unmutated default; a mutation to the
+        # default only shows up by actually timing the wait, so a
+        # change is planted before the watcher starts and caught well
+        # inside one interval, not two.
+        holder = tls.ContextHolder(
+            tls.build_context(str(self.cert), str(self.key), "1.2")
+        )
+        before = holder.current
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=tls.watch_certificates,
+            args=(holder, str(self.cert), str(self.key), "1.2", self.logger, stop),
+            daemon=True,
+        )
+        thread.start()
+        self.addCleanup(lambda: (stop.set(), thread.join(timeout=3)))
+
+        cert2, key2 = _make_cert(self.root, "two", "subject-two")
+        self.cert.write_bytes(cert2.read_bytes())
+        self.key.write_bytes(key2.read_bytes())
+
+        threading.Event().wait(1.6)
+        self.assertIsNot(holder.current, before)
+
+    def test_unchanged_files_never_trigger_a_reload(self) -> None:
+        holder = tls.ContextHolder(
+            tls.build_context(str(self.cert), str(self.key), "1.2")
+        )
+        before = holder.current
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=tls.watch_certificates,
+            args=(holder, str(self.cert), str(self.key), "1.2", self.logger, stop),
+            kwargs={"interval_sec": 0.02},
+            daemon=True,
+        )
+        thread.start()
+        self.addCleanup(lambda: (stop.set(), thread.join(timeout=2)))
+
+        # Several poll intervals with nothing touching either file: the
+        # baseline mtimes never change, so no reload should ever fire.
+        threading.Event().wait(0.2)
+        self.assertIs(holder.current, before)
+
+    def test_a_real_change_reloads_with_the_requested_min_version(self) -> None:
+        holder = tls.ContextHolder(
+            tls.build_context(str(self.cert), str(self.key), "1.3")
+        )
+        before = holder.current
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=tls.watch_certificates,
+            args=(holder, str(self.cert), str(self.key), "1.3", self.logger, stop),
+            kwargs={"interval_sec": 0.05},
+            daemon=True,
+        )
+        thread.start()
+        self.addCleanup(lambda: (stop.set(), thread.join(timeout=2)))
+
+        cert2, key2 = _make_cert(self.root, "two", "subject-two")
+        self.cert.write_bytes(cert2.read_bytes())
+        self.key.write_bytes(key2.read_bytes())
+
+        for _ in range(40):
+            if holder.current is not before:
+                break
+            threading.Event().wait(0.05)
+        self.assertIsNot(holder.current, before)
+        self.assertEqual(holder.current.minimum_version, ssl.TLSVersion.TLSv1_3)
+
+    def test_reload_settles_and_does_not_repeat(self) -> None:
+        holder = tls.ContextHolder(
+            tls.build_context(str(self.cert), str(self.key), "1.2")
+        )
+        before = holder.current
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=tls.watch_certificates,
+            args=(holder, str(self.cert), str(self.key), "1.2", self.logger, stop),
+            kwargs={"interval_sec": 0.02},
+            daemon=True,
+        )
+        thread.start()
+        self.addCleanup(lambda: (stop.set(), thread.join(timeout=2)))
+
+        cert2, key2 = _make_cert(self.root, "two", "subject-two")
+        self.cert.write_bytes(cert2.read_bytes())
+        self.key.write_bytes(key2.read_bytes())
+
+        for _ in range(40):
+            if holder.current is not before:
+                break
+            threading.Event().wait(0.02)
+        after_first = holder.current
+        self.assertIsNot(after_first, before)
+
+        # No further file write. A settled baseline must not keep
+        # re-triggering a reload on every later poll.
+        threading.Event().wait(0.2)
+        self.assertIs(holder.current, after_first)
 
 
 class WatchRetryTest(unittest.TestCase):
