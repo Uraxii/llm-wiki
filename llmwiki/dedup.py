@@ -8,8 +8,10 @@ shares an identifier with a page the CLI does not own.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
+import tempfile
 import unicodedata
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -23,6 +25,7 @@ from llmwiki.core import (
     as_list,
     atomic_write_bytes,
     atomic_write_text,
+    kb_lock,
     parse_frontmatter,
     read_page_text,
     render_frontmatter,
@@ -30,6 +33,7 @@ from llmwiki.core import (
 )
 from llmwiki.lint import lint_pages
 from llmwiki.model import ModelError, chat, model_name
+from llmwiki.sources import _link_exclusive
 from llmwiki import vectors
 
 # The judge's own contract (decision agent-kb-0zf.5): a SUMMARIZE.md
@@ -209,15 +213,24 @@ def _story_body(story: Story, summaries: dict[str, Page]) -> str:
     return "\n\n".join(sections)
 
 
-def _story_path(kb: Kb, digest: str, title: str) -> Path:
-    """Where a brand-new story lands: the slug, or the slug suffixed
-    with the first 8 hex chars of the first member hash when the slug
-    is already taken by a different page. Decided against the
-    filesystem at write time."""
+def _claim_new_story_path(kb: Kb, digest: str, title: str) -> Path:
+    """Atomically claim a filename for a brand-new story: the plain
+    slug if free, else the slug suffixed with this digest's first
+    SLUG_SUFFIX_LEN hex chars, which no other digest can collide on.
+    Reuses `sources._link_exclusive`, the package's one atomic
+    exclusive-create primitive, instead of a second one, so two
+    processes racing the same slug can never both believe they claimed
+    it."""
     candidate = kb.wiki / f"{slugify(title)}.md"
-    if candidate.exists():
-        return kb.wiki / f"{slugify(title)}-{digest[:SLUG_SUFFIX_LEN]}.md"
-    return candidate
+    fd, tmp_name = tempfile.mkstemp(dir=kb.wiki, prefix=f".{candidate.name}.")
+    tmp_path = Path(tmp_name)
+    try:
+        os.close(fd)
+        if _link_exclusive(tmp_path, candidate):
+            return candidate
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return kb.wiki / f"{slugify(title)}-{digest[:SLUG_SUFFIX_LEN]}.md"
 
 
 def _new_fields(
@@ -234,13 +247,19 @@ def _new_fields(
 
 
 def _write_story(
-    kb: Kb, story: Story, digest: str, summary: Page, sources: dict[str, Page]
+    kb: Kb, story: Story, digest: str, summary: Page, sources: dict[str, Page],
+    is_new: bool,
 ) -> bool:
     """Write `story` and the summary's `story:` back-reference, self-lint
     the pair, and roll both back on any finding (previous text restored,
     or the file unlinked when there was none). Returns False, leaving
-    the summary story-less, when the write was dropped."""
-    story_prev = story.path.read_bytes() if story.path.is_file() else None
+    the summary story-less, when the write was dropped. `is_new` names
+    whether `story.path` is a brand-new story (its filename was just
+    claimed by `_claim_new_story_path`, or is the guaranteed-unique
+    digest-suffixed fallback) rather than whether a file happens to
+    exist there right now: a just-claimed path may already hold a file
+    this same call is about to overwrite with its real content."""
+    story_prev = None if is_new else story.path.read_bytes()
     summary_prev = summary.path.read_bytes()
 
     story_fields = dict(story.fields)
@@ -295,12 +314,16 @@ def push(kb: Kb, page: Page, agent_pages: list[Page]) -> int:
 def _load_wiki(kb: Kb) -> tuple[dict[str, Page], dict[Path, Story], list[Page]]:
     """One pass over `wiki/*.md`: summaries keyed by source hash,
     stories keyed by path, and every other (agent-owned) page. An
-    unparseable page is skipped, never a crash."""
+    unparseable page is skipped, never a crash, and so is a page
+    unlinked between the glob and this read."""
     summaries: dict[str, Page] = {}
     stories: dict[Path, Story] = {}
     agent_pages: list[Page] = []
     for path in sorted(kb.wiki.glob("*.md")):
-        text = read_page_text(path)
+        try:
+            text = read_page_text(path)
+        except FileNotFoundError:
+            continue  # unlinked between the glob and this read
         parsed = parse_frontmatter(text)
         if parsed is None:
             continue
@@ -318,12 +341,11 @@ def _load_wiki(kb: Kb) -> tuple[dict[str, Page], dict[Path, Story], list[Page]]:
     return summaries, stories, agent_pages
 
 
-def _place_summary(
-    kb: Kb, digest: str, summary: Page, summaries: dict[str, Page], stories: dict[Path, Story]
-) -> tuple[Story, str] | None:
-    """Join or start a story for `summary`. Returns `(story, action)`
-    with `action` "new" or "joined" on success, `None` when self-lint
-    dropped the write."""
+def _pick_target(
+    kb: Kb, summary: Page, stories: dict[Path, Story]
+) -> tuple[Story | None, str]:
+    """The story `summary` should join, or `None` to start a new one,
+    plus the model id that decided it (or "none")."""
     extra: list[Story] = []
     # GATE (today's decision): vector neighbours are consulted only
     # when a dedup judge model is configured. With no judge, `judge`
@@ -338,13 +360,22 @@ def _place_summary(
             if story is not None:
                 extra.append(story)
     cands = candidates(summary, stories.values(), extra)
-    target = judge(kb, summary, cands)
-    model_id = _dedup_model_id(kb) or "none"
+    return judge(kb, summary, cands), _dedup_model_id(kb) or "none"
 
-    if target is None:
+
+def _place_summary(
+    kb: Kb, digest: str, summary: Page, summaries: dict[str, Page], stories: dict[Path, Story]
+) -> tuple[Story, str] | None:
+    """Join or start a story for `summary`. Returns `(story, action)`
+    with `action` "new" or "joined" on success, `None` when self-lint
+    dropped the write."""
+    target, model_id = _pick_target(kb, summary, stories)
+
+    is_new = target is None
+    if is_new:
         members = [digest]
         title = str(summary.fields.get("title", ""))
-        path = _story_path(kb, digest, title)
+        path = _claim_new_story_path(kb, digest, title)
         action = "new"
     else:
         members = target.members if digest in target.members else [*target.members, digest]
@@ -357,7 +388,8 @@ def _place_summary(
     fields = _new_fields(title, identifiers, first_seen, last_seen, model_id)
     story = Story(path, fields, members)
 
-    if not _write_story(kb, story, digest, summary, {**summaries, digest: summary}):
+    sources = {**summaries, digest: summary}
+    if not _write_story(kb, story, digest, summary, sources, is_new):
         return None
     return story, action
 
@@ -408,6 +440,17 @@ def _replay(
         except ModelError as exc:
             print(f"llmwiki: dedup: {exc}", file=sys.stderr)
             break
+        except FileNotFoundError as exc:
+            # A page read while building the judge prompt (the
+            # summary itself, or a candidate story) vanished after
+            # _load_wiki snapshotted it. Unlike a reader glob that
+            # just drops a vanished row, this digest's target is
+            # gone: log it as a drop, same as any other dropped
+            # write, and move on to the next digest.
+            append_log_entry(
+                kb.log, "dedup", f"{digest}: dropped (target vanished: {exc})"
+            )
+            continue
         if result is None:
             continue
         story, action = result
@@ -422,48 +465,58 @@ def _replay(
 def rebuild(root: Path) -> int:
     """Discard every story page and replay every summary from scratch
     (decision `.5`): the repair for a placement a lost race or ordering
-    got wrong. Returns 1 if anything was dropped on replay, else 0."""
+    got wrong. Returns 1 if anything was dropped on replay, else 0. Runs
+    under the kb lock for its whole span: it unlinks every story page,
+    and that window is unsafe beside any other writer."""
     kb = Kb(root)
-    summaries, stories, _agent_pages = _load_wiki(kb)
+    with kb_lock(kb.root):
+        summaries, stories, _agent_pages = _load_wiki(kb)
 
-    for story in stories.values():
-        story.path.unlink()
+        for story in stories.values():
+            story.path.unlink()
 
-    for summary in summaries.values():
-        # A summary that never carried `story:` must come back off this
-        # loop byte-identical, so only a non-None pop triggers a write.
-        removed = summary.fields.pop("story", None)
-        if removed is not None:
-            atomic_write_text(
-                summary.path, render_frontmatter(summary.fields, summary.body)
-            )
+        for summary in summaries.values():
+            # A summary that never carried `story:` must come back off
+            # this loop byte-identical, so only a non-None pop triggers
+            # a write.
+            removed = summary.fields.pop("story", None)
+            if removed is not None:
+                atomic_write_text(
+                    summary.path, render_frontmatter(summary.fields, summary.body)
+                )
 
-    targets = _ordered(list(summaries), summaries)
-    print(f"dedup: {len(targets)} planned")
+        targets = _ordered(list(summaries), summaries)
+        print(f"dedup: {len(targets)} planned")
 
-    # `rebuilt` starts empty, never seeded from `stories`: every loaded
-    # story page was just deleted above, so there is nothing to carry
-    # forward.
-    rebuilt: dict[Path, Story] = {}
-    # `[]`, not `_agent_pages`: this IS decision `.22`, push does not
-    # run at rebuild. Every summary being replayed here already had its
-    # push warning emitted the first time it was placed; firing it
-    # again on every rebuild would just be noise.
-    placed = _replay(kb, targets, summaries, rebuilt, [])
+        # `rebuilt` starts empty, never seeded from `stories`: every
+        # loaded story page was just deleted above, so there is nothing
+        # to carry forward.
+        rebuilt: dict[Path, Story] = {}
+        # `[]`, not `_agent_pages`: this IS decision `.22`, push does
+        # not run at rebuild. Every summary being replayed here already
+        # had its push warning emitted the first time it was placed;
+        # firing it again on every rebuild would just be noise.
+        placed = _replay(kb, targets, summaries, rebuilt, [])
 
-    append_log_entry(
-        kb.log, "dedup", f"rebuild {placed} summaries into {len(rebuilt)} stories"
-    )
+        append_log_entry(
+            kb.log, "dedup", f"rebuild {placed} summaries into {len(rebuilt)} stories"
+        )
     return 0 if placed == len(targets) else 1
 
 
 def run(root: Path, digests: list[str] | None) -> int:
     """Place a story for each of `digests`, or every summary lacking a
     `story:` field when `None`, in `(fetched, hash)` order. Returns 1 if
-    anything was dropped, else 0."""
+    anything was dropped, else 0. Runs under the kb lock spanning
+    `_load_wiki` through the last write: narrower would let a second
+    process act on a snapshot this run has already invalidated, the
+    lost-update and duplicate-story hazards the lock exists to close.
+    With `[models] dedup` unset (recommended), `judge` makes no model
+    call, so the lock only ever serializes local disk I/O."""
     kb = Kb(root)
-    summaries, stories, agent_pages = _load_wiki(kb)
-    targets = _ordered(_target_digests(digests, summaries), summaries)
-    print(f"dedup: {len(targets)} planned")
-    placed = _replay(kb, targets, summaries, stories, agent_pages)
+    with kb_lock(kb.root):
+        summaries, stories, agent_pages = _load_wiki(kb)
+        targets = _ordered(_target_digests(digests, summaries), summaries)
+        print(f"dedup: {len(targets)} planned")
+        placed = _replay(kb, targets, summaries, stories, agent_pages)
     return 0 if placed == len(targets) else 1

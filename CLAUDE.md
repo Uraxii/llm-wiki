@@ -49,8 +49,9 @@ Machine settings live in `config.toml` (`[models]`, `[identifiers]`,
 
 **Ownership boundary, the rule most likely to be broken.** The CLI writes
 ONLY `sources/`, wiki pages of kind `summary` and `story`, `log.md` lines,
-and `vectors/`. Everything else under `wiki/`, `index.md` included, belongs
-to the user's agent, and the CLI must never overwrite it.
+`vectors/`, and the `.lock` file at the kb root. Everything else under
+`wiki/`, `index.md` included, belongs to the user's agent, and the CLI must
+never overwrite it.
 
 ### Module map
 

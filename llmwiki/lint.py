@@ -148,30 +148,54 @@ def _build_context(kb: Kb, parsed_by_path: dict[Path, ParsedPage]) -> _Context:
     return _Context(kb.config, kind_by_key, summary_hashes, source_hashes)
 
 
-def select_pages(root: Path, pages: list[Path] | None) -> list[Path]:
-    """Every page under `wiki/`, or the subset of those matching `pages`
-    (resolved so a caller can pass paths relative to its own cwd)."""
-    kb = Kb(root)
-    all_pages = sorted(kb.wiki.glob("*.md"))
+def _filter_pages(all_pages: list[Path], pages: list[Path] | None) -> list[Path]:
+    """`all_pages` itself, or the subset matching `pages` (resolved so a
+    caller can pass paths relative to its own cwd)."""
     if pages is None:
         return all_pages
     wanted = {p.resolve() for p in pages}
     return [p for p in all_pages if p.resolve() in wanted]
 
 
+def select_pages(root: Path, pages: list[Path] | None) -> list[Path]:
+    """Every page under `wiki/`, or the subset of those matching
+    `pages`. One glob of `wiki/*.md`."""
+    kb = Kb(root)
+    return _filter_pages(sorted(kb.wiki.glob("*.md")), pages)
+
+
+def _read_pages(paths: list[Path]) -> dict[Path, ParsedPage]:
+    """Parse every page in `paths` that still exists. A page unlinked
+    between the caller's glob and this read is dropped: absent from
+    the returned dict, never reported as a finding and never treated
+    as an unparseable page."""
+    parsed_by_path: dict[Path, ParsedPage] = {}
+    for path in paths:
+        try:
+            text = read_page_text(path)
+        except FileNotFoundError:
+            continue
+        parsed_by_path[path] = parse_frontmatter(text)
+    return parsed_by_path
+
+
 def lint_pages(root: Path, pages: list[Path] | None = None) -> list[Finding]:
     """Run all six checks over `pages` (every page under `wiki/` when
     `None`). Cross-page context (identifier vocabulary, source hashes,
     summary hashes, wikilink targets) always comes from the whole wiki,
-    even when linting a subset."""
+    even when linting a subset. One glob of `wiki/*.md`, then one read
+    per page found: a page unlinked between the glob and its read is
+    dropped from the run, never raised on."""
     kb = Kb(root)
-    targets = select_pages(root, pages)
-    all_pages = select_pages(root, None)
-    parsed_by_path = {p: parse_frontmatter(read_page_text(p)) for p in all_pages}
+    all_pages = sorted(kb.wiki.glob("*.md"))
+    targets = _filter_pages(all_pages, pages)
+    parsed_by_path = _read_pages(all_pages)
     ctx = _build_context(kb, parsed_by_path)
 
     findings: list[Finding] = []
     for path in targets:
+        if path not in parsed_by_path:
+            continue
         parsed = parsed_by_path[path]
         for _name, check in CHECKS:
             findings.extend(check(path, parsed, ctx))

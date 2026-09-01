@@ -34,6 +34,10 @@ from llmwiki.model import ModelError, embed, model_name
 TOP_K = 10              # default -n for search
 BODY_HEAD_CHARS = 2000  # body prefix embedded when a page has no summary field
 
+# Explicit, not Python's implicit connect() default: a concurrent writer
+# gets this long to finish before sqlite raises "database is locked".
+BUSY_TIMEOUT_MS = 5000
+
 # Minimum similarity for a dedup vector candidate. Measured over all
 # 1653 page-to-page pairs in the arena corpus: cross-domain pairs, which
 # cannot be the same story, top out at 0.3123 (p99 0.2483), while
@@ -71,10 +75,24 @@ def _model_id(kb: Kb) -> str | None:
 def _connect(kb: Kb, model_id: str) -> sqlite3.Connection:
     kb.vectors.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path(kb, model_id))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     return conn
+
+
+def _table_missing(exc: sqlite3.OperationalError) -> bool:
+    """True only when the top-level `pages` table itself is absent,
+    matching sqlite3's own message for that case exactly ('no such
+    table: pages'). A locked database, a genuine dimension mismatch,
+    or a broken vec0 shadow table (`pages_chunks`, ...; that error
+    names the shadow table, e.g. 'no such table: main.pages_chunks',
+    while `pages` itself is present and populated) raise the same
+    exception type with a different message and must propagate, never
+    read back as an empty result."""
+    return str(exc) == "no such table: pages"
 
 
 def _pack(vector: list[float]) -> bytes:
@@ -112,7 +130,9 @@ def _ensure_table(conn: sqlite3.Connection, dim: int, db_file: Path) -> None:
 def _stored_hashes(conn: sqlite3.Connection) -> dict[str, str]:
     try:
         rows = conn.execute("SELECT path, file_hash FROM pages").fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not _table_missing(exc):
+            raise
         return {}  # table not created yet: nothing stored
     return dict(rows)
 
@@ -163,14 +183,18 @@ def _plan(kb: Kb, conn: sqlite3.Connection | None) -> tuple[list[Path], list[str
     gone, and every source digest a summary page claims. `status`,
     `sweep` and `search`'s refusal all call this; no second walk
     anywhere. `conn=None` (no embed model configured) means nothing is
-    stored, so every page is stale."""
+    stored, so every page is stale. A page unlinked between the glob
+    inside `select_pages` and this read is skipped, not raised on."""
     pages = select_pages(kb.root, None)
     stored = _stored_hashes(conn) if conn is not None else {}
     stale: list[Path] = []
     seen_sources: set[str] = set()
     current_names: set[str] = set()
     for path in pages:
-        name, _kind, file_hash, _title, _text, source = _page_row(path)
+        try:
+            name, _kind, file_hash, _title, _text, source = _page_row(path)
+        except FileNotFoundError:
+            continue  # unlinked between select_pages and this read
         current_names.add(name)
         if stored.get(name) != file_hash:
             stale.append(path)
@@ -224,7 +248,9 @@ def _nearest(
         params = (packed, n, kind)
     try:
         rows = conn.execute(sql, params).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not _table_missing(exc):
+            raise
         return []  # table not created yet
     return [(1.0 - distance, path, title) for path, title, distance in rows]
 
@@ -234,7 +260,9 @@ def sweep(kb: Kb, paths: list[Path] | None = None) -> int:
     and delete rows for pages that no longer exist. Returns the number
     of pages embedded. ONE model.embed call for the whole stale batch,
     none at all when nothing is stale. Raises ModelError when
-    [models] embed is unset."""
+    [models] embed is unset. `to_delete` names rows as of `_plan`'s one
+    walk; each is rechecked against disk immediately before its row is
+    deleted, so a page that came back in between keeps its row."""
     model_id = model_name(kb.config, "embed", None)
     with contextlib.closing(_connect(kb, model_id)) as conn:
         stale, to_delete, _seen = _plan(kb, conn)
@@ -247,6 +275,8 @@ def sweep(kb: Kb, paths: list[Path] | None = None) -> int:
         # gets one.
         print(f"embed: {len(stale) + len(to_delete)} planned")
         for name in to_delete:
+            if (kb.wiki / name).is_file():
+                continue  # came back since the plan was made; keep its row
             _delete_page(conn, name)
         if not stale:
             return 0
@@ -277,6 +307,8 @@ def run(root: Path, paths: list[Path] | None) -> int:
         print(f"embed: {len(stale) + len(to_delete)} planned")
 
         for name in to_delete:
+            if (kb.wiki / name).is_file():
+                continue  # came back since the plan was made; keep its row
             _delete_page(conn, name)
             print(f"{name}\tdeleted")
             deleted += 1
@@ -344,7 +376,10 @@ def search(root: Path, query: str, n: int = TOP_K, kind: str | None = None) -> i
 
         for score, name, title in _nearest(conn, vector, n, kind):
             path = kb.wiki / name
-            stat = path.stat()
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue  # row survives from an embed; page removed since
             updated = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime(
                 TIMESTAMP_FORMAT
             )
@@ -358,18 +393,19 @@ def search(root: Path, query: str, n: int = TOP_K, kind: str | None = None) -> i
 def neighbours(kb: Kb, path: Path, kind: str, n: int = TOP_K) -> list[tuple[float, Path]]:
     """The `n` pages of kind `kind` nearest the ALREADY-STORED vector of
     `path`. Makes NO model call: reads the stored vector by primary
-    key. Returns [] when `path` has no row or the db file does not
-    exist; never raises, so it can never fail an ingest."""
+    key. Returns [] when `path` has no row, the db file does not
+    exist, or the `pages` table itself does not exist yet. Any other
+    sqlite3.OperationalError (a genuine dimension mismatch, a broken
+    vec0 shadow table, a locked database) propagates: the caller
+    decides what a real failure means for its run, same contract as
+    `_nearest`."""
     model_id = _model_id(kb)
     if model_id is None:
         return []
     db = db_path(kb, model_id)
     if not db.is_file():
         return []
-    conn = sqlite3.connect(db)
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    conn = _connect(kb, model_id)
     try:
         row = conn.execute(
             "SELECT embedding FROM pages WHERE path = ?", (path.name,)
@@ -378,7 +414,9 @@ def neighbours(kb: Kb, path: Path, kind: str, n: int = TOP_K) -> list[tuple[floa
             return []
         vector = _unpack(row[0])
         hits = _nearest(conn, vector, n + 1, kind)
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        if not _table_missing(exc):
+            raise
         return []  # table not created yet
     finally:
         conn.close()
