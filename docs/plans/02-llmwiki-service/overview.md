@@ -62,8 +62,12 @@ always null); per-page or per-kind permissions.
   `[endpoint]` is the one section that describes the machine, and it moves
   out. Rung 1 already worked around this by injecting the url from
   `LLM_WIKI_ENDPOINT_URL` at run time so no host was checked in.
-- **Restrictive default.** The service refuses writes unless started to allow
-  them. Loosening later breaks nobody; tightening later breaks everybody.
+- **Restrictive default.** Loosening later breaks nobody; tightening later
+  breaks everybody, so every setting starts at its closed end and an operator
+  opens it deliberately. In this plan that cashes out as `[access] write` being
+  `"token"` with no way to set it open, forwarded headers being ignored until
+  `trusted_proxy` names a proxy, and no write route existing at all. It is not
+  a single allow-writes switch, and an earlier version of this line implied one.
 - **Only the server decides what a caller may do.** A `mode` in the client's
   config is advisory and is documented as such.
 - No em-dashes in prose. The plan 01 ban on security vocabulary is lifted for
@@ -130,8 +134,17 @@ independent of each other once 1 and 2 land.
 
 - The service's own suite, plus `llmwiki`'s existing suite unchanged and still
   hermetic under the dead-proxy run.
-- A restrictive-default proof: a service started without the write flag
-  refuses a writer token's write, and the refusal is observed, not argued.
+- A restrictive-default proof, observed and not argued. There is no "write
+  flag" to start without: phase 2 settles `[access]` as `write = "token"`
+  always, with `"open"` refused at startup. So the proof is that startup
+  refusal, driven once, with the process exiting nonzero and nothing listening
+  on the bind address afterwards.
+- The `writer` role is minted and gated in phase 1 and has no route to reach
+  in plan 02, because phase 3 is read-only and writable remotes are out of
+  scope. That is deliberate: the format cannot be changed after the first key
+  is minted, so the role exists from the start. Until a write route lands, a
+  writer token is provably no more capable than a reader token, and that is
+  itself the thing to observe.
 - A boundary proof: the service and the CLI agree on every page in a real
   corpus copy. Any page one accepts and the other rejects is a defect in the
   shared core, not in either caller.
