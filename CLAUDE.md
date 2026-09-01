@@ -159,11 +159,12 @@ not cover anything the tests never call, so hand-driving still applies.
 
 **The mutation testing gate measures test strength, not just test count.**
 `scripts/check-mutation-gate.py` mutates `llmwiki_service/auth.py`,
-`llmwiki_service/tokens.py`, and `llmwiki_service/deployment.py` with
-`mutmut`, reruns the matching `tests/test_service_*.py` files against each
-mutant, and fails when a mutant survives that
-`scripts/mutation-survivor-baseline.txt` does not already name. Run it
-with:
+`llmwiki_service/tokens.py`, `llmwiki_service/deployment.py`,
+`llmwiki_service/app.py`, `llmwiki_service/tls.py`, and
+`llmwiki_service/routes.py` with `mutmut`, reruns the matching
+`tests/test_service_*.py` files against each mutant, and fails when a
+mutant survives that `scripts/mutation-survivor-baseline.txt` does not
+already name. Run it with:
 
 ```bash
 .venv/bin/python scripts/check-mutation-gate.py
@@ -175,6 +176,19 @@ so killing more of them means proving a new one is also equivalent, not
 chasing the count down. The gate exists to stop the count growing, so a new
 surviving mutant, meaning a test got weaker or a line lost its coverage,
 fails the run and names the mutant.
+
+The gate also fails when a mutant lands in mutmut's `no tests` state:
+no test in `pytest_add_cli_args_test_selection` ran against it at all.
+This is worse than a survivor, a survivor was tested and beat the tests,
+a `no tests` mutant means the line has zero mutation coverage while the
+gate stays green. This is not theoretical: `SearchLimiter` lived in
+`llmwiki_service/auth.py`, which was already mutated, but its tests lived
+in `tests/test_service_routes.py`, which was not in the selection, so all
+42 of its mutants read `no tests` and the gate reported green while
+checking nothing on that class. There is no baseline for `no tests`; the
+count must always be zero. Every module added to `only_mutate` needs its
+covering test file added to `pytest_add_cli_args_test_selection` in the
+same change, or its mutants fall into this hole.
 
 Regenerate the baseline only with `--update-baseline`, never by piping
 `mutmut results` over the file: that flag rewrites the survivor list while

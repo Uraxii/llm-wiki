@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -73,7 +74,7 @@ async def _call(
     path: str,
     *,
     headers: list[tuple[bytes, bytes]] | None = None,
-    client: tuple[str, int] = ("203.0.113.5", 1),
+    client: tuple[str, int] | None = ("203.0.113.5", 1),
 ) -> tuple[int, bytes, dict[str, str]]:
     """Drive `asgi_app` the way uvicorn does. Returns (status, body,
     response headers lower-cased)."""
@@ -541,6 +542,305 @@ class SearchLimiterThroughRouteTest(RouteTestCase):
             status, _, _ = await _call(wrapped, "GET", "/kb/demo/search?q=x", client=("198.51.100.9", 1))
         self.assertEqual(status, 429)
         self.assertEqual(ranker.call_count, 1)
+
+
+class DeploymentDefaultsTest(RouteTestCase):
+    """`make_routes` reads `access` and `kbs` out of the deployment with
+    a `{}` default each, so a deployment missing either key still
+    answers a request instead of raising on `None.get`."""
+
+    def _build_from(self, deployment: dict) -> app.ASGIApp:
+        return app.build_app(
+            None,
+            deployment,
+            self.store,
+            self.failure_limiter,
+            self.search_limiter,
+        )
+
+    async def test_a_deployment_with_no_access_key_refuses_with_401(self) -> None:
+        wrapped = self._build_from({"kbs": {"demo": {"path": str(self.kb)}}})
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/schema")
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body), {"error": "unauthorized"})
+
+    async def test_a_deployment_with_no_kbs_key_404s(self) -> None:
+        wrapped = self._build_from({"access": OPEN_ACCESS})
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/schema")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body), {"error": "not_found"})
+
+
+class UnknownKbNameTest(RouteTestCase):
+    """All four routes answer an unknown kb name with the identical 404
+    body, not just `schema`, and `search` decides it before it would
+    ever reach ranking."""
+
+    async def test_all_four_routes_404_on_an_unknown_kb_name(self) -> None:
+        wrapped = self.build(access=OPEN_ACCESS)
+        paths = (
+            "/kb/nope/search?q=x",
+            "/kb/nope/page/a.md",
+            "/kb/nope/list",
+            "/kb/nope/schema",
+        )
+        with mock.patch(
+            "llmwiki_service.routes.rank",
+            side_effect=AssertionError("rank must not be called"),
+        ):
+            for path in paths:
+                with self.subTest(path=path):
+                    status, body, _ = await _call(wrapped, "GET", path)
+                    self.assertEqual(status, 404)
+                    self.assertEqual(json.loads(body), {"error": "not_found"})
+
+
+class PageReadFailureTest(RouteTestCase):
+    """A page name that resolves inside the wiki but cannot be read is
+    the third 404 in `page_route`, distinct from the unknown kb and the
+    rejected name."""
+
+    async def test_an_unreadable_page_404s_rather_than_500ing(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permissions")
+        page = _write_page(self.kb, "locked.md")
+        page.chmod(0o000)
+        self.addCleanup(page.chmod, 0o644)
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/page/locked.md")
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body), {"error": "not_found"})
+
+
+class RefusalPerRouteTest(RouteTestCase):
+    """The refusal branch of every route: the 401 body, the 429 the
+    failure limiter produces once a caller has spent its budget, and the
+    fact that one caller's failures never spend another caller's."""
+
+    PATHS = (
+        "/kb/demo/search?q=x",
+        "/kb/demo/page/a.md",
+        "/kb/demo/list",
+        "/kb/demo/schema",
+    )
+
+    def _populate(self) -> None:
+        _write_page(self.kb, "a.md")
+        (self.kb / "SCHEMA.md").write_text("# schema\n")
+
+    async def test_every_route_401s_for_a_bad_token_under_token_read(self) -> None:
+        self._populate()
+        wrapped = self.build(access=TOKEN_ACCESS)
+        for path in self.PATHS:
+            with self.subTest(path=path):
+                status, body, _ = await _call(
+                    wrapped, "GET", path, headers=_bearer("bad-token")
+                )
+                self.assertEqual(status, 401)
+                self.assertEqual(json.loads(body), {"error": "unauthorized"})
+
+    async def test_a_blocked_caller_429s_and_another_caller_is_untouched(self) -> None:
+        self._populate()
+        for path in self.PATHS:
+            with self.subTest(path=path):
+                self.failure_limiter = auth.FailureLimiter(1)
+                wrapped = self.build(access=TOKEN_ACCESS)
+                spender = ("198.51.100.7", 1)
+                first = await _call(
+                    wrapped, "GET", path, headers=_bearer("bad"), client=spender
+                )
+                self.assertEqual(first[0], 401)
+                blocked = await _call(
+                    wrapped, "GET", path, headers=_bearer("bad"), client=spender
+                )
+                self.assertEqual(blocked[0], 429)
+                self.assertEqual(json.loads(blocked[1]), {"error": "rate_limited"})
+                other = await _call(
+                    wrapped,
+                    "GET",
+                    path,
+                    headers=_bearer("bad"),
+                    client=("198.51.100.8", 1),
+                )
+                self.assertEqual(other[0], 401)
+                self.assertEqual(json.loads(other[1]), {"error": "unauthorized"})
+
+
+class ClientlessScopeTest(RouteTestCase):
+    """uvicorn hands over a scope with no `client` for a unix socket
+    connection. The gate still needs a key, and that key is the literal
+    string the limiter then holds."""
+
+    async def test_a_scope_with_no_client_is_keyed_as_unknown(self) -> None:
+        wrapped = self.build(access=TOKEN_ACCESS)
+        status, body, _ = await _call(
+            wrapped, "GET", "/kb/demo/schema", headers=_bearer("bad"), client=None
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body), {"error": "unauthorized"})
+        self.assertEqual(self.failure_limiter.tracked(), ["unknown"])
+
+
+class SearchRankArgumentsTest(RouteTestCase):
+    async def test_rank_receives_the_kb_query_n_and_kind_verbatim(self) -> None:
+        wrapped = self.build()
+        with mock.patch(
+            "llmwiki_service.routes.rank",
+            return_value=Ranking(hits=[], unsummarized=0),
+        ) as ranker:
+            status, _, _ = await _call(
+                wrapped, "GET", "/kb/demo/search?q=widgets&n=5&kind=story"
+            )
+        self.assertEqual(status, 200)
+        kb_arg, q_arg, n_arg, kind_arg = ranker.call_args.args
+        self.assertEqual(kb_arg.root, self.kb)
+        self.assertEqual(q_arg, "widgets")
+        self.assertEqual(n_arg, 5)
+        self.assertEqual(kind_arg, "story")
+
+    async def test_an_empty_or_absent_kind_reaches_rank_as_none(self) -> None:
+        wrapped = self.build()
+        with mock.patch(
+            "llmwiki_service.routes.rank",
+            return_value=Ranking(hits=[], unsummarized=0),
+        ) as ranker:
+            for query in ("/kb/demo/search?q=x", "/kb/demo/search?q=x&kind="):
+                with self.subTest(query=query):
+                    await _call(wrapped, "GET", query)
+                    self.assertIsNone(ranker.call_args.args[3])
+
+
+class ListEntryShapeTest(RouteTestCase):
+    MTIME = 1_767_225_600  # 2026-01-01T00:00:00Z
+
+    async def test_one_entry_matches_field_for_field(self) -> None:
+        page = _write_page(self.kb, "solo.md", kind="topic", title="Solo Title")
+        os.utime(page, (self.MTIME, self.MTIME))
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/list")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body),
+            {
+                "pages": [
+                    {
+                        "name": "solo.md",
+                        "kind": "topic",
+                        "title": "Solo Title",
+                        "updated": "2026-01-01T00:00:00Z",
+                        "size": page.stat().st_size,
+                    }
+                ],
+                "next": None,
+            },
+        )
+
+    async def test_next_is_null_when_the_page_count_equals_n_exactly(self) -> None:
+        for name in ("a.md", "b.md", "c.md"):
+            _write_page(self.kb, name)
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/list?n=3")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual([p["name"] for p in payload["pages"]], ["a.md", "b.md", "c.md"])
+        self.assertIsNone(payload["next"])
+
+    async def test_n_of_one_is_accepted_and_returns_one_page(self) -> None:
+        self.assertEqual(routes._parse_n("1", routes.DEFAULT_LIST_N), 1)
+        for name in ("a.md", "b.md"):
+            _write_page(self.kb, name)
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/list?n=1")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual([p["name"] for p in payload["pages"]], ["a.md"])
+        self.assertEqual(payload["next"], "a.md")
+
+    async def test_updated_is_utc_even_under_a_non_utc_local_zone(self) -> None:
+        # `_updated` passes tz=timezone.utc; dropping it would silently
+        # fall back to local time, which is invisible on a UTC machine.
+        # "XYZ7" is a POSIX TZ string, so this needs no zoneinfo database.
+        page = _write_page(self.kb, "stamped.md")
+        os.utime(page, (self.MTIME, self.MTIME))
+        previous = os.environ.get("TZ")
+
+        def restore() -> None:
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            time.tzset()
+
+        self.addCleanup(restore)
+        os.environ["TZ"] = "XYZ7"
+        time.tzset()
+        self.assertNotEqual(
+            time.strftime("%H", time.localtime(self.MTIME)), "00"
+        )  # the zone really did take effect
+
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/list")
+        self.assertEqual(status, 200)
+        entry = json.loads(body)["pages"][0]
+        self.assertEqual(entry["updated"], "2026-01-01T00:00:00Z")
+
+
+class ListSkipsAVanishedPageTest(RouteTestCase):
+    async def test_a_page_unlinked_mid_scan_is_skipped_not_a_stop(self) -> None:
+        for name in ("a.md", "b.md", "c.md"):
+            _write_page(self.kb, name)
+        real_read = routes.read_page_text
+
+        def read(path: Path) -> str:
+            if path.name == "b.md":
+                raise FileNotFoundError(str(path))
+            return real_read(path)
+
+        wrapped = self.build()
+        with mock.patch("llmwiki_service.routes.read_page_text", side_effect=read):
+            status, body, _ = await _call(wrapped, "GET", "/kb/demo/list")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [p["name"] for p in json.loads(body)["pages"]], ["a.md", "c.md"]
+        )
+
+
+class SchemaBodyTest(RouteTestCase):
+    async def test_the_schema_bytes_are_returned_verbatim(self) -> None:
+        raw = b"# schema\n\nrules \xff\xfe here\n"
+        (self.kb / "SCHEMA.md").write_bytes(raw)
+        wrapped = self.build()
+        status, body, headers = await _call(wrapped, "GET", "/kb/demo/schema")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, raw)
+        self.assertEqual(headers["content-type"], "text/markdown")
+
+
+class MethodNotAllowedTest(RouteTestCase):
+    """Every route is registered GET-only, so a POST to a path that
+    otherwise matches never reaches the handler."""
+
+    async def test_post_to_every_route_is_405(self) -> None:
+        _write_page(self.kb, "a.md")
+        (self.kb / "SCHEMA.md").write_text("# schema\n")
+        wrapped = self.build()
+        paths = (
+            "/kb/demo/search?q=x",
+            "/kb/demo/page/a.md",
+            "/kb/demo/list",
+            "/kb/demo/schema",
+        )
+        with mock.patch(
+            "llmwiki_service.routes.rank",
+            side_effect=AssertionError("rank must not be called"),
+        ):
+            for path in paths:
+                with self.subTest(path=path):
+                    status, body, _ = await _call(wrapped, "POST", path)
+                    self.assertEqual(status, 405)
+                    self.assertEqual(
+                        json.loads(body), {"error": "method_not_allowed"}
+                    )
 
 
 if __name__ == "__main__":
