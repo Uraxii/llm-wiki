@@ -105,6 +105,9 @@ After rung 1:
 12. [feeds and jobs](phase-12-feeds.md)
 13. [vectors](phase-13-vectors.md) (needs `.21` for the shipped default; builds against any model name)
 14. [concurrent writers](phase-14-concurrency.md)
+15. [image and PDF sources](phase-15-visual-sources.md) (gated on a probe of the
+    configured endpoint's attachment support; the image half ships without the
+    PDF half if that probe refuses PDF parts)
 
 Phases 3, 4, 5 are independent after 2 and may run in parallel sessions on
 disjoint files. `cli.py` is provisional scaffolding in phase 2 and takes its

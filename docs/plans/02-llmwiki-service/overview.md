@@ -47,11 +47,14 @@ always null); per-page or per-kind permissions.
   the six lint checks, the ownership boundary, and the vector store must have
   exactly one implementation. Two copies drift, and the failure mode is a page
   the service accepts that the CLI rejects.
-- **`llmwiki` stays Python 3.14 stdlib plus `sqlite-vec`.** The service may
-  take dependencies. This reverses plan 01's blanket rule for the service side
-  only, on the user's call: the deployment already ships a venv, so the rule
-  was buying less than it cost. The CLI keeps the rule because it is a skill
-  tool that must install anywhere.
+- **The CLI and the service may both take any dependency**, on the user's
+  call. This supersedes what this section said first, that the CLI keeps a
+  stdlib-only rule because it must install anywhere. It stopped installing
+  anywhere at phase 13, where `vectors.py` began importing `sqlite-vec` at
+  module level. There is now no dependency rule separating the two packages,
+  which removes the reason this plan had for keeping their dependency stories
+  apart. The constraint that does still separate them is the one that matters:
+  the service imports `llmwiki` and never forks it.
 - **Credentials never appear in `config.toml`.** A remote names the env var
   holding its token, never the token. Unchanged from plan 01.
 - **`config.toml` becomes wiki config, not local config.** `[models]`,
@@ -116,7 +119,7 @@ that mode safe rather than a service replacing it.
 
 1. [tokens and the auth gate](phase-01-tokens.md)
 2. [TLS, certificate lifecycle, and the deployment file](phase-02-tls.md)
-3. read endpoints: `search`, `page`, `list`, `schema`
+3. [read endpoints: `search`, `page`, `list`, `schema`](phase-03-read-endpoints.md)
 4. `[remotes]` in `config.toml`, and the CLI client that consumes them
 5. container packaging and the mode 1 deployment
 
