@@ -1,9 +1,7 @@
-"""The starlette app. Phase 2 adds exactly one route, `/health`, plus
-the forwarded-header handling every later route will sit behind.
-
-Phase 3's read routes are out of scope here; see
-docs/plans/02-llmwiki-service/phase-02-tls.md and FORBIDDEN in this
-phase's brief. Nothing in this module names a kb.
+"""The starlette app. Phase 2 adds `/health` and the forwarded-header
+handling every route sits behind; phase 3 wires the four read routes
+in `routes.py` behind the same middleware. This module stays wiring
+only: a route that decides anything belongs in `routes.py` instead.
 """
 from __future__ import annotations
 
@@ -12,9 +10,14 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
+
+from llmwiki_service import routes
+from llmwiki_service.auth import FailureLimiter, SearchLimiter
+from llmwiki_service.tokens import TokenStore
 
 ASGIApp = Callable[..., Awaitable[None]]
 
@@ -25,6 +28,27 @@ async def health(request: Request) -> PlainTextResponse:
     """Liveness only. No kb name, no path, no version: the deployment
     this process serves is never in this response."""
     return PlainTextResponse("ok")
+
+
+_ROUTER_ERROR_CODES = {404: "not_found", 405: "method_not_allowed"}
+
+
+async def _router_error(request: Request, exc: HTTPException) -> Response:
+    """Starlette's router raises `HTTPException` itself, before any
+    route in `routes.py` runs, for a path with no match (404) or a
+    method the matched path does not accept (405). Its default body is
+    plain text and names neither error code in `routes.py`'s closed
+    set, so this puts both on the same set: the router's own 404 and
+    405 answer JSON, with no path, method, or exception detail.
+
+    A status this dict does not name is not one the router raises;
+    re-raised rather than guessed at, so it surfaces as a real 500
+    instead of a misreported 404.
+    """
+    code = _ROUTER_ERROR_CODES.get(exc.status_code)
+    if code is None:
+        raise exc
+    return JSONResponse({"error": code}, status_code=exc.status_code)
 
 
 SCHEMES = ("http", "https")
@@ -128,13 +152,27 @@ class ForwardedHeaderMiddleware:
         )
 
 
-def build_app(trusted_proxy: IPAddress | None) -> ASGIApp:
-    """The service's ASGI app: the starlette router wrapped in the
-    forwarded-header middleware, which is what the return type says.
+def build_app(
+    trusted_proxy: IPAddress | None,
+    deployment: dict,
+    store: TokenStore,
+    failure_limiter: FailureLimiter,
+    search_limiter: SearchLimiter,
+) -> ASGIApp:
+    """The service's ASGI app: `/health` plus the four routes
+    `routes.make_routes` builds from `deployment`, `store`, and the two
+    limiters, all wrapped in the forwarded-header middleware, which is
+    what the return type says.
 
     `trusted_proxy` gates forwarded-header trust for every route,
     `/health` included, per phase 2's rule that it is read only when a
     deployment names a proxy.
     """
-    app = Starlette(routes=[Route("/health", health, methods=["GET"])])
+    app = Starlette(
+        routes=[
+            Route("/health", health, methods=["GET"]),
+            *routes.make_routes(deployment, store, failure_limiter, search_limiter),
+        ],
+        exception_handlers={HTTPException: _router_error},
+    )
     return ForwardedHeaderMiddleware(app, trusted_proxy)

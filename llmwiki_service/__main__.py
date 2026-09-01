@@ -21,7 +21,7 @@ from collections.abc import Callable
 import uvicorn
 
 from llmwiki_service import app as app_module
-from llmwiki_service import deployment, tls
+from llmwiki_service import auth, deployment, tls, tokens
 
 logger = logging.getLogger("llmwiki_service")
 
@@ -65,6 +65,10 @@ def _terminate_mode_config(
     port: int,
     trusted_proxy: app_module.IPAddress | None,
     stop_event: threading.Event,
+    depl: dict,
+    store: tokens.TokenStore,
+    failure_limiter: auth.FailureLimiter,
+    search_limiter: auth.SearchLimiter,
 ) -> tuple[uvicorn.Config, threading.Thread]:
     """The `uvicorn.Config` for `mode = "terminate"`, and the watcher
     thread it started.
@@ -100,13 +104,33 @@ def _terminate_mode_config(
     watcher.start()
 
     config = uvicorn.Config(
-        app_module.build_app(trusted_proxy),
+        app_module.build_app(
+            trusted_proxy, depl, store, failure_limiter, search_limiter
+        ),
         host=host,
         port=port,
         proxy_headers=False,  # ForwardedHeaderMiddleware owns this, gated on trusted_proxy
         ssl_context_factory=lambda _config, _default: server_ctx,
     )
     return config, watcher
+
+
+def _build_auth_state(
+    depl: dict,
+) -> tuple[tokens.TokenStore, auth.FailureLimiter, auth.SearchLimiter]:
+    """The `TokenStore` and both limiters, built once per process and
+    threaded through both `_serve` mode branches: a fresh instance per
+    branch would mean requests served by one code path never see the
+    state requests on the other path accumulated, which is exactly the
+    split-brain a single deployment file exists to prevent."""
+    store = tokens.TokenStore(
+        deployment._token_db_path(depl), tokens.peppers_from_env(os.environ)
+    )
+    failure_limiter = auth.FailureLimiter()
+    search_limit = depl.get("limits", {}).get(
+        "search_per_minute", auth.DEFAULT_SEARCH_PER_MINUTE
+    )
+    return store, failure_limiter, auth.SearchLimiter(search_limit)
 
 
 async def _serve(depl: dict) -> int:
@@ -116,10 +140,19 @@ async def _serve(depl: dict) -> int:
     stop_event = threading.Event()
     watcher: threading.Thread | None = None
     mode = deployment.tls_mode(depl)
+    store, failure_limiter, search_limiter = _build_auth_state(depl)
 
     if mode == deployment.TERMINATE:
         config, watcher = _terminate_mode_config(
-            tls_cfg, host, port, trusted_proxy, stop_event
+            tls_cfg,
+            host,
+            port,
+            trusted_proxy,
+            stop_event,
+            depl,
+            store,
+            failure_limiter,
+            search_limiter,
         )
     elif mode == deployment.UPSTREAM:
         # Row 10 already required `bind` to be a private interface, so
@@ -131,7 +164,9 @@ async def _serve(depl: dict) -> int:
             )
         )
         config = uvicorn.Config(
-            app_module.build_app(trusted_proxy),
+            app_module.build_app(
+                trusted_proxy, depl, store, failure_limiter, search_limiter
+            ),
             host=host,
             port=port,
             proxy_headers=False,  # ForwardedHeaderMiddleware owns this, gated on trusted_proxy

@@ -9,8 +9,9 @@ module.
 """
 from __future__ import annotations
 
+import math
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -125,6 +126,69 @@ class FailureLimiter:
             if moment - started < self.window_sec:
                 break
             self._windows.popitem(last=False)
+
+
+SEARCH_WINDOW_SEC = 60
+MAX_TRACKED_SEARCH_CLIENTS = 10_000
+DEFAULT_SEARCH_PER_MINUTE = 30  # fallback only when [limits] is absent from
+                                 # the deployment; phase 2's own example sets it
+
+
+class SearchLimiter:
+    """A sliding window count of accepted `search` calls per caller.
+
+    Unlike `FailureLimiter`'s fixed window, this records every accepted
+    call's own timestamp and only counts the ones still inside the last
+    `window_sec`. A fixed window lets a caller spend up to twice its
+    budget across a window edge; this one does not, which is what the
+    phase 3 spec's own test drives: sixty requests spanning a minute
+    boundary in two seconds must return 429.
+
+    Same eviction discipline as `FailureLimiter`, and for the same
+    reason: when the table is saturated with clients that are ALL still
+    inside their window, there is nothing safely reclaimable, so a new
+    client goes untracked (and unlimited) for that stretch rather than
+    evicting a live client's window, which would be the reset attack
+    `FailureLimiter` already refuses.
+    """
+
+    def __init__(self, limit: int, window_sec: int = SEARCH_WINDOW_SEC) -> None:
+        self.limit = limit
+        self.window_sec = window_sec
+        self._calls: OrderedDict[str, deque] = OrderedDict()
+
+    def check(self, client: str, now: float | None = None) -> int | None:
+        """`None` when `client` may proceed (and this call is recorded
+        against its window); otherwise the whole seconds, rounded up,
+        until its oldest in-window call expires, the caller's
+        `Retry-After` value."""
+        moment = time.monotonic() if now is None else now
+        timestamps = self._calls.get(client)
+        if timestamps is not None:
+            self._calls.move_to_end(client)
+            self._prune(timestamps, moment)
+        else:
+            self._forget_expired(moment)
+            if len(self._calls) >= MAX_TRACKED_SEARCH_CLIENTS:
+                return None  # untracked while saturated, same cut as FailureLimiter
+            timestamps = deque()
+            self._calls[client] = timestamps
+        if len(timestamps) >= self.limit:
+            return max(1, math.ceil(self.window_sec - (moment - timestamps[0])))
+        timestamps.append(moment)
+        return None
+
+    def _prune(self, timestamps: deque, moment: float) -> None:
+        while timestamps and moment - timestamps[0] >= self.window_sec:
+            timestamps.popleft()
+
+    def _forget_expired(self, moment: float) -> None:
+        while self._calls:
+            _client, timestamps = next(iter(self._calls.items()))
+            if not timestamps or moment - timestamps[-1] >= self.window_sec:
+                self._calls.popitem(last=False)
+                continue
+            break
 
 
 def bearer_token(header: str | None) -> str | None:
