@@ -9,7 +9,7 @@
 three verbs, `ingest.py`'s embed sweep becomes real, `dedup.candidates` gains
 the top-5 nearest summaries' stories. File `.kb/vectors/<model-slug>.sqlite`
 with a pages table (`path` PK, `file_hash`, `kind`, `title`) and a `vec0`
-table; staleness by whole-file sha256; rows deleted for pages that no longer
+table; staleness by a sha256 over kind, title and the embedded text; rows deleted for pages that no longer
 exist; embedded text = title + identifiers + summary or body head; dimension
 stored on first embed, mismatch refuses. `status` prints pages without a
 current vector and sources without a summary. `search "<q>" [-n N] [--kind K]`

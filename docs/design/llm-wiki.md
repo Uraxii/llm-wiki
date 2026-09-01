@@ -205,10 +205,14 @@ to a previous model is free, and two files side by side is what the embedding
 arena needs to compare models.
 
 **Row.** `page_path` as primary key, `file_hash`, `kind` as a filterable
-metadata column, and the vector. `file_hash` is the sha256 of the whole file,
-frontmatter included. A row is stale when the hash differs; mtime is never used.
-Hashing the whole file needs no parsing, and frontmatter (identifiers, domain
-fields) rightly shapes the vector. Content hash is what local-first tools
+metadata column, and the vector. `file_hash` is the sha256 of the row's own
+semantic content: kind, title, and the embedded text. A row is stale when that
+hash differs; mtime is never used. Frontmatter (identifiers, domain fields)
+still shapes the vector, because it sits inside that embedded text, but a
+frontmatter field the embedding never reads, dedup's `story:` back-reference
+say, no longer costs a paid re-embed. The column name is historical: it once
+held a whole-file hash, and it is kept so an existing database still reads.
+Content hash is what local-first tools
 converge on. The model name is not stored per row; one model per file makes it
 redundant.
 

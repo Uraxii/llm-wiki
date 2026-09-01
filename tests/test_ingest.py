@@ -225,6 +225,48 @@ class IngestTest(unittest.TestCase):
         log = (self.root / "log.md").read_text()
         self.assertIn("## [ingest] manual 1 new, 0 exists, 0 failed", log)
 
+    def test_ingest_does_not_reembed_the_summary_after_dedups_frontmatter_edit(
+        self,
+    ) -> None:
+        """Regression for vectors.py's staleness key. `_pipeline` sweeps
+        twice on purpose: once after summarize, once after dedup. dedup
+        writes a `story:` back-reference into the summary page's own
+        frontmatter, which changes nothing the embedding reads, so the
+        second sweep must not pay to re-embed it. Counts texts actually
+        POSTed to /embeddings, not a printed line: 2 billable texts for
+        one new source (the summary once, the fresh story dedup creates
+        once), never 3."""
+        path = self._write_source_file("wind.txt", "Wind source text.")
+        reply = (
+            "---\ntitle: North Wind\nidentifiers: []\n---\n\n"
+            "An abstract about wind.\n"
+        )
+
+        def respond(request_path: str, body: dict) -> dict:
+            if request_path == "/embeddings":
+                data = [
+                    {"index": i, "embedding": [1.0, 0.0]}
+                    for i, _text in enumerate(body["input"])
+                ]
+                return {"data": data}
+            if request_path == "/chat/completions":
+                return {"choices": [{"message": {"content": reply}}]}
+            raise AssertionError(f"unexpected request path {request_path!r}")
+
+        with FakeEndpoint(respond) as fake:
+            (self.root / "config.toml").write_text(
+                '[models]\nsummarize = "cheap"\nembed = "embed-model"\n\n'
+                f'[endpoint]\nurl = "{fake.url}"\n'
+            )
+            code, records = _run(self.root, [str(path)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 1)
+        billable_texts = sum(
+            len(r.body["input"]) for r in fake.requests if r.path == "/embeddings"
+        )
+        self.assertEqual(billable_texts, 2)
+
     def test_same_file_twice_second_is_exists_one_model_call(self) -> None:
         path = self._write_source_file("widget.txt", "Widget source text.")
 
