@@ -313,6 +313,54 @@ class FailureLimiterTest(unittest.TestCase):
             self.assertTrue(limiter.blocked("victim", now=0.0))
 
 
+class SearchLimiterTest(unittest.TestCase):
+    """The sliding window itself, driven by an injected clock. What a
+    route does with the refusal lives in `test_service_routes.py`."""
+
+    def test_the_window_reopens_at_the_boundary_not_after_it(self) -> None:
+        limiter = auth.SearchLimiter(1, window_sec=10)
+        self.assertIsNone(limiter.check("peer", now=0.0))
+        self.assertIsNotNone(limiter.check("peer", now=9.999))
+        self.assertIsNone(limiter.check("peer", now=10.0))
+
+    def test_retry_after_is_one_whole_second_at_the_window_end(self) -> None:
+        limiter = auth.SearchLimiter(1, window_sec=10)
+        limiter.check("peer", now=0.0)
+        self.assertEqual(limiter.check("peer", now=9.5), 1)
+
+    def test_retry_after_counts_from_the_oldest_in_window_call(self) -> None:
+        limiter = auth.SearchLimiter(1, window_sec=10)
+        limiter.check("peer", now=2.0)
+        self.assertEqual(limiter.check("peer", now=5.0), 7)
+
+    def test_a_live_window_survives_a_new_callers_sweep(self) -> None:
+        """A new caller sweeps expired callers off the front, oldest
+        first. Popping the other end, or dropping on the wrong
+        condition, takes a window that is still open."""
+        limiter = auth.SearchLimiter(1, window_sec=10)
+        limiter.check("old", now=0.0)
+        limiter.check("live", now=9.0)
+        limiter.check("newcomer", now=11.0)
+        self.assertIsNotNone(limiter.check("live", now=11.0))
+
+    def test_an_expired_window_frees_its_slot_at_the_boundary(self) -> None:
+        limiter = auth.SearchLimiter(1, window_sec=10)
+        with mock.patch.object(auth, "MAX_TRACKED_SEARCH_CLIENTS", 1):
+            limiter.check("early", now=0.0)
+            self.assertIsNone(limiter.check("late", now=10.0))
+            self.assertIsNotNone(limiter.check("late", now=10.0))
+
+    def test_a_caller_at_a_saturated_table_goes_untracked(self) -> None:
+        """The table saturates at the cap, not one caller past it. An
+        untracked caller is unlimited for that stretch, the deliberate
+        cut that beats evicting a live window."""
+        limiter = auth.SearchLimiter(1, window_sec=10)
+        with mock.patch.object(auth, "MAX_TRACKED_SEARCH_CLIENTS", 1):
+            self.assertIsNone(limiter.check("first", now=0.0))
+            self.assertIsNone(limiter.check("second", now=0.0))
+            self.assertIsNone(limiter.check("second", now=0.0))
+
+
 class RequiredClientTest(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = tempfile.TemporaryDirectory()

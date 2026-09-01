@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Run mutmut against llmwiki_service/auth.py, tokens.py, and deployment.py
-and fail when a mutant survives that scripts/mutation-survivor-baseline.txt
-does not name.
+"""Run mutmut against the modules named in pyproject.toml's [tool.mutmut]
+only_mutate (today: auth.py, tokens.py, deployment.py, app.py, tls.py,
+routes.py) and fail when a mutant survives that
+scripts/mutation-survivor-baseline.txt does not name.
 
 mutmut's own exit code does not reflect survivors (`mutmut run` always
 returns 0), so this script runs it, reads `mutmut results` itself, and
@@ -10,6 +11,12 @@ baseline is known debt and does not fail the gate; killing it is separate
 follow-up work. A survivor NOT in the baseline means a mutant that used to
 die now lives, which means the tests protecting that line got weaker, and
 that is what this gate exists to catch.
+
+The gate also fails on any mutant in mutmut's `no tests` state: a mutated
+line that no test in pytest_add_cli_args_test_selection even ran against.
+That is worse than a plain survivor, since the gate would otherwise stay
+green while measuring nothing for that line. There is no baseline for
+this state; the count must always be zero.
 
 Every run deletes mutants/ first and regenerates from scratch. mutmut's
 incremental cache does not notice an edit to a test file (it tracks source
@@ -122,7 +129,15 @@ def run_mutmut() -> None:
         raise SystemExit(result.returncode)
 
 
-def current_survivors() -> set[str]:
+def current_results() -> tuple[set[str], set[str]]:
+    """Survived and no-tests mutant ids from `mutmut results`.
+
+    `no tests` means no test in pytest_add_cli_args_test_selection ran
+    against that mutant at all (mutmut exit code 5 or 33), so the mutant
+    was never given a chance to be killed. That is worse than a survivor:
+    a survivor was tested and beat the tests, a `no tests` mutant proves
+    the line has zero mutation coverage while the gate stays quiet.
+    """
     result = subprocess.run(
         [sys.executable, "-m", "mutmut", "results"],
         cwd=REPO_ROOT,
@@ -131,17 +146,33 @@ def current_survivors() -> set[str]:
         check=True,
     )
     survivors = set()
+    no_tests = set()
     for line in result.stdout.splitlines():
         line = line.strip()
         if line.endswith(": survived"):
             survivors.add(line[: -len(": survived")])
-    return survivors
+        elif line.endswith(": no tests"):
+            no_tests.add(line[: -len(": no tests")])
+    return survivors, no_tests
 
 
 def main(argv: list[str]) -> int:
     update = "--update-baseline" in argv
     run_mutmut()
-    survivors = current_survivors()
+    survivors, no_tests = current_results()
+
+    if no_tests:
+        for mutant_id in sorted(no_tests):
+            print(mutant_id)
+        print(
+            f"{len(no_tests)} mutant(s) in \"no tests\" state: no test in "
+            "pytest_add_cli_args_test_selection ran against them. There is "
+            "no baseline for this state; the correct count is always zero. "
+            "Add the test file that covers the mutated line to "
+            "pytest_add_cli_args_test_selection in pyproject.toml.",
+            file=sys.stderr,
+        )
+        return 1
 
     if update:
         update_baseline(survivors)
