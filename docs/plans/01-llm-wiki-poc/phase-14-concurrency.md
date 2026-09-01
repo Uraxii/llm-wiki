@@ -36,7 +36,7 @@ the phase exists to buy. Per `principle-code-quality`, eliminate sharing
 first and serialize only the true invariant.
 
 - Slug claims become atomic. Reuse `sources._link_exclusive` at
-  `sources.py:25`, already an `os.link` plus `FileExistsError` exclusive
+  `sources.py:27-35`, already an `os.link` plus `FileExistsError` exclusive
   create, rather than hand-rolling a second exclusivity primitive.
 - `vectors.py` enables WAL and narrows the bare `OperationalError` catches
   so a locked database is never read as an absent table. It also sets

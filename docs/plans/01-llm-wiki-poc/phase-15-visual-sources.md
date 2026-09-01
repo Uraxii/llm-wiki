@@ -62,8 +62,9 @@ That containment is the design. If a change to this phase starts touching
 recorded measurement, not a citation.**
 
 `model._post` targets an OpenAI-compatible endpoint whose url comes from
-`[endpoint] url` (`model.py:73-77`). "OpenAI-compatible" is a claim about
-`/chat/completions` and `/embeddings` with text. Attachment support varies by
+`[endpoint] url`, which `model._endpoint_url` reads (`model.py:88-92`).
+"OpenAI-compatible" is a claim about `/chat/completions` and `/embeddings`
+with text. Attachment support varies by
 server, and it varies differently for images and for PDFs.
 
 - Images as a data URL in an `image_url` content part are widely supported.
@@ -141,7 +142,7 @@ decode failure -> still a drop, and now it means a genuinely broken text file
 ```
 
 `SOURCE_DELIMITER` is `"\n\n=== SOURCE TEXT FOLLOWS ===\n\n"`
-(`summarize.py:78`). A visual source needs its own sibling constant, because
+(`summarize.py:79`). A visual source needs its own sibling constant, because
 "SOURCE TEXT FOLLOWS" is a lie when the source is a chart, and the model reply
 quality depends on the prompt being true.
 
@@ -180,7 +181,8 @@ source stays in `sources/` where a later run with a raised cap will find it.
   measurement, and it buys nothing until a query wants to find an image by
   visual similarity rather than by what it depicts.
 - **Rasterizing PDF pages.** That needs a library. See step 0.
-- **Fetching images over the network.** `fetch.ACCEPTED` (`fetch.py:27`) is
+- **Fetching images over the network.** `fetch.ACCEPTED_TYPES`
+  (`fetch.py:26-28`) is
   four text types, and this phase does not widen it. Images and PDFs arrive as
   local paths. Widening the accept list is a separate change with its own size
   cap and its own audit of the redirect rules, and it is not needed to prove
