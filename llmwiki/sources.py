@@ -14,7 +14,14 @@ from typing import Literal
 
 from llmwiki.core import Kb, utc_timestamp
 
-EXTENSIONS = {"text/markdown": ".md", "application/pdf": ".pdf"}
+EXTENSIONS = {
+    "text/markdown": ".md",
+    "application/pdf": ".pdf",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 
 def _link_exclusive(tmp_path: Path, dest: Path) -> bool:

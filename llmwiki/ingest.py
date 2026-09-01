@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from llmwiki.core import Kb, append_log_entry, as_list, flatten
+from llmwiki.core import Kb, append_log_entry, as_list, flatten, kb_lock
 from llmwiki.model import ModelError, model_name
 from llmwiki import dedup, fetch, feeds, sources, summarize, vectors
 
@@ -72,7 +72,12 @@ def _sweep_or_fail(kb: Kb) -> bool:
 
 
 def _pipeline(root: Path, digest: str) -> str | None:
-    """Returns the name of the failing step, or `None` when clean."""
+    """Returns the name of the failing step, or `None` when clean.
+
+    Lock ordering. summarize takes and releases its own commit lock per
+    digest. The story placement and the sweep that follows it share ONE
+    hold, so no other process can call vectors.neighbours between the
+    story page appearing and its vector row existing."""
     kb = Kb(root)
     if summarize.run(root, [digest]) != 0:
         return "summarize"
@@ -83,19 +88,21 @@ def _pipeline(root: Path, digest: str) -> str | None:
     # Skipping dedup after a failed summarize is deliberate: with no
     # summary page on disk dedup would log a junk "dropped (no summary
     # page for source)" line into the append-only log.
-    if not _sweep_or_fail(kb):
+    if not _sweep_or_fail(kb):  # NO LOCK: vectors converge on their own
         return "embed"
-    if dedup.run(root, [digest]) != 0:
-        return "dedup"
-    # dedup may write a new story page (a join or a fresh one) and
-    # always rewrites the summary's own frontmatter (the `story:`
-    # back-reference), so both sweeps here are real, not redundant: the
-    # first sweep's vector for the summary is stale the moment dedup
-    # touches it. Sweeping again is how "no wiki page lacks a current
-    # vector after ingest" holds even for the story the last source in
-    # a batch creates.
-    if not _sweep_or_fail(kb):
-        return "embed"
+    with kb_lock(kb.root):
+        placed, attempted = dedup.place(kb, [digest])
+        if placed != attempted:
+            return "dedup"
+        # dedup may write a new story page (a join or a fresh one) and
+        # always rewrites the summary's own frontmatter (the `story:`
+        # back-reference), so both sweeps here are real, not redundant:
+        # the first sweep's vector for the summary is stale the moment
+        # dedup touches it. Sweeping again is how "no wiki page lacks a
+        # current vector after ingest" holds even for the story the
+        # last source in a batch creates.
+        if not _sweep_or_fail(kb):
+            return "embed"
     return None
 
 

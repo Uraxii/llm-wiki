@@ -6,9 +6,7 @@ page.
 from __future__ import annotations
 
 import hashlib
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 from llmwiki.core import (
@@ -18,14 +16,16 @@ from llmwiki.core import (
     as_list,
     atomic_write_bytes,
     atomic_write_text,
+    kb_lock,
     parse_frontmatter,
     read_page_text,
     render_frontmatter,
     slugify,
 )
+from llmwiki.fetch import ACCEPTED_TYPES
 from llmwiki.lint import lint_pages, prompt_block
-from llmwiki.model import ModelError, chat, model_name
-from llmwiki.sources import _link_exclusive, read_provenance
+from llmwiki.model import ModelError, PDF_PART_SHAPES, chat, model_name
+from llmwiki.sources import read_provenance
 
 # The CLI's own summarizing rules (decision agent-kb-0zf.4): a
 # SUMMARIZE.md never has to restate these to get a workable reply.
@@ -77,7 +77,26 @@ A few plain sentences of abstract text go here.\
 """
 
 SOURCE_DELIMITER = "\n\n=== SOURCE TEXT FOLLOWS ===\n\n"
+
+# Phase 15: an image or PDF source has no text to append after this
+# note, so unlike SOURCE_DELIMITER it stands alone as the prompt's
+# final sentence. The bytes ride as a separate attachment content part
+# (model.chat), never inlined here.
+SOURCE_ATTACHMENT_NOTE = (
+    "\n\n=== SOURCE FILE ATTACHED ===\n\n"
+    "The source itself is attached to this message as an image or PDF "
+    "file. No source text follows; read the attachment."
+)
+
 SLUG_SUFFIX_LEN = 12  # hex chars of the digest, for a title-slug collision
+
+# Image types sources.EXTENSIONS also knows. Kept here, not imported
+# from sources.py, because sources.py's dict also carries text/markdown
+# and .txt-fallback naming concerns this module has no business with.
+_IMAGE_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/webp", "image/gif"}
+)
+_PDF_TYPE = "application/pdf"
 
 
 def prompt_prefix(kb: Kb) -> str:
@@ -95,6 +114,45 @@ def prompt_fingerprint(prefix: str) -> str:
     """sha256 hexdigest of the prompt prefix alone. Excludes the source
     text and the model name: swapping models is not a prompt change."""
     return hashlib.sha256(prefix.encode("utf-8")).hexdigest()
+
+
+def _content_kind(content_type: str) -> str:
+    """"text" (decode and inline), "visual" (image or PDF, sent as a
+    model attachment), or "unsupported", from a provenance sidecar's
+    `content_type`."""
+    normalized = content_type.split(";")[0].strip().lower()
+    if normalized in ACCEPTED_TYPES:
+        return "text"
+    if normalized in _IMAGE_TYPES or normalized == _PDF_TYPE:
+        return "visual"
+    return "unsupported"
+
+
+def _pdf_part(config: dict) -> str:
+    """[endpoint].pdf_part, defaulting to "file". Read and validated
+    once at the top of `run`, so a typo is a startup-visible error
+    instead of surfacing only once a PDF happens to appear."""
+    value = config.get("endpoint", {}).get("pdf_part", "file")
+    if value not in PDF_PART_SHAPES:
+        raise ModelError(f"unrecognized [endpoint].pdf_part: {value!r}")
+    return value
+
+
+def _expected_fingerprint(
+    kb: Kb, digest: str, text_fingerprint: str, visual_fingerprint: str
+) -> str:
+    """The fingerprint a summary of `digest` should carry today: the
+    text one for a text source, the visual one otherwise. A digest
+    whose sidecar cannot be read returns a fingerprint no real page
+    ever carries, so it is always treated as needing (re)processing;
+    `_process_digest` is what actually explains why."""
+    try:
+        content_type = str(read_provenance(kb, digest).get("content_type", ""))
+    except (FileNotFoundError, OSError, ValueError):
+        return ""
+    if _content_kind(content_type) == "text":
+        return text_fingerprint
+    return visual_fingerprint
 
 
 def _all_digests(kb: Kb) -> list[str]:
@@ -163,28 +221,44 @@ def _source_path(kb: Kb, digest: str) -> Path:
     raise FileNotFoundError(f"no source bytes for {digest}")
 
 
-def _claim_new_summary_path(kb: Kb, digest: str, title: str) -> Path:
-    """Atomically claim a filename for a digest with no existing
-    summary page: the plain slug if free, else the slug suffixed with
-    this digest's own hex digits, which no other digest can collide
-    on. Reuses `sources._link_exclusive`, the package's one atomic
-    exclusive-create primitive, so two processes whose model-chosen
-    titles slugify identically can never both believe they claimed the
-    plain slug and let one destroy the other's page."""
+def _free_summary_path(kb: Kb, digest: str, title: str) -> Path:
+    """The filename for a digest with no summary page: the plain slug
+    when it is free, else the slug suffixed with this digest's own hex
+    digits, which no other digest collides on. CALLER MUST HOLD
+    kb_lock. `Path.exists` is only a decision under the lock; outside
+    it, it is a guess."""
     candidate = kb.wiki / f"{slugify(title)}.md"
-    fd, tmp_name = tempfile.mkstemp(dir=kb.wiki, prefix=f".{candidate.name}.")
-    tmp_path = Path(tmp_name)
-    try:
-        os.close(fd)
-        if _link_exclusive(tmp_path, candidate):
-            return candidate
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    if not candidate.exists():
+        return candidate
     return kb.wiki / f"{slugify(title)}-{digest[:SLUG_SUFFIX_LEN]}.md"
 
 
+def _carry_story(
+    fields: dict[str, FrontmatterValue], previous: bytes | None
+) -> dict[str, FrontmatterValue]:
+    """`fields` with the `story:` back-reference read off `previous`
+    restored. dedup owns that field and a model reply never carries it,
+    so a re-summarize without this leaves a story holding a member
+    whose own page denies membership. `previous` of None returns
+    `fields` unchanged."""
+    if previous is None:
+        return fields
+    parsed = parse_frontmatter(previous.decode("utf-8", errors="replace"))
+    if parsed is None:
+        return fields
+    story = parsed[0].get("story")
+    if story:
+        fields = dict(fields)
+        fields["story"] = story
+    return fields
+
+
 def _build_fields(
-    reply_fields: dict, digest: str, provenance: dict, kb: Kb, fingerprint: str
+    reply_fields: dict,
+    digest: str,
+    provenance: dict,
+    model_used: str,
+    fingerprint: str,
 ) -> dict:
     """CLI-owned keys first, in the pinned order, then every remaining
     reply field carried over opaquely (`identifiers`, domain fields).
@@ -195,7 +269,7 @@ def _build_fields(
         "source": digest,
         "source_url": provenance.get("url", ""),
         "fetched": provenance.get("fetched", ""),
-        "model": model_name(kb.config, "summarize", None),
+        "model": model_used,
         "prompt_fingerprint": fingerprint,
     }
     for key, value in reply_fields.items():
@@ -208,9 +282,9 @@ def _commit_summary_page(
 ) -> bool:
     """Write `content` to `page_path`, self-lint, and roll back on any
     finding: previous bytes restored, or the file unlinked when there
-    was none (including a just-claimed path holding only the empty
-    placeholder `_claim_new_summary_path` left behind). Returns True
-    iff the write was dropped."""
+    was none. Returns True iff the write was dropped. CALLER MUST HOLD
+    kb_lock: `previous` was read under it and is only current while it
+    is held."""
     atomic_write_text(page_path, content)
     findings = lint_pages(kb.root, [page_path])
     if not findings:
@@ -226,22 +300,80 @@ def _commit_summary_page(
     return True
 
 
+def _resolve_content(
+    kb: Kb, digest: str, prefix: str, pdf_part: str
+) -> tuple[str, tuple[str, bytes] | None, str, dict] | str:
+    """The prompt text, optional attachment, model step, and provenance
+    for `digest`, decided from its provenance `content_type`, or a drop
+    reason string when nothing can be sent. Reads no lock; source
+    bytes and provenance are immutable once `sources.store` writes
+    them, so a plain read here needs none."""
+    try:
+        path = _source_path(kb, digest)
+        provenance = read_provenance(kb, digest)
+    except FileNotFoundError as exc:
+        return f"cannot read source: {exc}"
+
+    content_type = str(provenance.get("content_type", ""))
+    kind = _content_kind(content_type)
+    if kind == "unsupported":
+        return f"unsupported content type: {content_type or '(none)'}"
+
+    if kind == "text":
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            return f"cannot decode source: {exc}"
+        return prefix + SOURCE_DELIMITER + text, None, "summarize", provenance
+
+    normalized = content_type.split(";")[0].strip().lower()
+    if normalized == _PDF_TYPE and pdf_part == "none":
+        return "PDF attachments disabled: set [endpoint] pdf_part"
+    attachment = (normalized, path.read_bytes())
+    return (
+        prefix + SOURCE_ATTACHMENT_NOTE,
+        attachment,
+        "summarize_image",
+        provenance,
+    )
+
+
+def _image_model(kb: Kb) -> str:
+    """`[models].summarize_image`, falling back to `[models].summarize`
+    when unset. Reuses `model_name`'s own lookup and error for each
+    step rather than a second hand-rolled dict read."""
+    try:
+        return model_name(kb.config, "summarize_image", None)
+    except ModelError:
+        return model_name(kb.config, "summarize", None)
+
+
 def _process_digest(
-    kb: Kb, digest: str, prefix: str, fingerprint: str, index: dict
+    kb: Kb,
+    digest: str,
+    prefix: str,
+    text_fingerprint: str,
+    visual_fingerprint: str,
+    pdf_part: str,
 ) -> bool:
     """Summarize one source. Returns True if it was dropped. Source
-    bytes and provenance are read before the paid model call so a
-    doomed source never costs one."""
-    try:
-        text = _source_path(kb, digest).read_bytes().decode("utf-8")
-        provenance = read_provenance(kb, digest)
-    except (FileNotFoundError, UnicodeDecodeError) as exc:
-        append_log_entry(
-            kb.log, "summarize", f"{digest}: dropped (cannot read source: {exc})"
-        )
+    bytes and provenance are read, and the model called, before any
+    lock is taken; the commit window opens only once there is content
+    to write."""
+    resolved = _resolve_content(kb, digest, prefix, pdf_part)
+    if isinstance(resolved, str):
+        append_log_entry(kb.log, "summarize", f"{digest}: dropped ({resolved})")
         return True
+    prompt, attachment, step, provenance = resolved
 
-    reply = chat(kb.config, "summarize", prefix + SOURCE_DELIMITER + text)
+    if step == "summarize_image":
+        model_used = _image_model(kb)
+        fingerprint = visual_fingerprint
+    else:
+        model_used = model_name(kb.config, "summarize", None)
+        fingerprint = text_fingerprint
+
+    reply = chat(kb.config, step, prompt, model=model_used, attachment=attachment)
     parsed = parse_frontmatter(_unwrap_fence(reply))
     title = str(parsed[0].get("title", "")).strip() if parsed else ""
     reason = _drop_reason(parsed, title)
@@ -250,17 +382,21 @@ def _process_digest(
         return True
 
     reply_fields, body = parsed
-    fields = _build_fields(reply_fields, digest, provenance, kb, fingerprint)
-    content = render_frontmatter(fields, body)
+    fields = _build_fields(reply_fields, digest, provenance, model_used, fingerprint)
 
-    if digest in index:
-        page_path = index[digest][0]
-        previous = page_path.read_bytes()
-    else:
-        page_path = _claim_new_summary_path(kb, digest, title)
-        previous = None
+    with kb_lock(kb.root):
+        index = _summary_index(kb)
+        if digest in index:
+            page_path = index[digest][0]
+            previous = page_path.read_bytes()
+        else:
+            page_path = _free_summary_path(kb, digest, title)
+            previous = None
+        fields = _carry_story(fields, previous)
+        content = render_frontmatter(fields, body)
+        dropped = _commit_summary_page(kb, digest, page_path, previous, content)
 
-    if _commit_summary_page(kb, digest, page_path, previous, content):
+    if dropped:
         return True
 
     append_log_entry(kb.log, "summarize", f"{fields['title']}: {digest}")
@@ -275,15 +411,32 @@ def run(root: Path, digests: list[str] | None) -> int:
     targets = digests if digests is not None else _all_digests(kb)
     index = _summary_index(kb)
     prefix = prompt_prefix(kb)
-    fingerprint = prompt_fingerprint(prefix)
+    text_fingerprint = prompt_fingerprint(prefix)
+    visual_fingerprint = prompt_fingerprint(prefix + SOURCE_ATTACHMENT_NOTE)
 
-    remaining = [d for d in targets if index.get(d, (None, None))[1] != fingerprint]
+    try:
+        pdf_part = _pdf_part(kb.config)
+    except ModelError as exc:
+        print(f"llmwiki: summarize: {exc}", file=sys.stderr)
+        return 1
+
+    remaining = [
+        d
+        for d in targets
+        if index.get(d, (None, None))[1]
+        != _expected_fingerprint(kb, d, text_fingerprint, visual_fingerprint)
+    ]
     print(f"summarize: {len(remaining)} planned")
 
     dropped = False
     for digest in remaining:
         try:
-            dropped = _process_digest(kb, digest, prefix, fingerprint, index) or dropped
+            dropped = (
+                _process_digest(
+                    kb, digest, prefix, text_fingerprint, visual_fingerprint, pdf_part
+                )
+                or dropped
+            )
         except ModelError as exc:
             print(f"llmwiki: summarize: {exc}", file=sys.stderr)
             return 1
