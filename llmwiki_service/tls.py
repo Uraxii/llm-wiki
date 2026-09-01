@@ -35,16 +35,25 @@ def build_context(cert: str, key: str, min_version: str | None) -> ssl.SSLContex
 
     `ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)` per the
     phase's rule against hand-written cipher lists: only the minimum
-    version is set. Raises `ssl.SSLError`, `OSError`, or `ValueError`
-    on a certificate or key that does not load; the caller decides
-    whether that is a startup refusal or a logged, discarded reload.
+    version is set.
+
+    Every failure raises `ValueError` naming the setting or the path at
+    fault, so the caller has one exception type to handle and the
+    operator gets a sentence either way. `load_cert_chain` on its own
+    raises `ssl.SSLError` for a key that does not match its
+    certificate, and that error names neither file.
     """
     version = min_version or DEFAULT_MIN_VERSION
     if version not in MIN_VERSIONS:
         raise ValueError(f"[tls] min_version is not 1.2 or 1.3: {version!r}")
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     context.minimum_version = MIN_VERSIONS[version]
-    context.load_cert_chain(cert, key)
+    try:
+        context.load_cert_chain(cert, key)
+    except (ssl.SSLError, OSError) as exc:
+        raise ValueError(
+            f"[tls] cert and key do not load: {cert}, {key}: {exc}"
+        ) from exc
     return context
 
 
@@ -76,7 +85,7 @@ class ContextHolder:
         """
         try:
             new_context = build_context(cert, key, min_version)
-        except (ssl.SSLError, OSError, ValueError) as exc:
+        except ValueError as exc:
             logger.error(
                 "certificate reload failed, keeping the previous context: %s", exc
             )
@@ -132,10 +141,19 @@ def watch_certificates(
 
     Runs until `stop_event` is set. Meant to be the target of a daemon
     thread; `__main__.py` starts one before binding a socket.
+
+    The baseline advances only on a reload that took effect. A failure
+    whose cause is not a later file write, a transient `OSError` under
+    load or a momentary permission fault while a renewal tool fixes
+    ownership, is retried on every poll instead of being logged once and
+    forgotten while the service keeps serving the pre-renewal
+    certificate. A renewal that lands the cert before the key still
+    heals the same way it did: the failed poll leaves the baseline
+    alone, and the key's own write moves the mtimes again.
     """
     last = _mtimes(cert, key)
     while not stop_event.wait(interval_sec):
         current = _mtimes(cert, key)
         if current is not None and current != last:
-            holder.reload(cert, key, min_version, logger)
-            last = current
+            if holder.reload(cert, key, min_version, logger):
+                last = current

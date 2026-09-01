@@ -6,17 +6,26 @@ uvicorn process hands it too, and `health` is called directly.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import unittest
 
-from llmwiki_service import app
+from llmwiki_service import app, deployment
 
 
-def _http_scope(headers: dict[bytes, bytes], client: tuple[str, int]) -> dict:
+PROXY = ipaddress.ip_address("10.0.0.1")
+
+
+def _http_scope(
+    headers: dict[bytes, bytes] | list[tuple[bytes, bytes]],
+    client: tuple[str, int],
+) -> dict:
+    """An ASGI scope. `headers` is a list, not a mapping, so a test can
+    send the same header name twice the way a chain of proxies does."""
     return {
         "type": "http",
         "scheme": "http",
         "client": client,
-        "headers": list(headers.items()),
+        "headers": list(headers.items() if isinstance(headers, dict) else headers),
     }
 
 
@@ -53,21 +62,92 @@ class ForwardedHeaderMiddlewareTest(unittest.TestCase):
         self.assertEqual(seen["scheme"], "http")
         self.assertEqual(seen["client"], ("127.0.0.1", 12345))
 
-    def test_headers_trusted_when_the_peer_is_the_trusted_proxy(self) -> None:
-        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy="10.0.0.1")
+    def test_the_rightmost_element_wins_not_the_client_supplied_left(self) -> None:
+        # nginx's proxy_add_x_forwarded_for, and Caddy and Traefik, append
+        # the peer they observed to whatever the client sent. So a client
+        # sending "X-Forwarded-For: 6.6.6.6" arrives here as
+        # "6.6.6.6, <real client>", and the left element is the forgery.
+        # This test asserted "6.6.6.6" until the phase 2 review; it
+        # encoded the bug.
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
         scope = _http_scope(
             {b"x-forwarded-proto": b"https", b"x-forwarded-for": b"6.6.6.6, 10.0.0.1"},
             ("10.0.0.1", 12345),
         )
         seen = asyncio.run(_dispatch(middleware, scope))
         self.assertEqual(seen["scheme"], "https")
-        self.assertEqual(seen["client"][0], "6.6.6.6")
+        self.assertEqual(seen["client"][0], "10.0.0.1")
+
+    def test_a_rightmost_element_that_is_not_an_address_keeps_the_peer(self) -> None:
+        # Never let header text become a client key: FailureLimiter tracks
+        # MAX_TRACKED_CLIENTS of them, and a caller who can invent keys can
+        # saturate that table and switch rate limiting off for everyone.
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
+        scope = _http_scope(
+            {b"x-forwarded-for": b"6.6.6.6, not-an-address"}, ("10.0.0.1", 12345)
+        )
+        seen = asyncio.run(_dispatch(middleware, scope))
+        self.assertEqual(seen["client"], ("10.0.0.1", 12345))
+
+    def test_repeated_headers_are_joined_not_collapsed_to_the_last(self) -> None:
+        # Two header lines mean the same as one comma-joined line, so the
+        # rightmost element of the last line is the answer. Reading the
+        # scope's headers through dict() collapsed them instead, which is
+        # a third selection rule a caller gets to steer.
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
+        scope = _http_scope(
+            [
+                (b"x-forwarded-for", b"6.6.6.6"),
+                (b"x-forwarded-for", b"7.7.7.7, 10.0.0.1"),
+            ],
+            ("10.0.0.1", 12345),
+        )
+        seen = asyncio.run(_dispatch(middleware, scope))
+        self.assertEqual(seen["client"][0], "10.0.0.1")
+
+    def test_two_forged_lefts_from_behind_the_proxy_share_one_client(self) -> None:
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
+        first = asyncio.run(_dispatch(middleware, _http_scope(
+            {b"x-forwarded-for": b"1.1.1.1, 203.0.113.9"}, ("10.0.0.1", 1))))
+        second = asyncio.run(_dispatch(middleware, _http_scope(
+            {b"x-forwarded-for": b"2.2.2.2, 203.0.113.9"}, ("10.0.0.1", 2))))
+        self.assertEqual(first["client"][0], second["client"][0])
+        self.assertEqual(first["client"][0], "203.0.113.9")
+
+    def test_a_header_byte_that_is_not_utf8_is_not_an_exception(self) -> None:
+        # Header bytes are not UTF-8 by definition. A strict decode turned
+        # one crafted byte into a 500 before any route ran.
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
+        scope = _http_scope(
+            {b"x-forwarded-for": b"\xff", b"x-forwarded-proto": b"\xff"},
+            ("10.0.0.1", 12345),
+        )
+        seen = asyncio.run(_dispatch(middleware, scope))
+        self.assertEqual(seen["client"], ("10.0.0.1", 12345))
+        self.assertEqual(seen["scheme"], "http")
+
+    def test_a_scheme_that_is_not_http_or_https_is_ignored(self) -> None:
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
+        scope = _http_scope({b"x-forwarded-proto": b"gopher"}, ("10.0.0.1", 12345))
+        seen = asyncio.run(_dispatch(middleware, scope))
+        self.assertEqual(seen["scheme"], "http")
+
+    def test_a_hostname_trusted_proxy_never_reaches_this_middleware(self) -> None:
+        # deployment.trusted_proxy_address is the one predicate, and it
+        # returns None for a name, so the middleware only ever sees an
+        # address or None. Both directions are covered by the row 11
+        # refusal in tests/test_service_deployment.py.
+        self.assertIsNone(
+            deployment.trusted_proxy_address(
+                {"tls": {"trusted_proxy": "ingress.internal"}}
+            )
+        )
 
     def test_forged_headers_ignored_when_the_peer_is_not_the_trusted_proxy(self) -> None:
         # This is the reproduction from the phase 2 review: trusted_proxy
         # names 10.0.0.1, but the request actually arrives from 127.0.0.1.
         # A peer address check must reject it even though trusted_proxy is set.
-        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy="10.0.0.1")
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
         scope = _http_scope(
             {b"x-forwarded-proto": b"https", b"x-forwarded-for": b"6.6.6.6"},
             ("127.0.0.1", 12345),
@@ -77,7 +157,7 @@ class ForwardedHeaderMiddlewareTest(unittest.TestCase):
         self.assertEqual(seen["client"], ("127.0.0.1", 12345))
 
     def test_absent_headers_leave_the_transport_values_alone(self) -> None:
-        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy="10.0.0.1")
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
         scope = _http_scope({}, ("10.0.0.1", 12345))
         seen = asyncio.run(_dispatch(middleware, scope))
         self.assertEqual(seen["scheme"], "http")
@@ -90,7 +170,7 @@ class ForwardedHeaderMiddlewareTest(unittest.TestCase):
         # resolved client. Two different forged X-Forwarded-For values from
         # the same untrusted peer must resolve to the same client, or the
         # limiter never accumulates failures in one bucket.
-        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy="10.0.0.1")
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
         first = asyncio.run(
             _dispatch(
                 middleware,

@@ -43,8 +43,11 @@ deployment file below.
 *Trust forwarded headers only when told to.* Under `mode = "upstream"` the
 service still needs the caller's scheme and address for logging and rate
 limiting, and those arrive in `X-Forwarded-Proto` and `X-Forwarded-For`. A
-client can forge both. They are read only when `trusted_proxy` is set, and
-ignored entirely otherwise. A deployment that sets `mode = "upstream"` without
+client can forge both. They are read only when `trusted_proxy` is set, the
+request's real peer is that address, and the value read is the rightmost
+element that parses as an IP address. Rightmost because the mainstream proxy
+configuration appends the peer it observed to whatever the client sent, so
+every element to the left of the last one is still client-supplied. A deployment that sets `mode = "upstream"` without
 `trusted_proxy` gets addresses it can trust and no scheme, which is the safe
 default rather than the convenient one.
 
@@ -154,10 +157,11 @@ three fire before the file is parsed at all.
 | no pepper supplied | every token would fail to verify, silently, at request time instead of at boot |
 | no bootstrap admin token and no existing admin row | an unadministrable service |
 | `[access] write = "open"` | there is no deployment where this is intended |
+| `[tls] mode` absent, or not exactly `terminate` or `upstream` | four of the rows below only fire under a named mode, so any other value switches them all off and leaves the service on the plaintext branch, which is what the private-interface row below exists to prevent |
 | `mode = "terminate"` and the certificate or key is missing or unreadable | otherwise the failure surfaces on the first request |
 | certificate is expired at boot | it will not fix itself, and it is better known now |
 | `mode = "upstream"` and no listener address is bound to a private interface | prevents accidentally exposing the plaintext port to the network |
-| `[access] read = "open"` and `mode = "upstream"` and `trusted_proxy` is unset | every caller then arrives from the proxy's address, so `[limits]` collapses into one global bucket. Phase 3 argues it |
+| `[access] read = "open"` and `mode = "upstream"` and `trusted_proxy` is unset or is not an IP address | every caller then arrives from the proxy's address, so `[limits]` collapses into one global bucket. A hostname is refused with it: forwarded headers are trusted by comparing this value against the transport peer, which is always a literal, so a name would pass the check and be ignored by the service. Phase 3 argues it |
 | `[server] state` missing, or not writable by the running user | the token database is silently recreated empty, and every token minted before the restart reads as unknown. Phase 5 argues it |
 | any `[kbs.<name>] path` not writable by the running user | the first `search` against a never-embedded kb fails on `mkdir`, and nothing else in the deployment reports it. Phase 5 argues it |
 | a kb in `[kbs]` whose `config.toml` still holds a legacy `[endpoint]` section | the kb would keep working against whatever model the ambient environment names, and a summary written by the wrong model is a valid summary. Phase 5 argues it |

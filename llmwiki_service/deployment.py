@@ -1,7 +1,7 @@
 """The deployment file and the startup refusals that gate it.
 
 Phase 2 of docs/plans/02-llmwiki-service/phase-02-tls.md defines both the
-deployment file's keys and its 13-row refusal table in one place. This
+deployment file's keys and its 14-row refusal table in one place. This
 module is that table made runnable: a later unit calls `startup_refusals`
 once, before it binds a socket, and gets back every reason this
 deployment must not start.
@@ -9,12 +9,12 @@ deployment must not start.
 The first three refusals fire before the file is parsed at all (no
 argument, the path does not exist, the path exists and cannot be read),
 so there is no parsed dict yet for a check function to read. They are
-handled by `pre_parse_refusal`, not by the registry below. The other ten
-are a registry of small, named checks over the parsed dict: an ordered
-table instead of a 13-branch function, so a reviewer can compare it
-against the spec's table row by row.
+handled by `pre_parse_refusal`, not by the registry below. The other
+eleven are a registry of small, named checks over the parsed dict: an
+ordered table instead of a 14-branch function, so a reviewer can compare
+it against the spec's table row by row.
 
-None of the ten registry rows needs the service actually running: every
+None of the eleven registry rows needs the service actually running: every
 one is checkable from the deployment file, the filesystem, and the
 environment alone.
 """
@@ -37,11 +37,9 @@ from llmwiki_service.tokens import peppers_from_env
 
 TOKEN_DB_NAME = "tokens.sqlite"  # sits under [server] state, per phase 2
 
-# Phase 1 names LLM_WIKI_PEPPER but never names the bootstrap admin token's
-# variable, though it promises one exists ("the operator supplies two
-# secrets at startup ... the pepper, and the first admin token"). Named
-# here, following LLM_WIKI_PEPPER's shape, because row 5 below has to
-# check for it and phase 2 is where every deployment-facing name lives.
+# Named by phase 2 itself, beside the refusal that reads it. Phase 1
+# promised the variable without naming it; the spec's Secrets paragraph
+# now does, so this constant only mirrors it.
 BOOTSTRAP_ADMIN_TOKEN_ENV_VAR = "LLM_WIKI_BOOTSTRAP_ADMIN_TOKEN"
 
 USAGE = "usage: python -m llmwiki_service <deployment-file>"
@@ -81,6 +79,47 @@ def load_deployment(path: str) -> dict:
             return tomllib.load(handle)
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"malformed deployment file: {path}: {exc}") from exc
+
+
+TERMINATE = "terminate"
+UPSTREAM = "upstream"
+TLS_MODES = (TERMINATE, UPSTREAM)
+
+
+def tls_mode(deployment: dict) -> str | None:
+    """`[tls] mode`, or `None` when it is absent or is not exactly one
+    of the two modes the spec defines.
+
+    The one place this file is read for the mode. Every mode-conditioned
+    refusal and the serving path itself call this, so a value the spec
+    does not define cannot be quietly treated as "the other mode" by one
+    caller and as "not my mode" by the next.
+    """
+    mode = deployment.get("tls", {}).get("mode")
+    return mode if mode in TLS_MODES else None
+
+
+def trusted_proxy_address(
+    deployment: dict,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """`[tls] trusted_proxy` as an address, or `None` when it is unset
+    or is not a literal IP address.
+
+    The one predicate behind both the row 11 refusal and
+    `app.ForwardedHeaderMiddleware`. A hostname returns `None`: the
+    middleware compares this value against the transport peer, which is
+    always a literal, and resolving a name per request would let DNS
+    decide who is trusted. Before this was one function, a hostname
+    passed the refusal and was ignored by the middleware, so the
+    deployment read as clean while forwarded headers were dead.
+    """
+    value = deployment.get("tls", {}).get("trusted_proxy")
+    if not value:
+        return None
+    try:
+        return ipaddress.ip_address(value)
+    except (ValueError, TypeError):
+        return None
 
 
 def _writable_dir(path_str: str) -> bool:
@@ -164,13 +203,31 @@ def _check_write_open(deployment: dict, _environ: Mapping[str, str]) -> str | No
     return None
 
 
+def tls_mode_refusal(
+    deployment: dict, _environ: Mapping[str, str] | None = None
+) -> str | None:
+    """Row 7: `[tls] mode` absent, or not exactly `terminate` or
+    `upstream`.
+
+    Refusing beats defaulting. Four of the rows below only fire under a
+    named mode, so any unrecognised value silently switched them all
+    off and left the service on the plaintext branch, which is the one
+    outcome row 10 exists to prevent. `__main__._serve` calls this too,
+    so its own mode branch has no reachable fallthrough.
+    """
+    if tls_mode(deployment) is not None:
+        return None
+    mode = deployment.get("tls", {}).get("mode")
+    return f'[tls] mode is not "terminate" or "upstream": {mode!r}'
+
+
 def _check_cert_files(deployment: dict, _environ: Mapping[str, str]) -> str | None:
-    """Row 7: `mode = "terminate"` and the certificate or key is missing
+    """Row 8: `mode = "terminate"` and the certificate or key is missing
     or unreadable. Checked before the socket binds, so the failure
     surfaces at boot instead of on the first request."""
-    tls = deployment.get("tls", {})
-    if tls.get("mode") != "terminate":
+    if tls_mode(deployment) != TERMINATE:
         return None
+    tls = deployment["tls"]  # tls_mode already proved the table is there
     for setting in ("cert", "key"):
         path = tls.get(setting)
         if not path:
@@ -181,7 +238,7 @@ def _check_cert_files(deployment: dict, _environ: Mapping[str, str]) -> str | No
 
 
 def _check_cert_expiry(deployment: dict, _environ: Mapping[str, str]) -> str | None:
-    """Row 8: certificate is expired at boot.
+    """Row 9: certificate is expired at boot.
 
     Reading a certificate's expiry date requires decoding it, and the
     table has no separate row for a cert file that exists and is
@@ -195,9 +252,9 @@ def _check_cert_expiry(deployment: dict, _environ: Mapping[str, str]) -> str | N
     CPython's own test suite uses for exactly this, and has shipped
     unchanged since Python 2.7.
     """
-    tls = deployment.get("tls", {})
-    if tls.get("mode") != "terminate":
+    if tls_mode(deployment) != TERMINATE:
         return None
+    tls = deployment["tls"]  # tls_mode already proved the table is there
     cert = tls.get("cert")
     if not cert or not Path(cert).is_file():
         return None  # _check_cert_files already refuses a missing cert
@@ -212,10 +269,10 @@ def _check_cert_expiry(deployment: dict, _environ: Mapping[str, str]) -> str | N
 
 
 def _check_upstream_bind(deployment: dict, _environ: Mapping[str, str]) -> str | None:
-    """Row 9: `mode = "upstream"` and no listener address is bound to a
+    """Row 10: `mode = "upstream"` and no listener address is bound to a
     private interface. Prevents accidentally exposing the plaintext
     port to the network."""
-    if deployment.get("tls", {}).get("mode") != "upstream":
+    if tls_mode(deployment) != UPSTREAM:
         return None
     bind = deployment.get("server", {}).get("bind")
     if not bind:
@@ -228,25 +285,38 @@ def _check_upstream_bind(deployment: dict, _environ: Mapping[str, str]) -> str |
 def _check_open_read_needs_proxy(
     deployment: dict, _environ: Mapping[str, str]
 ) -> str | None:
-    """Row 10: `[access] read = "open"` and `mode = "upstream"` and
-    `trusted_proxy` is unset. Every caller then arrives from the proxy's
-    own address, so `[limits]` collapses into one shared bucket."""
-    tls = deployment.get("tls", {})
-    access = deployment.get("access", {})
+    """Row 11: `[access] read = "open"` and `mode = "upstream"` and
+    `trusted_proxy` is not a usable address. Every caller then arrives
+    from the proxy's own address, so `[limits]` collapses into one
+    shared bucket.
+
+    "Not usable", not "unset": this row and the middleware share
+    `trusted_proxy_address`, so a value the middleware will never trust
+    is refused here rather than reported clean. A hostname used to pass
+    both, which left the deployment in exactly the state this row
+    exists to prevent.
+    """
     if (
-        access.get("read") == OPEN
-        and tls.get("mode") == "upstream"
-        and not tls.get("trusted_proxy")
+        deployment.get("access", {}).get("read") != OPEN
+        or tls_mode(deployment) != UPSTREAM
+        or trusted_proxy_address(deployment) is not None
     ):
+        return None
+    # tls_mode already proved the table is there.
+    value = deployment["tls"].get("trusted_proxy")
+    if value:
         return (
-            '[access] read = "open" needs [tls] trusted_proxy set under '
-            'mode = "upstream", or every caller shares one rate limit'
+            f"[tls] trusted_proxy is not an IP address: {value!r}; it is "
+            "compared against the transport peer, which is always a literal"
         )
-    return None
+    return (
+        '[access] read = "open" needs [tls] trusted_proxy set under '
+        'mode = "upstream", or every caller shares one rate limit'
+    )
 
 
 def _check_state_writable(deployment: dict, _environ: Mapping[str, str]) -> str | None:
-    """Row 11: `[server] state` missing, or not writable by the running
+    """Row 12: `[server] state` missing, or not writable by the running
     user. An unwritable state directory silently recreates the token
     database empty, and every token minted before the restart reads as
     unknown."""
@@ -259,7 +329,7 @@ def _check_state_writable(deployment: dict, _environ: Mapping[str, str]) -> str 
 
 
 def _check_kbs_writable(deployment: dict, _environ: Mapping[str, str]) -> str | None:
-    """Row 12: any `[kbs.<name>] path` not writable by the running
+    """Row 13: any `[kbs.<name>] path` not writable by the running
     user. The first search against a never-embedded kb fails on
     `mkdir`, and nothing else in the deployment reports it."""
     for name, table in deployment.get("kbs", {}).items():
@@ -272,7 +342,7 @@ def _check_kbs_writable(deployment: dict, _environ: Mapping[str, str]) -> str | 
 def _check_kbs_legacy_endpoint(
     deployment: dict, _environ: Mapping[str, str]
 ) -> str | None:
-    """Row 13: a kb in `[kbs]` whose `config.toml` still holds a legacy
+    """Row 14: a kb in `[kbs]` whose `config.toml` still holds a legacy
     `[endpoint]` section. That kb would keep working against whatever
     model the ambient environment names, and a summary written by the
     wrong model is a valid summary.
@@ -303,7 +373,7 @@ class Check:
     run: Callable[[dict, Mapping[str, str]], str | None]
 
 
-# The ten refusals checkable against an already-parsed deployment,
+# The eleven refusals checkable against an already-parsed deployment,
 # in the table's own order, each named after that row's "Condition"
 # column so a reviewer can walk this list beside the spec.
 REGISTRY: tuple[Check, ...] = (
@@ -316,35 +386,40 @@ REGISTRY: tuple[Check, ...] = (
     Check(6, '[access] write = "open"', _check_write_open),
     Check(
         7,
+        '[tls] mode is absent, or is not "terminate" or "upstream"',
+        tls_mode_refusal,
+    ),
+    Check(
+        8,
         'mode = "terminate" and the certificate or key is missing or '
         "unreadable",
         _check_cert_files,
     ),
-    Check(8, "certificate is expired at boot", _check_cert_expiry),
+    Check(9, "certificate is expired at boot", _check_cert_expiry),
     Check(
-        9,
+        10,
         'mode = "upstream" and no listener address is bound to a '
         "private interface",
         _check_upstream_bind,
     ),
     Check(
-        10,
+        11,
         '[access] read = "open" and mode = "upstream" and trusted_proxy '
-        "is unset",
+        "is unset or is not an IP address",
         _check_open_read_needs_proxy,
     ),
     Check(
-        11,
+        12,
         "[server] state missing, or not writable by the running user",
         _check_state_writable,
     ),
     Check(
-        12,
+        13,
         "any [kbs.<name>] path not writable by the running user",
         _check_kbs_writable,
     ),
     Check(
-        13,
+        14,
         "a kb in [kbs] whose config.toml still holds a legacy "
         "[endpoint] section",
         _check_kbs_legacy_endpoint,
@@ -363,15 +438,24 @@ def check_deployment(deployment: dict, environ: Mapping[str, str]) -> list[str]:
     ]
 
 
-def startup_refusals(argv_path: str | None, environ: Mapping[str, str]) -> list[str]:
+def startup_refusals(
+    argv_path: str | None, environ: Mapping[str, str]
+) -> tuple[list[str], dict]:
     """Every reason this deployment must not start, checked before a
-    socket is bound. An empty list means clear to proceed.
+    socket is bound, and the parsed deployment they were checked
+    against. An empty list means clear to proceed.
+
+    The deployment comes back with the refusals so the caller serves
+    the file that was checked. Parsing again on the next line reopens
+    the file, and the bytes that get served are then only presumed to
+    be the bytes that passed.
 
     The three pre-parse refusals short-circuit: with no parsed
-    deployment there is nothing left in `REGISTRY` to check.
+    deployment there is nothing left in `REGISTRY` to check, and the
+    empty dict is never served because the caller stops on a refusal.
     """
     refused = pre_parse_refusal(argv_path)
     if refused is not None:
-        return [refused]
+        return [refused], {}
     deployment = load_deployment(argv_path)
-    return check_deployment(deployment, environ)
+    return check_deployment(deployment, environ), deployment
