@@ -143,12 +143,32 @@ never restyled.
 CLI against a checked-in fixture. Drive the endpoint through
 `tests/fake_endpoint.py`, never the real network.
 
-**A green suite is not evidence.** Three phases running, the delegate's
-passing tests hid a real defect each time, including one that silently
-destroyed a page while exiting 0. Before calling anything done, drive the
-runtime path by hand with inputs the tests do not use: a missing file, a
-duplicate title, a malformed reply. Prefer a real call over a fake one for
-anything that talks to a model.
+**A green suite is not evidence.** Five consecutive phases running, the
+delegate's passing tests hid a real defect each time, including one that
+silently destroyed a page while exiting 0. A green suite proves the tests
+that exist pass, not that they would catch a real bug. Before calling
+anything done, drive the runtime path by hand with inputs the tests do not
+use: a missing file, a duplicate title, a malformed reply. Prefer a real
+call over a fake one for anything that talks to a model. The gate below
+covers whether the tests are strong enough to catch a mutated line; it does
+not cover anything the tests never call, so hand-driving still applies.
+
+**The mutation testing gate measures test strength, not just test count.**
+`scripts/check-mutation-gate.py` mutates `llmwiki_service/auth.py` and
+`llmwiki_service/tokens.py` with `mutmut`, reruns `tests/test_service_auth.py`
+and `tests/test_service_tokens.py` against each mutant, and fails when a
+mutant survives that `scripts/mutation-survivor-baseline.txt` does not
+already name. Run it with:
+
+```bash
+.venv/bin/python scripts/check-mutation-gate.py
+```
+
+It ratchets rather than demands zero survivors: 61 mutants already survive
+today (one of them flaky, documented in the baseline file), and killing
+those is separate follow-up work. The gate exists to stop that count
+growing, so a new surviving mutant, meaning a test got weaker or a line
+lost its coverage, fails the run and names the mutant.
 
 **Decisions.** Every non-obvious design call gets a row in
 `docs/plans/01-llm-wiki-poc/decisions.tsv` (what, why, evidence, result),

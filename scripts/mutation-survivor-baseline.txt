@@ -1,0 +1,97 @@
+# Known mutmut survivors for llmwiki_service/auth.py and tokens.py.
+#
+# This is the mutation testing gate's ratchet: `check-mutation-gate.py`
+# fails only when a survivor appears that is NOT on this list. It does
+# not fail for the 60 survivors already here; killing those is separate
+# follow-up work, not this gate's job.
+#
+# Regenerate after deliberately killing some of these (never to hide a
+# new one):
+#   rm -rf mutants .venv/lib/*/site-packages/mutmut/__pycache__
+#   .venv/bin/python -m mutmut run
+#   .venv/bin/python -m mutmut results | sed -e 's/: survived$//' \
+#     -e 's/^[[:space:]]*//' | sort > scripts/mutation-survivor-baseline.txt
+#   (then restore this header comment, the command above overwrites it)
+#
+# Stability: each id is `<module>.<qualified_name>__mutmut_<N>`, where N
+# is assigned in the order mutmut's mutation generator visits that one
+# function. An edit inside a listed function (adding a branch, an
+# operator, a call) can renumber every mutant after it in that same
+# function, even though nothing about the surviving mutant's behavior
+# changed. An edit to an unrelated function, or anywhere outside
+# auth.py/tokens.py, does not renumber these ids. A red run after an
+# edit to a function named below is expected: regenerate the baseline,
+# read the diff, confirm every entry that changed id still represents
+# the same surviving mutation, and only then commit it.
+#
+# One entry, x__base62__mutmut_14, is flaky rather than a stable
+# survivor: it strips the "0" fill character from
+# `digits.rjust(CHECKSUM_CHARS, "0")`, and the tests only distinguish
+# that from the default space fill when a randomly generated token's
+# CRC32 checksum happens to base62-encode shorter than CHECKSUM_CHARS.
+# A clean tree with no test changes was observed to kill or survive it
+# on different runs (2 of 3 full regenerations survived it). It is
+# listed here so that coin flip cannot fail the gate on its own; a
+# deterministic test for the padding branch would kill it for good,
+# which is follow-up work, not part of this gate.
+llmwiki_service.auth.x_authorize__mutmut_17
+llmwiki_service.auth.x_authorize__mutmut_25
+llmwiki_service.auth.x_authorize__mutmut_27
+llmwiki_service.auth.x_authorize__mutmut_28
+llmwiki_service.auth.x_bearer_token__mutmut_4
+llmwiki_service.auth.xǁFailureLimiterǁblocked__mutmut_13
+llmwiki_service.auth.xǁFailureLimiterǁblocked__mutmut_6
+llmwiki_service.auth.xǁFailureLimiterǁblocked__mutmut_7
+llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_4
+llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_5
+llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_6
+llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_7
+llmwiki_service.auth.xǁFailureLimiterǁ_forget_expired__mutmut_8
+llmwiki_service.auth.xǁFailureLimiterǁrecord_failure__mutmut_10
+llmwiki_service.auth.xǁFailureLimiterǁrecord_failure__mutmut_11
+llmwiki_service.auth.xǁFailureLimiterǁrecord_failure__mutmut_8
+llmwiki_service.auth.xǁFailureLimiterǁrecord_failure__mutmut_9
+llmwiki_service.tokens.x__base62__mutmut_14
+llmwiki_service.tokens.x__base62__mutmut_15
+llmwiki_service.tokens.x_new_token__mutmut_4
+llmwiki_service.tokens.x_peppers_from_env__mutmut_19
+llmwiki_service.tokens.x_peppers_from_env__mutmut_23
+llmwiki_service.tokens.x_peppers_from_env__mutmut_6
+llmwiki_service.tokens.x_peppers_from_env__mutmut_9
+llmwiki_service.tokens.x_token_id__mutmut_1
+llmwiki_service.tokens.xǁTokenStoreǁ_connect__mutmut_5
+llmwiki_service.tokens.xǁTokenStoreǁ_connect__mutmut_6
+llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_5
+llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_6
+llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_8
+llmwiki_service.tokens.xǁTokenStoreǁlist_tokens__mutmut_9
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_10
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_11
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_2
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_20
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_21
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_23
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_24
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_4
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_5
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_6
+llmwiki_service.tokens.xǁTokenStoreǁmint__mutmut_9
+llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_11
+llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_12
+llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_8
+llmwiki_service.tokens.xǁTokenStoreǁrevoke__mutmut_9
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_15
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_18
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_19
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_8
+llmwiki_service.tokens.xǁTokenStoreǁ_stamp_use__mutmut_9
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_13
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_14
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_16
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_17
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_19
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_20
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_38
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_48
+llmwiki_service.tokens.xǁTokenStoreǁverify__mutmut_49
