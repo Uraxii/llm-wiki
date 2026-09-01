@@ -5,7 +5,11 @@ This file provides instructions and context for AI coding agents working on this
 ## Build & Test
 
 Python 3.14. Dependencies are allowed; see the Dependencies rule below for the
-bar they clear. `sqlite-vec` is the one currently in use.
+bar they clear. In use today: `sqlite-vec` for the vector store, `starlette`
+and `uvicorn` for the service, and `mutmut` for the mutation gate. Only
+`sqlite-vec` is declared in `pyproject.toml`; declaring the rest belongs to
+plan 02 phase 5, which owns packaging, so a fresh checkout needs
+`uv pip install --python .venv/bin/python starlette uvicorn mutmut` until then.
 
 **Use `.venv/bin/python`, not bare `python3`.** From phase 13 the whole CLI
 requires `sqlite-vec`: `llmwiki/vectors.py` imports it at module level and
@@ -154,21 +158,32 @@ covers whether the tests are strong enough to catch a mutated line; it does
 not cover anything the tests never call, so hand-driving still applies.
 
 **The mutation testing gate measures test strength, not just test count.**
-`scripts/check-mutation-gate.py` mutates `llmwiki_service/auth.py` and
-`llmwiki_service/tokens.py` with `mutmut`, reruns `tests/test_service_auth.py`
-and `tests/test_service_tokens.py` against each mutant, and fails when a
-mutant survives that `scripts/mutation-survivor-baseline.txt` does not
-already name. Run it with:
+`scripts/check-mutation-gate.py` mutates `llmwiki_service/auth.py`,
+`llmwiki_service/tokens.py`, and `llmwiki_service/deployment.py` with
+`mutmut`, reruns the matching `tests/test_service_*.py` files against each
+mutant, and fails when a mutant survives that
+`scripts/mutation-survivor-baseline.txt` does not already name. Run it
+with:
 
 ```bash
 .venv/bin/python scripts/check-mutation-gate.py
 ```
 
-It ratchets rather than demands zero survivors: 61 mutants already survive
-today (one of them flaky, documented in the baseline file), and killing
-those is separate follow-up work. The gate exists to stop that count
-growing, so a new surviving mutant, meaning a test got weaker or a line
-lost its coverage, fails the run and names the mutant.
+It ratchets rather than demands zero survivors: every mutant currently on
+the baseline is an equivalent mutant with a recorded reason, not a test gap,
+so killing more of them means proving a new one is also equivalent, not
+chasing the count down. The gate exists to stop the count growing, so a new
+surviving mutant, meaning a test got weaker or a line lost its coverage,
+fails the run and names the mutant.
+
+Regenerate the baseline only with `--update-baseline`, never by piping
+`mutmut results` over the file: that flag rewrites the survivor list while
+keeping the header and every entry's `# reason` comment, where the old
+piped command destroyed the header on every regeneration.
+
+```bash
+.venv/bin/python scripts/check-mutation-gate.py --update-baseline
+```
 
 **Decisions.** Every non-obvious design call gets a row in
 `docs/plans/01-llm-wiki-poc/decisions.tsv` (what, why, evidence, result),

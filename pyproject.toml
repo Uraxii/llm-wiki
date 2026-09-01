@@ -13,9 +13,10 @@ build-backend = "hatchling.build"
 
 [tool.mutmut]
 source_paths = ["llmwiki_service"]
-only_mutate = ["llmwiki_service/auth.py", "llmwiki_service/tokens.py"]
+only_mutate = ["llmwiki_service/auth.py", "llmwiki_service/tokens.py", "llmwiki_service/deployment.py"]
 pytest_add_cli_args_test_selection = [
     "tests/test_service_auth.py",
     "tests/test_service_tokens.py",
+    "tests/test_service_deployment.py",
 ]
 also_copy = ["llmwiki"]
