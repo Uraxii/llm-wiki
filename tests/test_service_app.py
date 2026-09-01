@@ -29,6 +29,43 @@ def _http_scope(
     }
 
 
+async def _call_asgi(asgi_app: app.ASGIApp, method: str, path: str) -> list[dict]:
+    """Drive a real ASGI callable the way uvicorn would: a full scope,
+    a `receive` that hands over an empty body once, and a `send` that
+    records every message the app emits."""
+    scope = {
+        "type": "http",
+        "scheme": "http",
+        "method": method,
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 1),
+        "server": ("testserver", 80),
+    }
+    messages: list[dict] = []
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        messages.append(message)
+
+    await asgi_app(scope, receive, send)
+    return messages
+
+
+def _status(messages: list[dict]) -> int:
+    return next(m["status"] for m in messages if m["type"] == "http.response.start")
+
+
+def _body(messages: list[dict]) -> bytes:
+    return b"".join(
+        m.get("body", b"") for m in messages if m["type"] == "http.response.body"
+    )
+
+
 async def _dispatch(middleware: app.ForwardedHeaderMiddleware, scope: dict) -> dict:
     seen = {}
 
@@ -195,6 +232,79 @@ class BuildAppTest(unittest.TestCase):
     def test_wraps_the_starlette_app_in_the_forwarded_header_middleware(self) -> None:
         wrapped = app.build_app(trusted_proxy=None)
         self.assertIsInstance(wrapped, app.ForwardedHeaderMiddleware)
+
+    def test_get_health_answers_ok_through_the_real_asgi_call(self) -> None:
+        # Drives the actual ASGI callable build_app returns, the same
+        # entry point uvicorn calls, so a broken route, method, or
+        # endpoint wiring shows up here and not just in a unit test of
+        # one function in isolation.
+        wrapped = app.build_app(trusted_proxy=None)
+        messages = asyncio.run(_call_asgi(wrapped, "GET", "/health"))
+        self.assertEqual(_status(messages), 200)
+        self.assertEqual(_body(messages), b"ok")
+
+    def test_the_trusted_proxy_argument_reaches_the_middleware(self) -> None:
+        wrapped = app.build_app(trusted_proxy=PROXY)
+        self.assertEqual(wrapped.trusted_proxy, PROXY)
+
+
+class ForwardedElementsTest(unittest.TestCase):
+    def test_a_comma_with_no_following_space_still_splits(self) -> None:
+        # A proxy is not required to put a space after the comma; this
+        # is exactly the wire format a chain of proxies produces.
+        elements = app.forwarded_elements(
+            [(b"x-forwarded-for", b"1.1.1.1,2.2.2.2,3.3.3.3")], b"x-forwarded-for"
+        )
+        self.assertEqual(elements, ["1.1.1.1", "2.2.2.2", "3.3.3.3"])
+
+
+class MiddlewareInitTest(unittest.TestCase):
+    def test_wraps_the_given_app_not_a_substitute(self) -> None:
+        sentinel = object()
+        middleware = app.ForwardedHeaderMiddleware(sentinel, trusted_proxy=None)
+        self.assertIs(middleware.app, sentinel)
+
+
+class PeerIsTrustedTest(unittest.TestCase):
+    def test_a_missing_client_with_a_trusted_proxy_set_is_not_trusted(self) -> None:
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
+        self.assertFalse(middleware._peer_is_trusted(None))
+
+    def test_a_peer_address_that_fails_to_parse_is_not_trusted(self) -> None:
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
+        self.assertFalse(middleware._peer_is_trusted(("not-an-address", 1)))
+
+
+class MiddlewareCallForwardsArgumentsTest(unittest.TestCase):
+    def test_receive_and_send_reach_the_wrapped_app_unchanged(self) -> None:
+        seen = {}
+
+        async def inner_app(scope, receive, send):
+            seen["receive"] = receive
+            seen["send"] = send
+
+        middleware = app.ForwardedHeaderMiddleware(app=inner_app, trusted_proxy=None)
+        receive_sentinel = object()
+        send_sentinel = object()
+        scope = _http_scope({}, ("10.0.0.1", 1))
+        asyncio.run(middleware(scope, receive_sentinel, send_sentinel))
+        self.assertIs(seen["receive"], receive_sentinel)
+        self.assertIs(seen["send"], send_sentinel)
+
+
+class ResolveLoggingTest(unittest.TestCase):
+    def test_logs_exactly_the_scheme_and_client_it_settled_on(self) -> None:
+        middleware = app.ForwardedHeaderMiddleware(app=None, trusted_proxy=PROXY)
+        scope = _http_scope(
+            {b"x-forwarded-proto": b"https", b"x-forwarded-for": b"10.0.0.1"},
+            ("10.0.0.1", 12345),
+        )
+        with self.assertLogs("llmwiki_service", level="INFO") as caught:
+            asyncio.run(_dispatch(middleware, scope))
+        self.assertEqual(
+            caught.output,
+            ["INFO:llmwiki_service:request scheme=https client=('10.0.0.1', 12345)"],
+        )
 
 
 if __name__ == "__main__":
