@@ -134,7 +134,10 @@ the token database lives, and phase 5 argues what it costs to leave it
 unmounted.
 
 Secrets are not in this file. The pepper and the bootstrap admin token arrive
-from the environment, unchanged from phase 1. `[endpoint]` is not in this file
+from the environment, unchanged from phase 1: `LLM_WIKI_PEPPER` and
+`LLM_WIKI_BOOTSTRAP_ADMIN_TOKEN`. Phase 1 promised the second one without
+naming it, which left every later phase free to guess a different name, so it
+is named here beside the refusal that reads it. `[endpoint]` is not in this file
 either. It lives in the environment in both modes, per phase 5, so it has one
 home rather than two and no precedence rule between them.
 
