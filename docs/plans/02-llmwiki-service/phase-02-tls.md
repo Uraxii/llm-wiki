@@ -140,9 +140,10 @@ Secrets are not in this file. The pepper and the bootstrap admin token arrive
 from the environment, unchanged from phase 1: `LLM_WIKI_PEPPER` and
 `LLM_WIKI_BOOTSTRAP_ADMIN_TOKEN`. Phase 1 promised the second one without
 naming it, which left every later phase free to guess a different name, so it
-is named here beside the refusal that reads it. `[endpoint]` is not in this file
-either. It lives in the environment in both modes, per phase 5, so it has one
-home rather than two and no precedence rule between them.
+is named here beside the refusal that reads it. `[endpoint]` is not in this
+file either. It lives in each kb's own `config.toml`, and this phase does not
+refuse a kb whose `config.toml` holds one: which model and endpoint a kb uses
+is that kb's business, not this file's.
 
 **Fail closed at startup.** The service refuses to start, with a message naming
 the setting or the path at fault, when any of these hold. None of them are
@@ -164,7 +165,6 @@ three fire before the file is parsed at all.
 | `[access] read = "open"` and `mode = "upstream"` and `trusted_proxy` is unset or is not an IP address | every caller then arrives from the proxy's address, so `[limits]` collapses into one global bucket. A hostname is refused with it: forwarded headers are trusted by comparing this value against the transport peer, which is always a literal, so a name would pass the check and be ignored by the service. Phase 3 argues it |
 | `[server] state` missing, or not writable by the running user | the token database is silently recreated empty, and every token minted before the restart reads as unknown. Phase 5 argues it |
 | any `[kbs.<name>] path` not writable by the running user | the first `search` against a never-embedded kb fails on `mkdir`, and nothing else in the deployment reports it. Phase 5 argues it |
-| a kb in `[kbs]` whose `config.toml` still holds a legacy `[endpoint]` section | the kb would keep working against whatever model the ambient environment names, and a summary written by the wrong model is a valid summary. Phase 5 argues it |
 
 **An unauthenticated health endpoint.** `/health` returns liveness only: no kb
 names, no version, no counts, nothing that describes the deployment. Containers

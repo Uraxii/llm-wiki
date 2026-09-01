@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from llmwiki_service import app, deployment
+from llmwiki_service import app, auth, deployment, tokens
 
 
 PROXY = ipaddress.ip_address("10.0.0.1")
@@ -29,18 +33,26 @@ def _http_scope(
     }
 
 
-async def _call_asgi(asgi_app: app.ASGIApp, method: str, path: str) -> list[dict]:
+async def _call_asgi(
+    asgi_app: app.ASGIApp,
+    method: str,
+    path: str,
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> list[dict]:
     """Drive a real ASGI callable the way uvicorn would: a full scope,
     a `receive` that hands over an empty body once, and a `send` that
-    records every message the app emits."""
+    records every message the app emits. `path` may carry a `?query`;
+    it is split off into `query_string` the way a real request line
+    would arrive already split by the time uvicorn builds a scope."""
+    raw_path, _, query = path.partition("?")
     scope = {
         "type": "http",
         "scheme": "http",
         "method": method,
-        "path": path,
-        "raw_path": path.encode(),
-        "query_string": b"",
-        "headers": [],
+        "path": raw_path,
+        "raw_path": raw_path.encode(),
+        "query_string": query.encode(),
+        "headers": headers or [],
         "client": ("127.0.0.1", 1),
         "server": ("testserver", 80),
     }
@@ -64,6 +76,11 @@ def _body(messages: list[dict]) -> bytes:
     return b"".join(
         m.get("body", b"") for m in messages if m["type"] == "http.response.body"
     )
+
+
+def _headers(messages: list[dict]) -> dict[str, str]:
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    return {k.decode().lower(): v.decode() for k, v in start["headers"]}
 
 
 async def _dispatch(middleware: app.ForwardedHeaderMiddleware, scope: dict) -> dict:
@@ -229,8 +246,32 @@ class ForwardedHeaderMiddlewareTest(unittest.TestCase):
 
 
 class BuildAppTest(unittest.TestCase):
+    """`build_app` now also wires phase 3's four read routes, so every
+    call site here needs a throwaway `TokenStore` and a pair of fresh
+    limiters. None of it is exercised for behaviour in this file:
+    `tests/test_service_routes.py` owns the routes themselves."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = tokens.TokenStore(
+            Path(self.dir.name) / "tokens.sqlite",
+            tokens.Peppers({1: b"pepper-one"}),
+        )
+        self.failure_limiter = auth.FailureLimiter()
+        self.search_limiter = auth.SearchLimiter(30)
+
+    def _build(self, trusted_proxy=None, deployment_dict=None):
+        return app.build_app(
+            trusted_proxy,
+            deployment_dict or {},
+            self.store,
+            self.failure_limiter,
+            self.search_limiter,
+        )
+
     def test_wraps_the_starlette_app_in_the_forwarded_header_middleware(self) -> None:
-        wrapped = app.build_app(trusted_proxy=None)
+        wrapped = self._build()
         self.assertIsInstance(wrapped, app.ForwardedHeaderMiddleware)
 
     def test_get_health_answers_ok_through_the_real_asgi_call(self) -> None:
@@ -238,14 +279,74 @@ class BuildAppTest(unittest.TestCase):
         # entry point uvicorn calls, so a broken route, method, or
         # endpoint wiring shows up here and not just in a unit test of
         # one function in isolation.
-        wrapped = app.build_app(trusted_proxy=None)
+        wrapped = self._build()
         messages = asyncio.run(_call_asgi(wrapped, "GET", "/health"))
         self.assertEqual(_status(messages), 200)
         self.assertEqual(_body(messages), b"ok")
 
     def test_the_trusted_proxy_argument_reaches_the_middleware(self) -> None:
-        wrapped = app.build_app(trusted_proxy=PROXY)
+        wrapped = self._build(trusted_proxy=PROXY)
         self.assertEqual(wrapped.trusted_proxy, PROXY)
+
+    def test_search_limiter_carries_the_limit_and_window_it_was_built_with(self) -> None:
+        # Not route behaviour (test_service_routes.py owns that): just
+        # confirming the fresh SearchLimiter this file hands to
+        # build_app is the real thing and not a stand-in with unset
+        # fields, since nothing else in this file inspects it directly.
+        self.assertEqual(self.search_limiter.limit, 30)
+        self.assertEqual(self.search_limiter.window_sec, auth.SEARCH_WINDOW_SEC)
+        self.assertEqual(self.search_limiter._calls, {})
+
+    def test_store_and_failure_limiter_reach_the_routes_not_a_stand_in(self) -> None:
+        # A presented token, even a garbage one, makes `authorize` call
+        # `failure_limiter.blocked` and then `store.verify` regardless
+        # of `[access] read`. Either argument arriving as anything other
+        # than the real object crashes instead of answering 401, so a
+        # clean 401 here is the proof both reached routes.make_routes.
+        deployment_dict = {"access": {"read": "open"}, "kbs": {}}
+        wrapped = self._build(deployment_dict=deployment_dict)
+        messages = asyncio.run(
+            _call_asgi(
+                wrapped, "GET", "/kb/nope/schema",
+                headers=[(b"authorization", b"Bearer not-a-real-token")],
+            )
+        )
+        self.assertEqual(_status(messages), 401)
+
+    def test_an_unmatched_path_answers_json_not_found(self) -> None:
+        # Starlette's router raises HTTPException(404) before any route
+        # in routes.py runs; app._router_error must catch that and
+        # answer the same not_found body the routes use, not the
+        # router's own plain-text default.
+        wrapped = self._build()
+        messages = asyncio.run(_call_asgi(wrapped, "GET", "/no/such/route"))
+        self.assertEqual(_status(messages), 404)
+        self.assertEqual(_headers(messages)["content-type"], "application/json")
+        self.assertEqual(json.loads(_body(messages)), {"error": "not_found"})
+
+    def test_a_disallowed_method_answers_json_method_not_allowed(self) -> None:
+        wrapped = self._build()
+        messages = asyncio.run(_call_asgi(wrapped, "POST", "/health"))
+        self.assertEqual(_status(messages), 405)
+        self.assertEqual(_headers(messages)["content-type"], "application/json")
+        self.assertEqual(
+            json.loads(_body(messages)), {"error": "method_not_allowed"}
+        )
+
+    def test_search_limiter_argument_reaches_make_routes_unchanged(self) -> None:
+        # A wiring-only proof, deliberately not routed through a real
+        # request: driving search_limiter through the search route
+        # would need to call SearchLimiter.check for real, which is
+        # tests/test_service_routes.py's job (routes.py is outside the
+        # mutation gate's mutated set, so a partial call path here would
+        # only add noise for that class's own mutants without proving
+        # anything build_app itself does not already guarantee: the
+        # exact object reaches make_routes.
+        with mock.patch.object(app.routes, "make_routes", return_value=[]) as made:
+            self._build()
+        made.assert_called_once_with(
+            {}, self.store, self.failure_limiter, self.search_limiter
+        )
 
 
 class ForwardedElementsTest(unittest.TestCase):

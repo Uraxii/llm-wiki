@@ -1,7 +1,7 @@
 """The deployment file and the startup refusals that gate it.
 
 Phase 2 of docs/plans/02-llmwiki-service/phase-02-tls.md defines both the
-deployment file's keys and its 14-row refusal table in one place. This
+deployment file's keys and its 13-row refusal table in one place. This
 module is that table made runnable: a later unit calls `startup_refusals`
 once, before it binds a socket, and gets back every reason this
 deployment must not start.
@@ -9,12 +9,12 @@ deployment must not start.
 The first three refusals fire before the file is parsed at all (no
 argument, the path does not exist, the path exists and cannot be read),
 so there is no parsed dict yet for a check function to read. They are
-handled by `pre_parse_refusal`, not by the registry below. The other
-eleven are a registry of small, named checks over the parsed dict: an
-ordered table instead of a 14-branch function, so a reviewer can compare
-it against the spec's table row by row.
+handled by `pre_parse_refusal`, not by the registry below. The other ten
+are a registry of small, named checks over the parsed dict: an ordered
+table instead of a 13-branch function, so a reviewer can compare it
+against the spec's table row by row.
 
-None of the eleven registry rows needs the service actually running: every
+None of the ten registry rows needs the service actually running: every
 one is checkable from the deployment file, the filesystem, and the
 environment alone.
 """
@@ -31,7 +31,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from llmwiki.core import load_config
 from llmwiki_service.auth import OPEN
 from llmwiki_service.tokens import peppers_from_env
 
@@ -339,30 +338,6 @@ def _check_kbs_writable(deployment: dict, _environ: Mapping[str, str]) -> str | 
     return None
 
 
-def _check_kbs_legacy_endpoint(
-    deployment: dict, _environ: Mapping[str, str]
-) -> str | None:
-    """Row 14: a kb in `[kbs]` whose `config.toml` still holds a legacy
-    `[endpoint]` section. That kb would keep working against whatever
-    model the ambient environment names, and a summary written by the
-    wrong model is a valid summary.
-
-    Reuses `llmwiki.core.load_config`, the kb's one config parser. A
-    malformed `config.toml` raises `ValueError` from that call, the same
-    as it does for the CLI, rather than folding into this refusal list.
-    """
-    for name, table in deployment.get("kbs", {}).items():
-        path = table.get("path") if isinstance(table, dict) else None
-        if not path:
-            continue
-        if "endpoint" in load_config(Path(path)):
-            return (
-                f"[kbs.{name}] config.toml still has a legacy [endpoint] "
-                f"section: {path}"
-            )
-    return None
-
-
 @dataclass(frozen=True)
 class Check:
     """One row of the phase 2 refusal table, numbered as it appears
@@ -373,9 +348,9 @@ class Check:
     run: Callable[[dict, Mapping[str, str]], str | None]
 
 
-# The eleven refusals checkable against an already-parsed deployment,
-# in the table's own order, each named after that row's "Condition"
-# column so a reviewer can walk this list beside the spec.
+# The ten refusals checkable against an already-parsed deployment, in
+# the table's own order, each named after that row's "Condition" column
+# so a reviewer can walk this list beside the spec.
 REGISTRY: tuple[Check, ...] = (
     Check(4, "no pepper supplied", _check_pepper),
     Check(
@@ -417,12 +392,6 @@ REGISTRY: tuple[Check, ...] = (
         13,
         "any [kbs.<name>] path not writable by the running user",
         _check_kbs_writable,
-    ),
-    Check(
-        14,
-        "a kb in [kbs] whose config.toml still holds a legacy "
-        "[endpoint] section",
-        _check_kbs_legacy_endpoint,
     ),
 )
 

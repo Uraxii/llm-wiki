@@ -1,4 +1,4 @@
-"""The deployment file parser and the 14-row startup refusal table."""
+"""The deployment file parser and the 13-row startup refusal table."""
 from __future__ import annotations
 
 import os
@@ -587,40 +587,6 @@ class KbsWritableCheckTest(DeploymentTestBase):
         self.assertIsNone(deployment._check_kbs_writable({}, {}))
 
 
-class KbsLegacyEndpointCheckTest(DeploymentTestBase):
-    def test_legacy_endpoint_section_refused(self) -> None:
-        (self.kb / "config.toml").write_text('[endpoint]\nurl = "http://x"\n')
-        depl = self.terminate_deployment()
-        message = deployment._check_kbs_legacy_endpoint(depl, {})
-        self.assertIsNotNone(message)
-        self.assertIn("demo", message)
-        self.assertIn(str(self.kb), message)
-
-    def test_no_config_toml_not_refused(self) -> None:
-        self.assertIsNone(
-            deployment._check_kbs_legacy_endpoint(self.terminate_deployment(), {})
-        )
-
-    def test_config_toml_without_endpoint_not_refused(self) -> None:
-        (self.kb / "config.toml").write_text('[models]\nsummarize = "x"\n')
-        self.assertIsNone(
-            deployment._check_kbs_legacy_endpoint(self.terminate_deployment(), {})
-        )
-
-    def test_no_kbs_table_is_not_refused(self) -> None:
-        self.assertIsNone(deployment._check_kbs_legacy_endpoint({}, {}))
-
-    def test_an_entry_with_no_path_does_not_stop_the_scan(self) -> None:
-        """A kb entry with no path must not `break` the loop: a legacy
-        section on a later kb has to be found regardless."""
-        (self.kb / "config.toml").write_text('[endpoint]\nurl = "http://x"\n')
-        depl = self.terminate_deployment()
-        depl["kbs"] = {"broken": {}, "demo": {"path": str(self.kb)}}
-        message = deployment._check_kbs_legacy_endpoint(depl, {})
-        self.assertIsNotNone(message)
-        self.assertIn("demo", message)
-
-
 class CheckDeploymentTest(DeploymentTestBase):
     def test_a_clean_deployment_has_no_refusals(self) -> None:
         depl = self.terminate_deployment()
@@ -650,8 +616,8 @@ class CheckDeploymentTest(DeploymentTestBase):
         self.assertIn(str(self.state), joined)
         self.assertIn(str(self.kb), joined)
 
-    def test_registry_covers_exactly_the_eleven_parsed_dict_rows(self) -> None:
-        self.assertEqual([check.row for check in deployment.REGISTRY], list(range(4, 15)))
+    def test_registry_covers_exactly_the_ten_parsed_dict_rows(self) -> None:
+        self.assertEqual([check.row for check in deployment.REGISTRY], list(range(4, 14)))
 
 
 class StartupRefusalsTest(DeploymentTestBase):
