@@ -350,44 +350,33 @@ def status(root: Path) -> int:
 def search(root: Path, query: str, n: int = TOP_K, kind: str | None = None) -> int:
     """CLI `search`."""
     kb = Kb(root)
-    model_id = _model_id(kb)
-    conn = _connect(kb, model_id) if model_id is not None else None
     try:
-        stale, _to_delete, seen = _plan(kb, conn)
-        if stale:
+        ranking = rank(kb, query, n, kind)
+    except (StaleVectors, NoEmbedModel) as exc:
+        print(
+            f"llmwiki: search: {exc.missing} pages without a current "
+            "vector; run embed first",
+            file=sys.stderr,
+        )
+        return 1
+    except ModelError as exc:
+        if isinstance(exc, RankModelError) and exc.unsummarized:
             print(
-                f"llmwiki: search: {len(stale)} pages without a current "
-                "vector; run embed first",
+                f"llmwiki: search: {exc.unsummarized} sources without a "
+                "summary page",
                 file=sys.stderr,
             )
-            return 1
-        missing = _unsummarized(kb, seen)
-        if missing:
-            print(
-                f"llmwiki: search: {len(missing)} sources without a summary page",
-                file=sys.stderr,
-            )
+        print(f"llmwiki: search: {exc}", file=sys.stderr)
+        return 2
 
-        try:
-            (vector,) = embed(kb.config, [query])
-        except ModelError as exc:
-            print(f"llmwiki: search: {exc}", file=sys.stderr)
-            return 2
-
-        for score, name, title in _nearest(conn, vector, n, kind):
-            path = kb.wiki / name
-            try:
-                stat = path.stat()
-            except FileNotFoundError:
-                continue  # row survives from an embed; page removed since
-            updated = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime(
-                TIMESTAMP_FORMAT
-            )
-            print(f"{score:.2f}\t{name}\t{flatten(title)}\t{updated}\t{stat.st_size}")
-        return 0
-    finally:
-        if conn is not None:
-            conn.close()
+    if ranking.unsummarized:
+        print(
+            f"llmwiki: search: {ranking.unsummarized} sources without a summary page",
+            file=sys.stderr,
+        )
+    for hit in ranking.hits:
+        print(f"{hit.score:.2f}\t{hit.name}\t{hit.title}\t{hit.updated}\t{hit.size}")
+    return 0
 
 
 def neighbours(kb: Kb, path: Path, kind: str, n: int = TOP_K) -> list[tuple[float, Path]]:
@@ -431,3 +420,108 @@ def neighbours(kb: Kb, path: Path, kind: str, n: int = TOP_K) -> list[tuple[floa
         if len(results) == n:
             break
     return results
+
+
+# `rank` and its return/error types sit here, after every earlier symbol,
+# so adding them shifts no line number `docs/plans/**/*.md` already cites
+# (phase-03-read-endpoints.md pins several against this file's pre-split
+# layout). Do not move this block back up top on tidiness grounds; that
+# reshuffle is exactly what scripts/check-plan-citations.py exists to
+# catch, and fixing the citations is out of scope for this change.
+from typing import NamedTuple  # noqa: E402
+
+
+class Hit(NamedTuple):
+    """One ranked page, as `rank` returns it."""
+
+    score: float  # raw cosine similarity, unrounded; `search` formats to 2dp
+    name: str  # the page filename, e.g. "cross-site-request-forgery.md"
+    title: str  # already through core.flatten, as `search` prints it
+    updated: str  # TIMESTAMP_FORMAT, from st_mtime, UTC
+    size: int  # st_size
+
+
+class Ranking(NamedTuple):
+    """`rank`'s return: `hits` best first, at most `n`. `unsummarized`
+    is the count of sources with no summary page; `search` warns on
+    it, the service ignores it."""
+
+    hits: list[Hit]
+    unsummarized: int
+
+
+class StaleVectors(Exception):
+    """Raised by `rank` when one or more pages lack a current vector.
+    `missing` is the count, needed verbatim by `search`'s warning line
+    and by the service's 503 body."""
+
+    def __init__(self, missing: int) -> None:
+        super().__init__(f"{missing} pages without a current vector")
+        self.missing = missing
+
+
+class NoEmbedModel(Exception):
+    """Raised by `rank` when `[models] embed` is unset: `_model_id`
+    then returns `None`, so `_plan` marks every page stale for a
+    reason `StaleVectors` would misname. `missing` carries the same
+    count `StaleVectors` would, since `search`'s warning line reads
+    identically either way; the service's 501 body does not use it."""
+
+    def __init__(self, missing: int) -> None:
+        super().__init__(f"{missing} pages without a current vector")
+        self.missing = missing
+
+
+def rank(kb: Kb, query: str, n: int = TOP_K, kind: str | None = None) -> Ranking:
+    """At most `n` pages nearest `query`, best first. Fewer when a row
+    survives an embed whose page has since been unlinked; those are
+    skipped, exactly as `search` skips them today. Makes ONE paid
+    embedding call, for the query, and only after the staleness check
+    passes. Raises StaleVectors, carrying `missing`, the number of
+    pages lacking a current vector, because the route's 503 body has to
+    report it; NoEmbedModel when [models] embed is unset; and ModelError
+    from the endpoint. ONE _plan walk and ONE connection, per _plan's
+    own contract at vectors.py:180."""
+    model_id = _model_id(kb)
+    conn = _connect(kb, model_id) if model_id is not None else None
+    try:
+        stale, _to_delete, seen = _plan(kb, conn)
+        if stale:
+            if model_id is None:
+                raise NoEmbedModel(len(stale))
+            raise StaleVectors(len(stale))
+        unsummarized = len(_unsummarized(kb, seen))
+
+        try:
+            (vector,) = embed(kb.config, [query])
+        except ModelError as exc:
+            raise RankModelError(unsummarized, exc) from exc
+
+        hits: list[Hit] = []
+        for score, name, title in _nearest(conn, vector, n, kind):
+            path = kb.wiki / name
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue  # row survives from an embed; page removed since
+            updated = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime(
+                TIMESTAMP_FORMAT
+            )
+            hits.append(Hit(score, name, flatten(title), updated, stat.st_size))
+        return Ranking(hits, unsummarized)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+class RankModelError(ModelError):
+    """Raised by `rank` in place of the bare `ModelError` its own
+    `embed` call raised, so `unsummarized`, already computed before
+    that call, survives the failure instead of being lost with the
+    stack. `str` stays byte identical to the wrapped error's message:
+    `search` prints it unchanged, and the service's `except ModelError`
+    still matches and reads the same text."""
+
+    def __init__(self, unsummarized: int, cause: ModelError) -> None:
+        super().__init__(str(cause))
+        self.unsummarized = unsummarized
