@@ -561,6 +561,19 @@ class VectorsTest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.missing, 1)
 
+    def test_rank_raises_no_embed_model_on_an_empty_wiki(self) -> None:
+        """An empty wiki has no stale pages, so the model check must
+        run before the staleness check or rank falls through to a
+        paid embed call with no model configured (the defect this
+        test pins)."""
+        (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\n')
+        from llmwiki.core import Kb
+
+        with self.assertRaises(vectors.NoEmbedModel) as ctx:
+            vectors.rank(Kb(self.root), "query", n=5)
+
+        self.assertEqual(ctx.exception.missing, 0)
+
     def test_rank_propagates_model_error_from_the_endpoint(self) -> None:
         self._write_page("north", "North Page")
 

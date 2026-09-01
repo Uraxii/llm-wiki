@@ -202,8 +202,11 @@ class RateLimitTest(unittest.TestCase):
     def test_repeated_failures_are_rate_limited(self) -> None:
         for _ in range(auth.MAX_FAILURES_PER_WINDOW):
             self.assertIs(self.gate(bearer("rubbish")), auth.UNAUTHORIZED)
-        self.assertIs(self.gate(bearer("rubbish")), auth.RATE_LIMITED)
-        self.assertIs(self.gate(bearer(self.token)), auth.RATE_LIMITED)
+        refusal = self.gate(bearer("rubbish"))
+        self.assertEqual(refusal.reason, "rate_limited")
+        self.assertIsInstance(refusal.retry_after, int)
+        self.assertGreater(refusal.retry_after, 0)
+        self.assertEqual(self.gate(bearer(self.token)).reason, "rate_limited")
 
     def test_one_caller_cannot_lock_out_another(self) -> None:
         for _ in range(auth.MAX_FAILURES_PER_WINDOW + 1):
@@ -214,8 +217,15 @@ class RateLimitTest(unittest.TestCase):
         for _ in range(auth.MAX_FAILURES_PER_WINDOW * 3):
             self.assertEqual(self.gate(bearer(self.token)).label, "laptop")
 
+    def test_unauthorized_carries_no_retry_after(self) -> None:
+        self.assertIsNone(auth.UNAUTHORIZED.retry_after)
+
     def test_the_refusal_is_distinct_from_an_auth_failure(self) -> None:
-        self.assertNotEqual(auth.RATE_LIMITED, auth.UNAUTHORIZED)
+        for _ in range(auth.MAX_FAILURES_PER_WINDOW):
+            self.gate(bearer("rubbish"))
+        limited = self.gate(bearer("rubbish"))
+        self.assertNotEqual(limited, auth.UNAUTHORIZED)
+        self.assertNotEqual(limited.reason, auth.UNAUTHORIZED.reason)
 
 
 class FailureLimiterTest(unittest.TestCase):
@@ -223,11 +233,11 @@ class FailureLimiterTest(unittest.TestCase):
         limiter = auth.FailureLimiter(limit=2, window_sec=60)
         limiter.record_failure("peer", now=100.0)
         limiter.record_failure("peer", now=101.0)
-        self.assertTrue(limiter.blocked("peer", now=102.0))
-        self.assertFalse(limiter.blocked("peer", now=161.0))
+        self.assertEqual(limiter.retry_after("peer", now=102.0), 58)
+        self.assertIsNone(limiter.retry_after("peer", now=161.0))
 
     def test_an_unseen_caller_is_never_blocked(self) -> None:
-        self.assertFalse(auth.FailureLimiter().blocked("stranger", now=0.0))
+        self.assertIsNone(auth.FailureLimiter().retry_after("stranger", now=0.0))
 
     def test_the_open_window_boundary_itself_is_not_blocked(self) -> None:
         """A window is open while `moment - started < window_sec`,
@@ -235,28 +245,36 @@ class FailureLimiterTest(unittest.TestCase):
         `window_sec` is already outside the window, not inside it."""
         limiter = auth.FailureLimiter(limit=1, window_sec=60)
         limiter.record_failure("peer", now=0.0)
-        self.assertFalse(limiter.blocked("peer", now=60.0))
+        self.assertIsNone(limiter.retry_after("peer", now=60.0))
+
+    def test_retry_after_is_one_whole_second_at_the_window_end(self) -> None:
+        """The last sub-second slice of an open window still refuses,
+        and the wait it reports rounds up to a whole second rather than
+        down to zero. Mirrors `SearchLimiter`'s test of the same floor."""
+        limiter = auth.FailureLimiter(limit=1, window_sec=60)
+        limiter.record_failure("peer", now=0.0)
+        self.assertEqual(limiter.retry_after("peer", now=59.5), 1)
 
     def test_an_unseen_client_at_zero_limit_is_measured_from_time_zero(self) -> None:
         limiter = auth.FailureLimiter(limit=0, window_sec=60)
-        self.assertFalse(limiter.blocked("stranger", now=60.0))
+        self.assertIsNone(limiter.retry_after("stranger", now=60.0))
 
     def test_an_unseen_client_has_no_recorded_failures(self) -> None:
         limiter = auth.FailureLimiter(limit=1, window_sec=60)
-        self.assertFalse(limiter.blocked("stranger", now=0.0))
+        self.assertIsNone(limiter.retry_after("stranger", now=0.0))
 
     def test_a_fresh_window_after_reset_starts_its_count_at_one(self) -> None:
         limiter = auth.FailureLimiter(limit=2, window_sec=60)
         limiter.record_failure("peer", now=0.0)
         limiter.record_failure("peer", now=0.0)
         limiter.record_failure("peer", now=100.0)  # window resets here
-        self.assertFalse(limiter.blocked("peer", now=100.0))
+        self.assertIsNone(limiter.retry_after("peer", now=100.0))
 
     def test_the_window_resets_at_exactly_the_boundary_not_after_it(self) -> None:
         limiter = auth.FailureLimiter(limit=1, window_sec=60)
         limiter.record_failure("peer", now=0.0)
         limiter.record_failure("peer", now=60.0)
-        self.assertTrue(limiter.blocked("peer", now=61.0))
+        self.assertEqual(limiter.retry_after("peer", now=61.0), 59)
 
     def test_a_still_open_window_is_not_evicted_when_a_new_client_arrives(self) -> None:
         limiter = auth.FailureLimiter(window_sec=60)
@@ -306,11 +324,11 @@ class FailureLimiterTest(unittest.TestCase):
         limiter = auth.FailureLimiter(limit=1, window_sec=60)
         with mock.patch.object(auth, "MAX_TRACKED_CLIENTS", 20):
             limiter.record_failure("victim", now=0.0)
-            self.assertTrue(limiter.blocked("victim", now=0.0))
+            self.assertIsNotNone(limiter.retry_after("victim", now=0.0))
             for index in range(200):
                 limiter.record_failure(f"flood-{index}", now=0.0)
             self.assertLessEqual(len(limiter.tracked()), 20)
-            self.assertTrue(limiter.blocked("victim", now=0.0))
+            self.assertIsNotNone(limiter.retry_after("victim", now=0.0))
 
 
 class SearchLimiterTest(unittest.TestCase):
@@ -350,15 +368,27 @@ class SearchLimiterTest(unittest.TestCase):
             self.assertIsNone(limiter.check("late", now=10.0))
             self.assertIsNotNone(limiter.check("late", now=10.0))
 
-    def test_a_caller_at_a_saturated_table_goes_untracked(self) -> None:
-        """The table saturates at the cap, not one caller past it. An
-        untracked caller is unlimited for that stretch, the deliberate
-        cut that beats evicting a live window."""
+    def test_a_caller_at_a_saturated_table_is_refused_not_admitted(self) -> None:
+        """The table saturates at the cap, not one caller past it. A
+        caller this table cannot track is refused with a positive
+        Retry-After, never let through: an untracked-and-unlimited
+        caller would let a flood of distinct addresses disable the
+        budget for everyone."""
         limiter = auth.SearchLimiter(1, window_sec=10)
         with mock.patch.object(auth, "MAX_TRACKED_SEARCH_CLIENTS", 1):
             self.assertIsNone(limiter.check("first", now=0.0))
-            self.assertIsNone(limiter.check("second", now=0.0))
-            self.assertIsNone(limiter.check("second", now=0.0))
+            second = limiter.check("second", now=0.0)
+            self.assertIsInstance(second, int)
+            self.assertGreater(second, 0)
+            self.assertEqual(limiter.check("second", now=0.0), second)
+
+    def test_a_zero_limit_refuses_every_call_and_never_raises(self) -> None:
+        """Mirrors `FailureLimiter`'s own limit-0 test. `limit=0` used
+        to insert an empty deque and then index its first element,
+        raising `IndexError` on the very first call."""
+        result = auth.SearchLimiter(0).check("peer", now=0.0)
+        self.assertIsInstance(result, int)
+        self.assertGreater(result, 0)
 
 
 class RequiredClientTest(unittest.TestCase):

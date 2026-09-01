@@ -51,6 +51,24 @@ async def _router_error(request: Request, exc: HTTPException) -> Response:
     return JSONResponse({"error": code}, status_code=exc.status_code)
 
 
+async def _internal_error(request: Request, exc: Exception) -> Response:
+    """Registered under the `Exception` key, so `build_middleware_stack`
+    hands it to `ServerErrorMiddleware` as its `handler` instead of
+    that middleware's own default, which answers plain text. This is the
+    catch-all for a fault no route or `_router_error` handles itself,
+    `sqlite3.OperationalError: database is locked` after a read route's
+    5s busy timeout included, since read routes take no kb lock while a
+    writer sweeps.
+
+    `ServerErrorMiddleware` always re-raises `exc` once this returns
+    (starlette/middleware/errors.py: "We always continue to raise the
+    exception... allows servers to log the error"), so this only
+    changes the response body; the traceback still reaches whatever
+    wraps the ASGI call, uvicorn's own logger in production.
+    """
+    return JSONResponse({"error": "internal_error"}, status_code=500)
+
+
 SCHEMES = ("http", "https")
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -173,6 +191,9 @@ def build_app(
             Route("/health", health, methods=["GET"]),
             *routes.make_routes(deployment, store, failure_limiter, search_limiter),
         ],
-        exception_handlers={HTTPException: _router_error},
+        exception_handlers={
+            HTTPException: _router_error,
+            Exception: _internal_error,
+        },
     )
     return ForwardedHeaderMiddleware(app, trusted_proxy)

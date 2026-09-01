@@ -25,6 +25,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -83,7 +84,10 @@ async def _call(
         "type": "http",
         "scheme": "http",
         "method": method,
-        "path": raw_path,
+        # uvicorn percent-decodes the target into "path" and keeps
+        # "raw_path" as the wire bytes (h11_impl.py and
+        # httptools_impl.py both call unquote(raw_path) for "path").
+        "path": unquote(raw_path),
         "raw_path": raw_path.encode(),
         "query_string": query.encode(),
         "headers": headers or [],
@@ -239,7 +243,12 @@ class PageRouteTest(RouteTestCase):
 
     async def test_a_literal_or_decoded_separator_404s_from_the_router_itself(self) -> None:
         wrapped = self.build()
-        for path in ("/kb/demo/page/../config.toml", "/kb/demo/page/sub/page.md"):
+        for path in (
+            "/kb/demo/page/../config.toml",
+            "/kb/demo/page/sub/page.md",
+            "/kb/demo/page/%2E%2E%2Fconfig.toml",
+            "/kb/demo/page/%2Fetc%2Fpasswd",
+        ):
             status, _, _ = await _call(wrapped, "GET", path)
             self.assertEqual(status, 404, path)
 
@@ -319,6 +328,48 @@ class ListRouteTest(RouteTestCase):
         entries = {e["name"]: e for e in json.loads(body)["pages"]}
         self.assertIsNone(entries["broken.md"]["kind"])
         self.assertIsNone(entries["broken.md"]["title"])
+
+    async def test_a_directory_named_dot_md_lists_with_null_kind_and_title(self) -> None:
+        # wiki/ is the user's agent's to populate, and the spec lets it
+        # hold a subdirectory. glob("*.md") matches by name, not type.
+        _write_page(self.kb, "good.md", title="Good")
+        (self.kb / "wiki" / "archive.md").mkdir()
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/list")
+        self.assertEqual(status, 200)
+        entries = {e["name"]: e for e in json.loads(body)["pages"]}
+        self.assertIsNone(entries["archive.md"]["kind"])
+        self.assertIsNone(entries["archive.md"]["title"])
+        self.assertEqual(entries["good.md"]["title"], "Good")
+
+    async def test_a_name_whose_stat_fails_is_skipped_and_the_listing_goes_on(self) -> None:
+        # What an unlink racing the glob looks like from inside the
+        # loop: the name is in `window`, `stat()` then raises. A
+        # dangling symlink reproduces it deterministically, since
+        # glob("*.md") matches by name and never follows the link.
+        os.symlink(self.kb / "wiki" / "nowhere.md", self.kb / "wiki" / "a-gone.md")
+        _write_page(self.kb, "zz-good.md", title="Good")
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/list")
+        self.assertEqual(status, 200)
+        entries = {e["name"]: e for e in json.loads(body)["pages"]}
+        self.assertNotIn("a-gone.md", entries)
+        self.assertEqual(entries["zz-good.md"]["title"], "Good")
+
+    async def test_an_unreadable_page_lists_with_null_kind_and_title(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permissions")
+        _write_page(self.kb, "good.md", title="Good")
+        page = _write_page(self.kb, "locked.md")
+        page.chmod(0o000)
+        self.addCleanup(page.chmod, 0o644)
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/list")
+        self.assertEqual(status, 200)
+        entries = {e["name"]: e for e in json.loads(body)["pages"]}
+        self.assertIsNone(entries["locked.md"]["kind"])
+        self.assertIsNone(entries["locked.md"]["title"])
+        self.assertEqual(entries["good.md"]["title"], "Good")
 
     async def test_kind_filter_returns_only_that_kind(self) -> None:
         _write_page(self.kb, "a.md", kind="topic")
@@ -416,6 +467,16 @@ class SearchRouteTest(RouteTestCase):
         self.assertEqual(status, 501)
         self.assertEqual(json.loads(body), {"error": "no_embed_model"})
 
+    async def test_empty_wiki_with_no_embed_model_still_answers_501(self) -> None:
+        # No _write_page call at all: `rank`'s NoEmbedModel check runs
+        # before the staleness check, so a wiki with zero pages raises
+        # it too, per vectors.py's own docstring.
+        _write_kb(self.kb)  # no [models] embed at all
+        wrapped = self.build()
+        status, body, _ = await _call(wrapped, "GET", "/kb/demo/search?q=x")
+        self.assertEqual(status, 501)
+        self.assertEqual(json.loads(body), {"error": "no_embed_model"})
+
     async def test_model_error_answers_502(self) -> None:
         wrapped = self.build()
         with mock.patch(
@@ -459,6 +520,88 @@ class SearchRouteTest(RouteTestCase):
         self.assertEqual(status, 502)
         self.assertNotIn(str(self.kb).encode(), body)
         self.assertNotIn(b"demo", body)
+
+
+class UnhandledExceptionTest(RouteTestCase):
+    """A fault outside the closed error set, `sqlite3.OperationalError`
+    after a busy timeout among them: app.py's `Exception` handler
+    answers JSON instead of starlette's default plain text, and
+    `ServerErrorMiddleware` still re-raises afterward so the fault
+    reaches whatever wraps the ASGI call (uvicorn's own logger in
+    production)."""
+
+    async def test_a_bare_exception_answers_json_internal_error_and_still_propagates(
+        self,
+    ) -> None:
+        wrapped = self.build()
+        scope = {
+            "type": "http",
+            "scheme": "http",
+            "method": "GET",
+            "path": "/kb/demo/search",
+            "raw_path": b"/kb/demo/search",
+            "query_string": b"q=x",
+            "headers": [],
+            "client": ("203.0.113.5", 1),
+            "server": ("testserver", 80),
+        }
+        messages: list[dict] = []
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict) -> None:
+            messages.append(message)
+
+        with mock.patch(
+            "llmwiki_service.routes.rank",
+            side_effect=RuntimeError("simulated unhandled fault"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await wrapped(scope, receive, send)
+
+        start = next(m for m in messages if m["type"] == "http.response.start")
+        body = b"".join(
+            m.get("body", b"") for m in messages if m["type"] == "http.response.body"
+        )
+        headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+        self.assertEqual(start["status"], 500)
+        self.assertEqual(json.loads(body), {"error": "internal_error"})
+        self.assertEqual(headers["content-type"], "application/json")
+
+
+class SearchLimiterKeyIgnoresAccessSpellingTest(RouteTestCase):
+    """`limiter_key` comes from the auth result, never a second read of
+    `[access] read`: two different valid tokens must not share one
+    address-keyed bucket, whatever that setting is spelled or left
+    unset."""
+
+    async def _two_tokens_get_independent_budgets(self, access: dict) -> None:
+        wrapped = self.build(access=access, search_limiter=auth.SearchLimiter(1))
+        token_a = self.store.mint("a-key", "reader")
+        token_b = self.store.mint("b-key", "reader")
+        with mock.patch(
+            "llmwiki_service.routes.rank",
+            return_value=Ranking(hits=[], unsummarized=0),
+        ):
+            first = await _call(
+                wrapped, "GET", "/kb/demo/search?q=x", headers=_bearer(token_a)
+            )
+            self.assertEqual(first[0], 200)
+            second = await _call(
+                wrapped, "GET", "/kb/demo/search?q=x", headers=_bearer(token_b)
+            )
+            self.assertEqual(second[0], 200)
+
+    async def test_two_tokens_with_access_read_absent(self) -> None:
+        await self._two_tokens_get_independent_budgets(
+            {"write": "token", "admin": "token"}
+        )
+
+    async def test_two_tokens_with_read_spelled_with_a_capital_t(self) -> None:
+        await self._two_tokens_get_independent_budgets(
+            {"read": "Token", "write": "token", "admin": "token"}
+        )
 
 
 class SearchLimiterUnitTest(unittest.TestCase):
@@ -655,6 +798,9 @@ class RefusalPerRouteTest(RouteTestCase):
                 )
                 self.assertEqual(blocked[0], 429)
                 self.assertEqual(json.loads(blocked[1]), {"error": "rate_limited"})
+                # Every 429 carries the header, per the module docstring's
+                # refusal table. KeyError here means the route dropped it.
+                self.assertRegex(blocked[2]["retry-after"], r"^[1-9][0-9]*$")
                 other = await _call(
                     wrapped,
                     "GET",
