@@ -66,6 +66,41 @@ always null); per-page or per-kind permissions.
 - No em-dashes in prose. The plan 01 ban on security vocabulary is lifted for
   this package, on the user's call, because the subject matter is made of it.
 
+## Answering the 2026-08-26 decision
+
+A service already existed here and was deliberately thrown out. Any plan to
+bring one back has to answer that record rather than ignore it.
+
+The reason on file, from
+`.nikki-agents/prior-art/handoff_agent-kb_llm-wiki_2_1787799748.md`:
+
+> No service, no container, no port. Because append-only snapshots mean no two
+> writes touch the same file, which killed the single-writer requirement that
+> was the only justification for a service owning the volume. Removing the
+> network surface also removed the authentication prerequisite entirely.
+
+Two halves, and they have aged differently.
+
+**The premise that killed it has since been falsified.** "No two writes touch
+the same file" is not true of the design as built. Phase 14 reproduced two
+processes writing two summary pages for one digest, `dedup` rewriting a summary
+page from a stale snapshot over a concurrent `summarize`, and a rollback
+unlinking a page another process had just written. The single-writer
+requirement was not obsolete; it was merely unmet, and the file model paid for
+that with `fcntl.flock`, a bounded wait, a busy exit, and a commit-time
+re-read. That is new evidence the original decision did not have.
+
+**The cost it named is real and unchanged.** "Removing the network surface also
+removed the authentication prerequisite entirely" is exactly right, and phases
+1 and 2 of this plan are that prerequisite arriving back: tokens, a pepper, a
+certificate lifecycle, and a deployment file. That is the honest price.
+
+This plan pays it only where it buys something the file model cannot provide at
+any price: reaching a kb across a machine boundary. It does not pay it locally.
+Mode 2 keeps plain files an agent can read without asking permission, which was
+the property the 2026-08-26 decision was protecting, and phase 14 is what makes
+that mode safe rather than a service replacing it.
+
 ## Alternatives rejected
 
 | Considered | Why not |
