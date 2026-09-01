@@ -26,6 +26,9 @@ State plainly that admin is total, and keep admin tokens few.
 
 *The deployment file sets the policy, not the client.*
 
+`[access]` is defined in phase 2, which holds the whole deployment file. It is quoted here only to
+show the shape the gate reads:
+
 ```toml
 [access]
 read  = "open"     # or "token"

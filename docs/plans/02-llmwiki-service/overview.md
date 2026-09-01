@@ -120,8 +120,8 @@ that mode safe rather than a service replacing it.
 1. [tokens and the auth gate](phase-01-tokens.md)
 2. [TLS, certificate lifecycle, and the deployment file](phase-02-tls.md)
 3. [read endpoints: `search`, `page`, `list`, `schema`](phase-03-read-endpoints.md)
-4. `[remotes]` in `config.toml`, and the CLI client that consumes them
-5. container packaging and the mode 1 deployment
+4. [`[remotes]` in `config.toml`, and the CLI client that consumes them](phase-04-remotes.md)
+5. [container packaging and the mode 1 deployment](phase-05-packaging.md)
 
 Phase 1 is the only one with a nontrivial design. Phases 3 and 4 are
 independent of each other once 1 and 2 land.
