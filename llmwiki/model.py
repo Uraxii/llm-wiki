@@ -46,7 +46,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 # (ProxyHandler({})) and follow-redirect (both would resend the
 # Authorization header to a host the config never named). Holds no key;
 # the key stays a per-call header.
-_OPENER = urllib.request.build_opener(
+OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({}), _NoRedirect()
 )
 
@@ -111,7 +111,7 @@ def _post(config: dict, path: str, body: dict) -> dict:
         },
     )
     try:
-        with _OPENER.open(request, timeout=REQUEST_TIMEOUT_SEC) as response:
+        with OPENER.open(request, timeout=REQUEST_TIMEOUT_SEC) as response:
             return json.loads(response.read())
     except HTTPError as exc:
         raise ModelError(f"request to {url} failed: HTTP {exc.code}") from None
@@ -159,6 +159,7 @@ def chat(
     prompt: str,
     model: str | None = None,
     attachment: tuple[str, bytes] | None = None,
+    temperature: float | None = None,
 ) -> str:
     """One chat completion for pipeline `step` (e.g. "summarize"). With
     no `attachment`, `content` is the plain prompt string, byte-
@@ -166,7 +167,11 @@ def chat(
     (`media_type`, raw bytes), `content` becomes a text part carrying
     `prompt` plus one attachment part. Over `MAX_ATTACHMENT_BYTES`,
     raises `ModelError` naming the size and the cap before any byte is
-    base64-encoded or sent."""
+    base64-encoded or sent.
+
+    `temperature` is sent only when it is not `None`, so a caller that
+    leaves it unset produces the byte-identical body it always did and
+    the endpoint keeps applying its own default."""
     name = model_name(config, step, model)
     if attachment is None:
         content: str | list[dict] = prompt
@@ -181,7 +186,12 @@ def chat(
             {"type": "text", "text": prompt},
             _attachment_content_part(config, media_type, data),
         ]
-    body = {"model": name, "messages": [{"role": "user", "content": content}]}
+    body: dict[str, object] = {
+        "model": name,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if temperature is not None:
+        body["temperature"] = temperature
     response = _post(config, "/chat/completions", body)
     try:
         return response["choices"][0]["message"]["content"]

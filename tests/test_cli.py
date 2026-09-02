@@ -1,21 +1,27 @@
 """Subprocess smoke test of every verb in the CLI's verb table."""
 
 import contextlib
+import hashlib
 import io
+import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from llmwiki import cli  # noqa: E402
+from llmwiki import cli, remotes  # noqa: E402
 from llmwiki.model import API_KEY_VAR  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+from fake_wiki import FakeWiki, Reply  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -143,16 +149,18 @@ class VerbTableTest(unittest.TestCase):
         self.assertIn("[jobs.no-such-job]", result.stderr)
 
     def test_init_generates_config_with_an_active_embed_model(self) -> None:
-        """P6: agent-kb-0zf.21's last comment is a user override to
-        openai/text-embedding-3-small, superseding the arena's earlier
-        pick; a fresh config.toml must carry it uncommented so vectors
-        exist from day one (decision .1)."""
+        """Decision .1 (P6) required the embed model uncommented from
+        day one so vectors exist without a manual edit; superseded by
+        CLAUDE.md's ban on vendor names in example configs, so the
+        line is now a vendor-free placeholder, still uncommented so
+        `embed` never fails with a missing-config error on a fresh
+        kb."""
         fresh = self.tmp / "fresh-embed" / ".kb"
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(fresh), "init"]
         subprocess.run(cmd, cwd=str(self.tmp), capture_output=True, text=True, env=self.env)
 
         config = (fresh / "config.toml").read_text()
-        self.assertIn('embed = "openai/text-embedding-3-small"', config)
+        self.assertRegex(config, r'(?m)^embed = "\S+/\S+"$')
 
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(fresh), "embed"]
         result = subprocess.run(cmd, cwd=str(self.tmp), capture_output=True, text=True, env=self.env)
@@ -277,3 +285,356 @@ class MainErrorBoundaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+TOKEN_VAR = "HOMELAB_KB_TOKEN"
+TOKEN = "token-value-nothing-may-print"
+
+
+def _wiki_body(*titles: str, high: bool = True) -> bytes:
+    """A search response. `high` and low scores exist only to prove the
+    client never sorts across two wikis by them."""
+    base = 0.9 if high else 0.2
+    hits = [
+        {
+            "score": base - index / 100,
+            "name": f"{title.lower()}.md",
+            "title": title,
+            "updated": "2026-01-01T00:00:00Z",
+            "size": 100 + index,
+        }
+        for index, title in enumerate(titles)
+    ]
+    return json.dumps({"hits": hits}).encode("utf-8")
+
+
+class RemoteCliFixture:
+    """A kb, a fake model endpoint, and helpers for driving `cli.main`
+    against real sockets. `parse_remotes` is patched so a plain-http
+    fake is reachable while the https rule stays enforced where a
+    user's config actually touches it, per the phase's own verification
+    note."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.kb = self.tmp / ".kb"
+        (self.kb / "wiki").mkdir(parents=True)
+        (self.kb / "sources").mkdir()
+        (self.kb / "log.md").write_text("# log\n")
+        for name, title in (("north.md", "North"), ("south.md", "South")):
+            (self.kb / "wiki" / name).write_text(
+                f"---\ntitle: {title}\nkind: summary\n---\n\nA page.\n"
+            )
+
+        def respond(path: str, body: dict) -> dict:
+            if path == "/embeddings":
+                return {
+                    "data": [
+                        {"index": i, "embedding": self._vector(text)}
+                        for i, text in enumerate(body["input"])
+                    ]
+                }
+            raise AssertionError(f"unexpected path {path!r}")
+
+        self.endpoint = FakeEndpoint(respond)
+        self.addCleanup(self.endpoint.close)
+        (self.kb / "config.toml").write_text(
+            '[models]\nembed = "cheap-embed"\n\n'
+            f'[endpoint]\nurl = "{self.endpoint.url}"\n'
+        )
+        self.env = unittest.mock.patch.dict(
+            os.environ, {API_KEY_VAR: "model-key-value"}
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    @staticmethod
+    def _vector(text: str) -> list[float]:
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        return [b / 255.0 for b in digest[:8]]
+
+    def _run(self, argv: list[str]) -> tuple[int, bytes, str]:
+        raw = io.BytesIO()
+        out = io.TextIOWrapper(raw, encoding="utf-8", write_through=True)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["--kb", str(self.kb), *argv])
+        out.flush()
+        return code, raw.getvalue(), err.getvalue()
+
+    def _embed(self) -> None:
+        code, _out, err = self._run(["embed"])
+        self.assertEqual(code, 0, err)
+
+    def _wiki(self, respond) -> FakeWiki:
+        wiki = FakeWiki(respond)
+        self.addCleanup(wiki.close)
+        return wiki
+
+    def _serving(self, body: bytes) -> FakeWiki:
+        return self._wiki(lambda _request: Reply(body=body))
+
+    @contextlib.contextmanager
+    def _table(self, table: dict[str, remotes.Remote]):
+        with unittest.mock.patch.object(
+            remotes, "parse_remotes", return_value=table
+        ):
+            yield
+
+    @staticmethod
+    def _remote(name: str, wiki: FakeWiki, token_env=None) -> remotes.Remote:
+        return remotes.Remote(name, wiki.url + f"/kb/{name}", token_env)
+
+
+class RemoteSearchCliTest(RemoteCliFixture, unittest.TestCase):
+    """`search --remote` and `--all` through the real verb."""
+
+    def test_two_wikis_stay_in_two_blocks_in_the_order_named(self) -> None:
+        low = self._serving(_wiki_body("Alpha", "Beta", high=False))
+        high = self._serving(_wiki_body("Gamma", high=True))
+        table = {
+            "lowscore": self._remote("lowscore", low),
+            "highscore": self._remote("highscore", high),
+        }
+        self._embed()
+        with self._table(table):
+            code, out, err = self._run(
+                ["search", "cold", "--remote", "lowscore",
+                 "--remote", "highscore"]
+            )
+        self.assertEqual((code, err), (0, ""))
+        lines = out.decode().splitlines()
+        self.assertEqual(
+            [line for line in lines if line.startswith("#")],
+            ["# local", "# lowscore", "# highscore"],
+        )
+        self.assertEqual(lines[lines.index("# lowscore") + 1].split("\t")[:3],
+                         ["1", "alpha.md", "Alpha"])
+        self.assertEqual(lines[lines.index("# lowscore") + 2].split("\t")[:3],
+                         ["2", "beta.md", "Beta"])
+        self.assertEqual(lines[lines.index("# highscore") + 1].split("\t")[:3],
+                         ["1", "gamma.md", "Gamma"])
+        for line in lines:
+            self.assertNotIn("0.9", line)
+            self.assertNotIn("0.2", line)
+
+    def test_n_is_per_wiki_not_a_total(self) -> None:
+        many = [f"Page{i}" for i in range(9)]
+
+        def respond(request):
+            """Honours `n` the way phase 3's route does, so the block
+            size proves the client sent 5 to each wiki, not 5 split
+            between them."""
+            limit = int(request.query["n"][0])
+            return Reply(body=_wiki_body(*many[:limit]))
+
+        first = self._wiki(respond)
+        second = self._wiki(respond)
+        table = {
+            "first": self._remote("first", first),
+            "second": self._remote("second", second),
+        }
+        self._embed()
+        with self._table(table):
+            code, out, _err = self._run(["search", "cold", "-n", "5", "--all"])
+        self.assertEqual(code, 0)
+        blocks = out.decode().split("# ")[1:]
+        self.assertEqual(len(blocks), 3)
+        for block in blocks:
+            hits = [line for line in block.splitlines()[1:] if line]
+            self.assertLessEqual(len(hits), 5)
+        self.assertEqual(first.requests[0].query["n"], ["5"])
+
+    def test_a_pointer_only_kb_prints_no_local_block(self) -> None:
+        pointer = self.tmp / "pointer.kb"
+        pointer.mkdir()
+        (pointer / "config.toml").write_text("")
+        self.kb = pointer
+        wiki = self._serving(_wiki_body("Alpha"))
+        with self._table({"a": self._remote("a", wiki)}):
+            code, out, err = self._run(["search", "cold", "--all"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertNotIn("# local", out.decode())
+        self.assertIn("# a", out.decode())
+        self.assertEqual(self.endpoint.requests, [], "zero paid calls")
+
+    def test_all_over_three_remotes_costs_one_model_call(self) -> None:
+        wikis = {
+            name: self._remote(name, self._serving(_wiki_body("Alpha")))
+            for name in ("a", "b", "c")
+        }
+        self._embed()
+        embeds = len(self.endpoint.requests)
+        with self._table(wikis):
+            code, _out, err = self._run(["search", "cold", "--all"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(len(self.endpoint.requests) - embeds, 1)
+
+    def test_one_dead_remote_leaves_the_others_printing(self) -> None:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            dead_port = probe.getsockname()[1]
+        alive = self._serving(_wiki_body("Alpha"))
+        table = {
+            "dead": remotes.Remote(
+                "dead", f"http://127.0.0.1:{dead_port}/kb/dead", None
+            ),
+            "alive": self._remote("alive", alive),
+        }
+        self._embed()
+        with self._table(table):
+            code, out, err = self._run(
+                ["search", "cold", "--remote", "dead", "--remote", "alive"]
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "dead\tunreachable\n")
+        self.assertIn("# alive", out.decode())
+        self.assertNotIn("# dead", out.decode())
+
+    def test_two_slow_remotes_cost_one_timeout_not_two(self) -> None:
+        held = threading.Event()
+        self.addCleanup(held.set)
+
+        def respond(_request):
+            held.wait(10)
+            return Reply(body=_wiki_body("Alpha"))
+
+        table = {
+            name: self._remote(name, self._wiki(respond))
+            for name in ("slow1", "slow2")
+        }
+        with self._table(table), unittest.mock.patch.object(
+            remotes, "REMOTE_TIMEOUT_SEC", 0.5
+        ):
+            started = time.monotonic()
+            code, _out, err = self._run(
+                ["search", "cold", "--remote", "slow1", "--remote", "slow2"]
+            )
+            elapsed = time.monotonic() - started
+        self.assertEqual(code, 1)
+        self.assertIn("slow1\ttimeout", err)
+        self.assertIn("slow2\ttimeout", err)
+        self.assertLess(elapsed, 1.0, "a sequential fan-out fails this")
+
+    def test_a_local_failure_is_one_more_failed_participant(self) -> None:
+        wiki = self._serving(_wiki_body("Alpha"))
+        with self._table({"a": self._remote("a", wiki)}):
+            code, out, err = self._run(["search", "cold", "--all"])
+        self.assertEqual(code, 1)
+        self.assertIn("local\tindex_stale", err)
+        self.assertIn("# a", out.decode())
+
+    def test_an_unknown_remote_name_exits_2_with_no_request(self) -> None:
+        wiki = self._serving(_wiki_body("Alpha"))
+        with self._table({"a": self._remote("a", wiki)}):
+            code, out, err = self._run(["search", "cold", "--remote", "b"])
+        self.assertEqual(code, 2)
+        self.assertIn("unknown remote: b", err)
+        self.assertEqual(out, b"")
+        self.assertEqual(wiki.requests, [])
+
+    def test_a_refused_remotes_table_exits_2_with_no_request(self) -> None:
+        wiki = self._serving(_wiki_body("Alpha"))
+        (self.kb / "config.toml").write_text(
+            (self.kb / "config.toml").read_text()
+            + '\n[remotes.a]\nurl = "http://insecure.example/kb/a"\n'
+        )
+        code, out, err = self._run(["search", "cold", "--all"])
+        self.assertEqual(code, 2)
+        self.assertIn("remote a", err)
+        self.assertEqual(out, b"")
+        self.assertEqual(wiki.requests, [])
+
+    def test_plain_search_makes_no_request_to_a_declared_remote(self) -> None:
+        wiki = self._serving(_wiki_body("Alpha"))
+        self._embed()
+        with self._table({"a": self._remote("a", wiki)}):
+            code, out, _err = self._run(["search", "cold"])
+        self.assertEqual(code, 0)
+        self.assertEqual(wiki.requests, [])
+        self.assertNotIn(b"# local", out)
+        self.assertIn(b"north.md", out)
+
+    def test_no_stream_ever_carries_the_token(self) -> None:
+        good = self._serving(_wiki_body("Alpha"))
+        refusing = self._wiki(
+            lambda _r: Reply(status=401, body=b'{"error": "unauthorized"}')
+        )
+        table = {
+            "good": self._remote("good", good, TOKEN_VAR),
+            "refusing": self._remote("refusing", refusing, TOKEN_VAR),
+            "notoken": remotes.Remote("notoken", good.url + "/kb/x", "ABSENT"),
+        }
+        self._embed()
+        with self._table(table), unittest.mock.patch.dict(
+            os.environ, {TOKEN_VAR: TOKEN}
+        ):
+            code, out, err = self._run(["search", "cold", "--all"])
+        self.assertEqual(code, 1)
+        self.assertNotIn(TOKEN, out.decode())
+        self.assertNotIn(TOKEN, err)
+        self.assertNotIn("model-key-value", out.decode())
+        self.assertNotIn("model-key-value", err)
+        self.assertIn("refusing\tunauthorized", err)
+        self.assertIn("notoken\tno_token", err)
+
+
+class PageVerbTest(RemoteCliFixture, unittest.TestCase):
+    """`page`, remote form and local form."""
+
+    def test_a_remote_page_is_written_as_bytes(self) -> None:
+        raw = b"# North\n\xff\xfe not utf-8\n"
+        wiki = self._wiki(
+            lambda _r: Reply(body=raw, content_type="text/markdown")
+        )
+        with self._table({"a": self._remote("a", wiki)}):
+            code, out, err = self._run(["page", "--remote", "a", "north.md"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, raw)
+
+    def test_a_remote_page_typed_html_writes_nothing(self) -> None:
+        wiki = self._wiki(
+            lambda _r: Reply(body=b"<html>", content_type="text/html")
+        )
+        with self._table({"a": self._remote("a", wiki)}):
+            code, out, err = self._run(["page", "--remote", "a", "north.md"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, b"")
+        self.assertEqual(err, "a\tbad_response\n")
+
+    def test_an_unknown_remote_name_exits_2(self) -> None:
+        wiki = self._serving(_wiki_body("Alpha"))
+        with self._table({"a": self._remote("a", wiki)}):
+            code, _out, err = self._run(["page", "--remote", "b", "north.md"])
+        self.assertEqual(code, 2)
+        self.assertIn("unknown remote: b", err)
+
+    def test_a_local_page_comes_back_whole(self) -> None:
+        code, out, err = self._run(["page", "north.md"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, (self.kb / "wiki" / "north.md").read_bytes())
+
+    def test_a_local_page_on_a_symlinked_root_comes_back(self) -> None:
+        link = self.tmp / "linked.kb"
+        link.symlink_to(self.kb)
+        self.kb = link
+        code, out, err = self._run(["page", "north.md"])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(b"North", out)
+
+    def test_local_page_refuses_a_walk_a_separator_and_a_subdirectory(self):
+        (self.kb / "wiki" / "sub").mkdir()
+        (self.kb / "wiki" / "sub" / "deep.md").write_text("deep\n")
+        for name in ("../config.toml", "sub/deep.md", "north.txt",
+                     "no\x00rth.md"):
+            with self.subTest(name=name):
+                code, out, err = self._run(["page", name])
+                self.assertEqual(code, 1)
+                self.assertEqual(out, b"")
+                self.assertEqual(err, "local\tnot_found\n")
+
+    def test_page_with_no_argument_exits_2(self) -> None:
+        code, _out, err = self._run(["page"])
+        self.assertEqual(code, 2)
+        self.assertIn("usage", err)

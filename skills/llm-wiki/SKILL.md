@@ -219,12 +219,6 @@ Verified, and open on the tracker at the time of writing.
   identical `dish:creme brulee`; the same kb with the judge removed and
   `dedup --rebuild` joined those two into one story, no model call.
   `agent-kb-zn6`, `agent-kb-d1w`.
-- **One unreadable source makes a bare `llmwiki summarize` exit 1 for
-  good**, with the reason only in `log.md`. Read the log before you
-  believe the kb is broken, and pass explicit digests to work around
-  it. `agent-kb-74p`.
 - **A missing `[models] embed` is reported as missing vectors** by
   `status` and `search`. Check `config.toml` before you go looking for
   a data problem. `agent-kb-5ty`.
-- **`ingest` embeds each summary twice.** Wasted calls, no wrong
-  output. `agent-kb-2ya`.

@@ -39,37 +39,90 @@ from llmwiki import vectors
 # Wording measured against the live endpoint, same spirit as
 # summarize.BUILT_IN_PROMPT: the plain "belongs to an existing story"
 # framing let a shared identifier alone justify a match, joining an
-# unrelated later event at the same place to an old story. The text
-# below states the one-occurrence rule explicitly and was confirmed
-# to give a reopening its own story while still joining a same-day
-# duplicate update, 3 of 3 trials.
+# unrelated later report at the same place to an old story.
+#
+# Every paragraph below states one rule, a story covers ONE SUBJECT.
+# The text this replaced stated story identity as one real-world
+# occurrence, which is an incident-tracker notion of identity and
+# wrong for every other kb (agent-kb-d1w): on a recipe kb, same page,
+# same candidate, same model, that wording returned NONE and rejected
+# a correct join at cosine 0.7579, well above NEIGHBOUR_FLOOR.
+#
+# Measured 2026-09-02 through the live endpoint on
+# google/gemini-2.5-flash, one judge call per trial, over summary and
+# story pages in the shape tests/fixtures/rung1/kb/SUMMARIZE.md asks
+# for. Subject wording, the text below:
+#   two Creme Brulee pages (rung1 sources 03 and 04)  joined, 3 of 3
+#   an omelette page against the Creme Brulee story   NONE,   3 of 3
+#   a same-day duplicate incident update              joined, 3 of 3
+#   a separate later outage, identifiers identical    NONE,   3 of 3
+# The last two are the incident behaviour the occurrence wording was
+# kept for. The occurrence wording scored 3 of 3 on both of them in
+# the same run, so subject framing costs nothing there and buys the
+# join the occurrence wording refused.
+#
+# The opening paragraph names both reasons a candidate can be listed.
+# It used to assert every candidate already shared an identifier,
+# which is false on the phase 13 vector seam: on a kb with no
+# identifier vocabulary every page carries `identifiers: []`, so the
+# judge was told to discount evidence that did not exist and never
+# told the evidence that did. `candidates` unions the two sources, so
+# one sentence covering both is true on either path and needs no
+# per-candidate provenance threaded through.
+#
+# The identifier caveat keeps its old force, narrowed by "by itself"
+# so it reads as a caution and not as a claim that identifiers are
+# present. A wider draft also told the judge that similar wording is
+# not evidence; on the frozen case above that read as an instruction
+# to discount the only evidence there was, so it was dropped.
+#
+# SCHEMA.md carries any domain-specific framing a kb wants; this
+# prompt stays fixed.
 DEDUP_PROMPT = """\
 Below is a new wiki summary page, then one or more existing story \
-pages that already share at least one identifier with it.
+pages. A candidate is listed because it shares an identifier with \
+the new summary, because its text is among the nearest matches to \
+it, or both.
 
-A story covers ONE real-world occurrence. Answer with a candidate \
-only when the new summary reports that SAME occurrence: an initial \
-report, a later update, or a follow-up investigation into it.
+A story covers ONE subject. Answer with a candidate only when the \
+new summary reports that SAME subject: an initial report, a later \
+update, or a follow-up investigation into it.
 
-Shared identifiers are NOT evidence of a match. A place, product, or \
-person can appear in many unrelated events. A separate occurrence \
-involving the same subject is a different story even when every \
-identifier is identical.
+A shared identifier is NOT by itself evidence of a match. A place, \
+product, or person can appear in many unrelated stories.
 
 Default to NONE. Answer with a candidate slug only if you are \
-confident the two describe the same occurrence; otherwise answer \
-NONE.
+confident the two pages have the SAME subject; otherwise answer NONE.
 
 Reply with exactly one line: the candidate's slug, as written in its \
 "=== CANDIDATE: <slug> ===" heading, or the literal word NONE. No \
 other text, no explanation.
 
 Before answering, ask yourself: if both pages were filed under one \
-heading, would a reader see one event, or two things that merely \
-happened in the same place? Two things means NONE.\
+heading, would a reader see one subject, or two subjects that merely \
+share an identifier? Two means NONE.\
 """
 
 SLUG_SUFFIX_LEN = 8  # hex chars of the first member hash, for a title collision
+
+# The judge answers a closed classification under a one-line reply
+# contract, so sampling variance is pure noise. Replaying one frozen
+# case (same page, same single candidate, same model) three times at
+# the endpoint default returned NONE, a join, and NONE again.
+#
+# Measured 2026-09-02, not assumed: temperature 0 REDUCES variance, it
+# does not remove it. The pre-fix prompt replayed six times at
+# temperature 0 on that same frozen case still answered NONE five
+# times and joined once. What the setting buys is that a case leaning
+# one way stops flipping the other; end to end it took the vocabulary
+# config from 5 of 6 to 6 of 6 and the vector-seam config from 2 of 3
+# to 4 of 4.
+#
+# Fixed here rather than exposed in config.toml: [models].dedup stays
+# configurable because model choice is a real decision, while a kb
+# that wanted a sampled judge would only be asking for that coin flip
+# back.
+JUDGE_TEMPERATURE = 0.0
 
 
 class Story(NamedTuple):
@@ -157,7 +210,12 @@ def judge(kb: Kb, page: Page, cands: list[Story]) -> Story | None:
     if _dedup_model_id(kb) is None:
         return cands[0]
 
-    reply = chat(kb.config, "dedup", _judge_prompt(page, cands))
+    reply = chat(
+        kb.config,
+        "dedup",
+        _judge_prompt(page, cands),
+        temperature=JUDGE_TEMPERATURE,
+    )
     first_line = reply.split("\n", 1)[0].strip()
     for story in cands:
         if first_line == story.path.stem:

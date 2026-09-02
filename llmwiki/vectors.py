@@ -65,12 +65,12 @@ def db_path(kb: Kb, model_id: str) -> Path:
     return kb.vectors / f"{slug(model_id)}.sqlite"
 
 
-def _model_id(kb: Kb) -> str | None:
-    """The configured `[models] embed` id, or `None` when it is unset."""
+def _model_id(kb: Kb) -> tuple[str | None, str | None]:
+    """`[models] embed`'s id, or `(None, error text)` when unset."""
     try:
-        return model_name(kb.config, "embed", None)
-    except ModelError:
-        return None
+        return model_name(kb.config, "embed", None), None
+    except ModelError as exc:
+        return None, str(exc)
 
 
 def _connect(kb: Kb, model_id: str) -> sqlite3.Connection:
@@ -347,15 +347,18 @@ def run(root: Path, paths: list[Path] | None) -> int:
 def status(root: Path) -> int:
     """CLI `status`. Read-only, no model call."""
     kb = Kb(root)
-    model_id = _model_id(kb)
+    model_id, config_error = _model_id(kb)
     conn = _connect(kb, model_id) if model_id is not None else None
     try:
         stale, _to_delete, seen = _plan(kb, conn)
     finally:
         if conn is not None:
             conn.close()
-    for path in stale:
-        print(f"{path.name}\tno vector")
+    if config_error is not None:
+        print(f"llmwiki: status: {config_error}", file=sys.stderr)
+    else:
+        for path in stale:
+            print(f"{path.name}\tno vector")
     for digest in _unsummarized(kb, seen):
         print(f"{digest}\tno summary")
     return 0
@@ -366,12 +369,13 @@ def search(root: Path, query: str, n: int = TOP_K, kind: str | None = None) -> i
     kb = Kb(root)
     try:
         ranking = rank(kb, query, n, kind)
-    except (StaleVectors, NoEmbedModel) as exc:
-        print(
-            f"llmwiki: search: {exc.missing} pages without a current "
-            "vector; run embed first",
-            file=sys.stderr,
-        )
+    except NoEmbedModel as exc:
+        print(f"llmwiki: search: {exc.config_error}", file=sys.stderr)
+        return 1
+    except StaleVectors as exc:
+        word = "page" if exc.missing == 1 else "pages"
+        print(f"llmwiki: search: {exc.missing} {word} without a current "
+              "vector; run embed first", file=sys.stderr)
         return 1
     except ModelError as exc:
         if isinstance(exc, RankModelError) and exc.unsummarized:
@@ -402,7 +406,7 @@ def neighbours(kb: Kb, path: Path, kind: str, n: int = TOP_K) -> list[tuple[floa
     vec0 shadow table, a locked database) propagates: the caller
     decides what a real failure means for its run, same contract as
     `_nearest`."""
-    model_id = _model_id(kb)
+    model_id, _config_error = _model_id(kb)
     if model_id is None:
         return []
     db = db_path(kb, model_id)
@@ -476,14 +480,14 @@ class StaleVectors(Exception):
 
 class NoEmbedModel(Exception):
     """Raised by `rank` when `[models] embed` is unset: `_model_id`
-    then returns `None`, so `_plan` marks every page stale for a
-    reason `StaleVectors` would misname. `missing` carries the same
-    count `StaleVectors` would, since `search`'s warning line reads
-    identically either way; the service's 501 body does not use it."""
+    then returns `None` before `_plan` ever runs. `missing` carries
+    the same count `StaleVectors` would, for the service's response
+    shape; `config_error` is the real `ModelError` text `search`
+    prints instead of a staleness count."""
 
-    def __init__(self, missing: int) -> None:
-        super().__init__(f"{missing} pages without a current vector")
-        self.missing = missing
+    def __init__(self, missing: int, config_error: str) -> None:
+        super().__init__(config_error)
+        self.missing, self.config_error = missing, config_error
 
 
 def rank(kb: Kb, query: str, n: int = TOP_K, kind: str | None = None) -> Ranking:
@@ -500,12 +504,12 @@ def rank(kb: Kb, query: str, n: int = TOP_K, kind: str | None = None) -> Ranking
     body has to report it. Raises ModelError from the endpoint. ONE
     _plan walk and ONE connection, per _plan's own contract at
     vectors.py:180."""
-    model_id = _model_id(kb)
+    model_id, config_error = _model_id(kb)
     conn = _connect(kb, model_id) if model_id is not None else None
     try:
         stale, _to_delete, seen = _plan(kb, conn)
         if model_id is None:
-            raise NoEmbedModel(len(stale))
+            raise NoEmbedModel(len(stale), config_error)
         if stale:
             raise StaleVectors(len(stale))
         unsummarized = len(_unsummarized(kb, seen))

@@ -47,11 +47,13 @@ class InitTest(TmpDirTest):
         self.assertEqual(list((self.kb / "sources").iterdir()), [])
         self.assertEqual(list((self.kb / "wiki").iterdir()), [])
 
-    def test_config_has_default_summarize_model(self) -> None:
+    def test_config_summarize_model_is_a_vendor_free_placeholder(self) -> None:
         self.run_main(["--kb", str(self.kb), "init"])
         config = load_config(self.kb)
-        self.assertEqual(
-            config["models"]["summarize"], "google/gemini-2.5-flash"
+        summarize_model = config["models"]["summarize"]
+        self.assertTrue(summarize_model)
+        self.assertNotRegex(
+            summarize_model, r"(?i)google|openai|gemini|anthropic|claude|gpt-"
         )
 
     def test_schema_matches_skeleton_bytes(self) -> None:
@@ -115,25 +117,27 @@ class SubprocessTest(unittest.TestCase):
 
 
 class ConfigIdentifiersExampleTest(unittest.TestCase):
-    def test_uncommented_example_parses_and_pattern_matches(self) -> None:
-        lines = CONFIG_TOML.splitlines()
-        start = next(
-            i for i, line in enumerate(lines) if line.startswith("# [identifiers.")
-        )
-        block = []
-        for line in lines[start:]:
-            if not line.startswith("#"):
-                break
-            block.append(line.removeprefix("# "))
-
+    def test_shipped_example_is_uncommented_and_pattern_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            atomic_write_text(
-                root / "config.toml", CONFIG_TOML + "\n".join(block) + "\n"
-            )
+            atomic_write_text(root / "config.toml", CONFIG_TOML)
             config = load_config(root)
             pattern = config["identifiers"]["isbn"]["pattern"]
             self.assertRegex("9780306406157", pattern)
+
+    def test_names_a_join_key_and_warns_off_a_shared_key(self) -> None:
+        lines = CONFIG_TOML.splitlines()
+        start = next(
+            i for i, line in enumerate(lines) if line.startswith("[identifiers.")
+        )
+        comment_lines = []
+        for line in reversed(lines[:start]):
+            if not line.startswith("#"):
+                break
+            comment_lines.insert(0, line)
+        comment = "\n".join(comment_lines)
+        self.assertIn("JOIN key", comment)
+        self.assertIn("discriminate", comment)
 
 
 if __name__ == "__main__":

@@ -11,10 +11,21 @@ import sys
 from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
+from typing import NamedTuple
 
 from llmwiki.core import Kb, append_log_entry, atomic_write_text
 from llmwiki.lint import lint_pages, select_pages
-from llmwiki import dedup, ingest, summarize, vectors
+from llmwiki.model import ModelError
+from llmwiki.remotes import (
+    LOCAL_LABEL,
+    Answer,
+    Remote,
+    RemoteError,
+    RemoteFailure,
+    RemoteHit,
+    RemoteRanking,
+)
+from llmwiki import dedup, ingest, remotes, summarize, vectors
 
 SCHEMA_SKELETON = resources.files("llmwiki").joinpath("SCHEMA.skeleton.md")
 
@@ -22,21 +33,27 @@ GLOBAL_STORE = Path.home() / ".local" / "share" / "agent-kb"
 
 CONFIG_TOML = """\
 # One model per paid pipeline step, read from this file at run time.
+# Replace both with model ids your own endpoint serves.
 [models]
-summarize = "google/gemini-2.5-flash"
-embed = "openai/text-embedding-3-small"
+summarize = "your-provider/your-summarize-model"
+embed = "your-provider/your-embed-model"
 
-# The API endpoint that serves the models above.
+# The API endpoint that serves the models above. Uncomment and set
+# your own url; until then, summarize and embed fail with "missing
+# [endpoint].url in config.toml".
 # [endpoint]
 # url = "https://api.example.com/v1"
 
 # Identifier vocabulary. Each key can appear in a page's "identifiers"
 # field as "key:value". The CLI appends this table to the summarizer
-# prompt, so SUMMARIZE.md never repeats it. Uncomment and add your own
-# keys; delete this example first.
-# [identifiers.isbn]
-# pattern = "^\\\\d{13}$"
-# describe = "13-digit ISBN without hyphens"
+# prompt, so SUMMARIZE.md never repeats it. A key is a JOIN key: dedup
+# joins two summaries that share one, so declare only keys that
+# discriminate one subject from another (an isbn does; an ingredient
+# name does not, it joins every page that uses salt). Edit or replace
+# this example with your own.
+[identifiers.isbn]
+pattern = "^\\\\d{13}$"
+describe = "13-digit ISBN without hyphens"
 
 # Scheduled ingest jobs. Each job fetches from a feed or a list of
 # urls, in "partial" mode (skip urls already seen) or "full" mode
@@ -93,6 +110,10 @@ def cmd_init(root: Path, args: list[str]) -> int:
     (root / "wiki").mkdir()
     for name, content in _init_files().items():
         atomic_write_text(root / name, content)
+    print(
+        f"llmwiki: init: wrote {root}; edit config.toml and set "
+        "[endpoint].url and your own [models] before running ingest"
+    )
     return 0
 
 
@@ -149,37 +170,187 @@ def cmd_status(root: Path, args: list[str]) -> int:
     return vectors.status(root)
 
 
-def cmd_search(root: Path, args: list[str]) -> int:
+class SearchArgs(NamedTuple):
+    query: str
+    n: int
+    kind: str | None
+    names: tuple[str, ...]   # --remote NAME, in the order given
+    every: bool              # --all
+
+
+VALUE_FLAGS = ("-n", "--kind", "--remote")
+
+
+def parse_search_args(args: list[str]) -> SearchArgs | None:
+    """`None` on any usage error, which the caller turns into exit 2."""
     query_parts: list[str] = []
-    n = vectors.TOP_K
-    kind: str | None = None
+    n, kind, names, every = vectors.TOP_K, None, [], False
     index = 0
     while index < len(args):
         arg = args[index]
-        if arg in ("-n", "--kind"):
+        if arg == "--all":
+            every = True
+            index += 1
+            continue
+        if arg not in VALUE_FLAGS:
+            query_parts.append(arg)
+            index += 1
+            continue
+        if index + 1 >= len(args):
+            return None
+        value = args[index + 1]
+        if arg == "--kind":
+            kind = value
+        elif arg == "--remote":
+            names.append(value)
+        else:
+            try:
+                n = int(value)
+            except ValueError:
+                return None
+            if n < 1:
+                return None
+        index += 2
+    if not query_parts:
+        return None
+    return SearchArgs(" ".join(query_parts), n, kind, tuple(names), every)
+
+
+def select_remotes(
+    config: dict, names: tuple[str, ...], every: bool
+) -> list[Remote]:
+    """The remotes to ask, in the order `--remote` named them, then the
+    rest of the table when `--all` is given. Raises ValueError, which
+    the caller turns into exit 2, for an unknown name or a bad table."""
+    table = remotes.parse_remotes(config)
+    chosen = []
+    for name in names:
+        if name not in table:
+            raise ValueError(f"unknown remote: {name}")
+        if table[name] not in chosen:
+            chosen.append(table[name])
+    if every:
+        chosen.extend(r for r in table.values() if r not in chosen)
+    return chosen
+
+
+def local_answer(kb: Kb, query: str, n: int, kind: str | None) -> Answer:
+    """The kb on disk as one more participant, under the label `local`.
+    Its failures carry the same codes the routes answer with, so one
+    stderr line reads the same whichever wiki produced it."""
+    try:
+        ranking = vectors.rank(kb, query, n, kind)
+    except vectors.StaleVectors:
+        return RemoteFailure(LOCAL_LABEL, "index_stale")
+    except vectors.NoEmbedModel:
+        return RemoteFailure(LOCAL_LABEL, "no_embed_model")
+    except ModelError:
+        return RemoteFailure(LOCAL_LABEL, "upstream_model_failed")
+    hits = tuple(
+        RemoteHit(rank, hit.name, hit.title, hit.updated, hit.size)
+        for rank, hit in enumerate(ranking.hits, start=1)
+    )
+    return RemoteRanking(LOCAL_LABEL, hits)
+
+
+def print_answers(answers: tuple[Answer, ...]) -> int:
+    """One block per wiki, in the order asked, never merged and never
+    re-sorted. `rank` is a position inside one block, so no number on
+    any line is comparable with a number in another block."""
+    failed = False
+    for answer in answers:
+        if isinstance(answer, RemoteFailure):
+            print(f"{answer.remote}\t{answer.code}", file=sys.stderr)
+            failed = True
+            continue
+        print(f"# {answer.remote}")
+        for hit in answer.hits:
+            print(
+                f"{hit.rank}\t{hit.name}\t{hit.title}\t"
+                f"{hit.updated}\t{hit.size}"
+            )
+    return 1 if failed else 0
+
+
+def cmd_search(root: Path, args: list[str]) -> int:
+    parsed = parse_search_args(args)
+    if parsed is None:
+        print(_usage(), file=sys.stderr)
+        return 2
+    if not parsed.names and not parsed.every:
+        return vectors.search(root, parsed.query, n=parsed.n, kind=parsed.kind)
+    kb = Kb(root)
+    try:
+        selected = select_remotes(kb.config, parsed.names, parsed.every)
+    except ValueError as exc:
+        print(f"llmwiki: search: {exc}", file=sys.stderr)
+        return 2
+    answers: tuple[Answer, ...] = ()
+    if kb.wiki.is_dir():
+        answers += (local_answer(kb, parsed.query, parsed.n, parsed.kind),)
+    answers += remotes.fan_out(selected, parsed.query, parsed.n, parsed.kind)
+    return print_answers(answers)
+
+
+def local_page(kb: Kb, name: str) -> Path | None:
+    """The page's resolved path, or `None`. The resolved parent must
+    equal `kb.wiki.resolve()`, equality rather than `is_relative_to` so
+    a page in a subdirectory is refused too, and the suffix must be
+    `.md`. Both sides resolved, because a symlinked kb root is a normal
+    deployment. An embedded NUL makes `resolve` raise ValueError."""
+    try:
+        candidate = (kb.wiki / name).resolve()
+    except ValueError:
+        return None
+    if candidate.parent != kb.wiki.resolve() or candidate.suffix != ".md":
+        return None
+    return candidate
+
+
+def cmd_page(root: Path, args: list[str]) -> int:
+    name, remote_name = None, None
+    index = 0
+    while index < len(args):
+        if args[index] == "--remote":
             if index + 1 >= len(args):
                 print(_usage(), file=sys.stderr)
                 return 2
-            value = args[index + 1]
-            if arg == "-n":
-                try:
-                    n = int(value)
-                except ValueError:
-                    print(_usage(), file=sys.stderr)
-                    return 2
-                if n < 1:
-                    print(_usage(), file=sys.stderr)
-                    return 2
-            else:
-                kind = value
-            index += 2
-        else:
-            query_parts.append(arg)
-            index += 1
-    if not query_parts:
+            remote_name, index = args[index + 1], index + 2
+            continue
+        if name is not None:
+            print(_usage(), file=sys.stderr)
+            return 2
+        name, index = args[index], index + 1
+    if name is None:
         print(_usage(), file=sys.stderr)
         return 2
-    return vectors.search(root, " ".join(query_parts), n=n, kind=kind)
+    kb = Kb(root)
+    if remote_name is None:
+        return _write_local_page(kb, name)
+    try:
+        (remote,) = select_remotes(kb.config, (remote_name,), False)
+    except ValueError as exc:
+        print(f"llmwiki: page: {exc}", file=sys.stderr)
+        return 2
+    try:
+        sys.stdout.buffer.write(remotes.page(remote, name))
+    except RemoteError as exc:
+        print(f"{remote.name}\t{exc.code}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _write_local_page(kb: Kb, name: str) -> int:
+    path = local_page(kb, name)
+    try:
+        body = path.read_bytes() if path is not None else None
+    except OSError:
+        body = None
+    if body is None:
+        print(f"{LOCAL_LABEL}\tnot_found", file=sys.stderr)
+        return 1
+    sys.stdout.buffer.write(body)
+    return 0
 
 
 Verb = Callable[[Path, list[str]], int]
@@ -204,8 +375,10 @@ VERBS: dict[str, tuple[Verb, str]] = {
     "status": (cmd_status, "status          pages without a vector, sources without a summary"),
     "search": (
         cmd_search,
-        "search <query> [-n N] [--kind K]  nearest pages, one line each",
+        "search <query> [-n N] [--kind K] [--remote NAME]... [--all]  "
+        "nearest pages, one line each",
     ),
+    "page": (cmd_page, "page [--remote NAME] <page>  print one page's bytes"),
 }
 
 
