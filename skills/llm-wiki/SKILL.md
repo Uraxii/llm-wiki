@@ -85,12 +85,14 @@ pattern = "^[A-Z]{2}\\d{6}$"
 describe = "equipment serial, two letters then six digits"
 ```
 
-This is not decoration. Two mechanisms run on identifiers and only on
-identifiers: joining a new summary into an existing story, and warning
-you when a new source touches a page you wrote. A kb that declares no
-keys gets one story per source forever and never warns you about
-anything. Declare at least one key that genuinely discriminates, and
-declare no key you cannot write a real pattern for.
+This is not decoration. The push warning below runs on identifiers and
+only on identifiers. Story joining does too, unless you also set
+`[models] dedup` (next), in which case a summary can join a story
+through vector similarity even where no identifier matches. A kb that
+declares no keys and leaves `dedup` unset gets one story per source
+forever and never warns you about anything. Declare at least one key
+that genuinely discriminates, and declare no key you cannot write a
+real pattern for.
 
 **3. Point at an endpoint and name the models.**
 
@@ -98,7 +100,7 @@ declare no key you cannot write a real pattern for.
 [models]
 summarize = "<chat model id>"
 embed = "<embedding model id>"
-# Leave `dedup` unset. See Sharp edges.
+# dedup is optional. See "How summaries join into stories" below.
 
 [endpoint]
 url = "https://api.example.com/v1"
@@ -128,9 +130,9 @@ search` works without you handling a key, that is why, and you should
 not go looking for one.
 
 Which verbs need it: `ingest`, `summarize`, `embed`, `search`, and
-`dedup` only when a judge model is configured, which you should not do.
-`init`, `where`, `lint` and `status` never call a model and work with
-no key at all.
+`dedup` when `[models] dedup` is configured. `init`, `where`, `lint`
+and `status` never call a model and work with no key at all. A remote
+search or a remote `page` uses a different credential; see below.
 
 ## Keeping something
 
@@ -151,6 +153,30 @@ If a page you wrote shares an identifier with the new source, `ingest`
 prints a `push` line naming your page. That is the signal to go update
 it.
 
+## How summaries join into stories
+
+Every new summary joins an existing story or starts one. `dedup
+--rebuild` redoes this for every summary from scratch, useful after
+you edit `config.toml`.
+
+With `[models] dedup` unset, a summary joins the story it shares the
+most identifiers with, decided without a model call. Two summaries
+with no identifier in common never join, however alike their subjects.
+
+With `[models] dedup` set, `dedup` also calls that model to judge
+subject identity, at a fixed temperature so the same candidate gets
+the same answer on a replay. Candidates then come from two places:
+shared identifiers, and the nearest existing stories by vector
+similarity, so two summaries can join with no identifier vocabulary
+declared at all. Measured on the recipe fixture: joins driven by an
+identifier vocabulary ran 6 of 6, joins driven by vector similarity
+alone ran 4 of 4, and an unrelated subject stayed in its own story 10
+of 10.
+
+A poorly worded summary can still lose a join it should have made.
+That was already true; the fixed temperature just makes it fail the
+same way every time instead of only sometimes.
+
 ## Asking the wiki something
 
 ```
@@ -167,6 +193,58 @@ query ran 0.63, and a query the kb had nothing on topped out at 0.09.
 `search` embeds your query, so it needs `[models] embed` and the
 credential. It refuses to answer while any page lacks a current vector,
 which is what `embed` is for.
+
+## Asking other wikis
+
+A kb can name other wikis to ask alongside its own, in its own
+`config.toml`:
+
+```toml
+[remotes.otherwiki]
+url = "https://wiki.example.internal"
+token_env = "OTHERWIKI_TOKEN"
+mode = "read"
+```
+
+`url` must be `https`, with no userinfo, query, or fragment.
+`token_env` names an environment variable holding that remote's
+credential, read fresh on every call; a remote with no `token_env`
+sends no credential. That credential is separate from
+`LLM_WIKI_API_KEY`, which only ever talks to this kb's own model
+endpoint. `mode` is advisory; `read` is the only value accepted today.
+
+```
+llmwiki search "query" --remote otherwiki
+llmwiki search "query" --remote otherwiki --remote another
+llmwiki search "query" --all              # every remote in [remotes]
+```
+
+`--remote NAME` repeats to name several remotes. `--all` adds every
+remote in `[remotes]`. Either flag also asks the local kb, under the
+label `local`, as long as the kb has a `wiki/` directory.
+
+Results come back as one ranked list per wiki, under a `# <name>`
+header, and are NEVER merged into one ranking. A similarity score is
+comparable only inside one embedding model's distribution, so a score
+from one wiki and a score from another were never on the same scale;
+comparing them is a mistake this tool refuses to make for you. Under
+`--remote` or `--all`, the printed line drops the score and shows a
+rank inside that wiki's own list only:
+`<rank>\t<name>\t<title>\t<updated>\t<size>`. Plain `search`, with no
+remote flag, is unchanged and still prints
+`<score>\t<name>\t<title>\t<updated>\t<size>`.
+
+A wiki that fails, local or remote, prints `<name>\t<code>` to stderr
+instead of a block, and the whole command exits 1, even though every
+other wiki's ranking printed fine. Plain `search` keeps its own exit
+code and is not affected by this.
+
+`llmwiki page <name>` prints one local page's bytes. `llmwiki page
+--remote NAME <page>` fetches that page from a remote instead, and on
+failure prints `<name>\t<code>` to stderr and exits 1, the same shape
+as a failed search participant.
+
+There is no `schema` verb. It is not built.
 
 ## Writing your own pages
 
@@ -204,21 +282,22 @@ will not delete a source. It will not overwrite a good page with a bad
 one: a generated page that fails its own lint is dropped, and the page
 it would have replaced survives.
 
-## Sharp edges
+## The service
 
-Verified, and open on the tracker at the time of writing.
+`agent-kb` also ships `llmwiki_service`, the HTTP service that answers
+the `/search` and `/page` routes a `[remotes]` entry points at.
+Setting one up is an operator task, covered in
+`docs/plans/02-llmwiki-service/` and `llmwiki_service/admin.py`, not
+here.
 
-- **Declare an identifier vocabulary and leave `[models] dedup` unset.**
-  Those are the settings under which sources join into one story. With
-  no vocabulary, nothing ever joins. With a judge configured, nothing
-  ever joins either, because the judge is prompted with an
-  incident-tracker definition of sameness, "one real-world occurrence",
-  and two sources merely about the same subject are correctly NONE
-  under it. Measured on one kb, three sources, `dish` declared: judge
-  configured gave three singleton stories despite two pages carrying an
-  identical `dish:creme brulee`; the same kb with the judge removed and
-  `dedup --rebuild` joined those two into one story, no model call.
-  `agent-kb-zn6`, `agent-kb-d1w`.
-- **A missing `[models] embed` is reported as missing vectors** by
-  `status` and `search`. Check `config.toml` before you go looking for
-  a data problem. `agent-kb-5ty`.
+One fact worth knowing as a caller: an operator mints your remote
+token with `POST /admin/tokens`, which returns the plaintext exactly
+once, lists tokens with `GET /admin/tokens`, and revokes one with
+`DELETE /admin/tokens/{label}`. The bootstrap admin credential that
+mints the first token cannot be revoked at runtime; the operator's
+path for that is mint a real token, unset the bootstrap variable, and
+restart. If a remote token you were given stops working, that is the
+kind of thing to ask the operator about.
+
+The wheel only started shipping `llmwiki_service` recently. An older
+install of this package has no service in it at all.
