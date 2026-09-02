@@ -10,6 +10,7 @@ module.
 from __future__ import annotations
 
 import math
+import secrets
 import time
 from collections import OrderedDict, deque
 from collections.abc import Mapping
@@ -55,6 +56,12 @@ class Refusal:
 
 
 ANONYMOUS = Principal(token_id="", label="anonymous", role="reader")
+# The operator holding LLM_WIKI_BOOTSTRAP_ADMIN_TOKEN. `token_id` is
+# "bootstrap", not "": the empty string is `ANONYMOUS`'s value and
+# `routes.py` reads it as the sentinel for "key the search limit on the
+# address instead of on a token". A real id is sixteen hex characters
+# (`tokens._ID_PATTERN`), so this literal can never collide with one.
+BOOTSTRAP = Principal(token_id="bootstrap", label="bootstrap", role="admin")
 UNAUTHORIZED = Refusal("unauthorized")
 
 
@@ -260,6 +267,48 @@ def authorize(
     if row is None or ROLE_RANK.get(row.role, 0) < ROLE_RANK[required]:
         return _refuse(limiter, client)
     return Principal(token_id=row.id, label=row.label, role=row.role)
+
+
+def authorize_admin(
+    header: str | None,
+    bootstrap: str | None,
+    access: Mapping[str, str],
+    store: TokenStore,
+    limiter: FailureLimiter,
+    client: str,
+) -> Principal | Refusal:
+    """Resolve `header` for an admin operation: the bootstrap
+    credential first, then `authorize` against the token database
+    unchanged.
+
+    A second function rather than a second credential source inside
+    `authorize`, so the gate that every read goes through keeps exactly
+    one source and one set of mutants to reason about. A minted `admin`
+    token still works here, because the delegate call is the ordinary
+    `authorize(header, "admin", ...)`.
+
+    Both paths share this `limiter` and this `client`, so the failure
+    budget is a total across the read gate and this one rather than one
+    budget each. The window is checked before the comparison too: a
+    caller that has spent its budget is refused whatever it presents.
+
+    The comparison runs on bytes. `secrets.compare_digest` raises
+    `TypeError` on a string holding a non-ASCII character, and the
+    caller controls the header, so comparing strings would turn a junk
+    credential into a 500 rather than a 401. `bootstrap` is `None` when
+    the environment set nothing, and then no header matches it.
+    """
+    retry_after = limiter.retry_after(client)
+    if retry_after is not None:
+        return Refusal("rate_limited", retry_after)
+    token = bearer_token(header)
+    if (
+        token is not None
+        and bootstrap
+        and secrets.compare_digest(token.encode(), bootstrap.encode())
+    ):
+        return BOOTSTRAP
+    return authorize(header, "admin", access, store, limiter, client)
 
 
 def _refuse(limiter: FailureLimiter, client: str) -> Refusal:

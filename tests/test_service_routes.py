@@ -137,7 +137,12 @@ class RouteTestCase(unittest.IsolatedAsyncioTestCase):
     def build(self, **kw) -> app.ASGIApp:
         search_limiter = kw.pop("search_limiter", self.search_limiter)
         return app.build_app(
-            None, self.deployment(**kw), self.store, self.failure_limiter, search_limiter
+            None,
+            self.deployment(**kw),
+            self.store,
+            self.failure_limiter,
+            search_limiter,
+            None,
         )
 
     def reader_token(self) -> str:
@@ -699,6 +704,7 @@ class DeploymentDefaultsTest(RouteTestCase):
             self.store,
             self.failure_limiter,
             self.search_limiter,
+            None,
         )
 
     async def test_a_deployment_with_no_access_key_refuses_with_401(self) -> None:

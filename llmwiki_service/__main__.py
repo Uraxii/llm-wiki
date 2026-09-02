@@ -63,15 +63,11 @@ def _terminate_mode_config(
     tls_cfg: dict,
     host: str,
     port: int,
-    trusted_proxy: app_module.IPAddress | None,
     stop_event: threading.Event,
-    depl: dict,
-    store: tokens.TokenStore,
-    failure_limiter: auth.FailureLimiter,
-    search_limiter: auth.SearchLimiter,
+    application: app_module.ASGIApp,
 ) -> tuple[uvicorn.Config, threading.Thread]:
-    """The `uvicorn.Config` for `mode = "terminate"`, and the watcher
-    thread it started.
+    """The `uvicorn.Config` for `mode = "terminate"` serving
+    `application`, and the watcher thread it started.
 
     Builds the holder, wires `SIGHUP` and the file watcher to the same
     `ContextHolder.reload`, and hands uvicorn a context whose identity
@@ -104,9 +100,7 @@ def _terminate_mode_config(
     watcher.start()
 
     config = uvicorn.Config(
-        app_module.build_app(
-            trusted_proxy, depl, store, failure_limiter, search_limiter
-        ),
+        application,
         host=host,
         port=port,
         proxy_headers=False,  # ForwardedHeaderMiddleware owns this, gated on trusted_proxy
@@ -141,18 +135,21 @@ async def _serve(depl: dict) -> int:
     watcher: threading.Thread | None = None
     mode = deployment.tls_mode(depl)
     store, failure_limiter, search_limiter = _build_auth_state(depl)
+    # Built once, before the mode branch: both branches serve the same
+    # application, and building it per branch is how two code paths
+    # start disagreeing about which routes exist.
+    application = app_module.build_app(
+        trusted_proxy,
+        depl,
+        store,
+        failure_limiter,
+        search_limiter,
+        deployment.bootstrap_admin_token(os.environ),
+    )
 
     if mode == deployment.TERMINATE:
         config, watcher = _terminate_mode_config(
-            tls_cfg,
-            host,
-            port,
-            trusted_proxy,
-            stop_event,
-            depl,
-            store,
-            failure_limiter,
-            search_limiter,
+            tls_cfg, host, port, stop_event, application
         )
     elif mode == deployment.UPSTREAM:
         # Row 10 already required `bind` to be a private interface, so
@@ -164,9 +161,7 @@ async def _serve(depl: dict) -> int:
             )
         )
         config = uvicorn.Config(
-            app_module.build_app(
-                trusted_proxy, depl, store, failure_limiter, search_limiter
-            ),
+            application,
             host=host,
             port=port,
             proxy_headers=False,  # ForwardedHeaderMiddleware owns this, gated on trusted_proxy

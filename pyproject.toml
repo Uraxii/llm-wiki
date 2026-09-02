@@ -2,10 +2,16 @@
 name = "llmwiki"
 version = "0.1.0"
 requires-python = ">=3.14"
-dependencies = ["sqlite-vec"]
+dependencies = ["sqlite-vec", "starlette", "uvicorn"]
+
+[project.optional-dependencies]
+dev = ["mutmut"]
 
 [project.scripts]
 llmwiki = "llmwiki.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llmwiki", "llmwiki_service"]
 
 [build-system]
 requires = ["hatchling"]
@@ -13,7 +19,7 @@ build-backend = "hatchling.build"
 
 [tool.mutmut]
 source_paths = ["llmwiki_service"]
-only_mutate = ["llmwiki_service/auth.py", "llmwiki_service/tokens.py", "llmwiki_service/deployment.py", "llmwiki_service/app.py", "llmwiki_service/tls.py", "llmwiki_service/routes.py"]
+only_mutate = ["llmwiki_service/auth.py", "llmwiki_service/tokens.py", "llmwiki_service/deployment.py", "llmwiki_service/app.py", "llmwiki_service/tls.py", "llmwiki_service/routes.py", "llmwiki_service/admin.py"]
 pytest_add_cli_args_test_selection = [
     "tests/test_service_auth.py",
     "tests/test_service_tokens.py",
@@ -21,5 +27,6 @@ pytest_add_cli_args_test_selection = [
     "tests/test_service_app.py",
     "tests/test_service_tls.py",
     "tests/test_service_routes.py",
+    "tests/test_service_admin.py",
 ]
 also_copy = ["llmwiki"]
