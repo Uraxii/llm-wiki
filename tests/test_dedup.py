@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import parse_frontmatter, render_frontmatter  # noqa: E402
 from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
 from llmwiki import cli, dedup  # noqa: E402
+from llmwiki.dedup import DEDUP_PROMPT  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
 
 DEFAULT_CONFIG = '[models]\nsummarize = "cheap"\n\n[identifiers.tag]\n'
@@ -182,6 +183,30 @@ class DedupTest(unittest.TestCase):
         self.assertEqual(len(fake.requests), 1)
         self.assertTrue((self.root / "wiki" / "fresh-gadget.md").is_file())
         self.assertEqual(self._fields("candidate-story")["members"], ["deadbeef01"])
+
+    def test_judge_call_pins_temperature_zero(self) -> None:
+        """The judge is a classifier under a one-line reply contract,
+        and sampling it made the same frozen case answer NONE, join,
+        NONE. Nothing else in the body may move."""
+        self._write_story("candidate-story", "Candidate Story", ["deadbeef03"], ["tag:shared"])
+        digest = self._digest("temperature source text")
+        self._write_summary("summary-file", digest, "Warm Gadget", ["tag:shared"])
+
+        def respond(_path, _body):
+            return {"choices": [{"message": {"content": "NONE\n"}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(
+                '[models]\nsummarize = "cheap"\ndedup = "judge"\n\n'
+                f'[endpoint]\nurl = "{fake.url}"\n\n[identifiers.tag]\n'
+            )
+            code, _out = _run_quiet(self.root)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(fake.requests), 1)
+        body = fake.requests[0].body
+        self.assertEqual(body["temperature"], 0)
+        self.assertEqual(sorted(body), ["messages", "model", "temperature"])
 
     def test_garbage_reply_gives_new_story_and_logs(self) -> None:
         self._write_story("candidate-story", "Candidate Story", ["deadbeef02"], ["tag:shared"])
@@ -441,6 +466,86 @@ class DedupTest(unittest.TestCase):
     def test_cli_rebuild_rejects_misordered_flag(self) -> None:
         code = cli.main(["--kb", str(self.root), "dedup", "abc", "--rebuild"])
         self.assertEqual(code, 2)
+
+
+class DedupPromptSubjectFramingTest(unittest.TestCase):
+    """Pins agent-kb-d1w: every paragraph of DEDUP_PROMPT states story
+    identity as ONE SUBJECT, and no paragraph states it as one
+    real-world occurrence or one event. Measured live (same page, same
+    candidate, same model): the occurrence framing returned NONE and
+    rejected a correct join; the subject framing joined it, 3 of 3.
+
+    An earlier edit swapped the first two occurrence phrases for
+    subject phrases and left three occurrence-framed sentences
+    standing, so the prompt stated a rule and then vetoed it. The
+    pinning test of the day passed anyway, because it only checked
+    that the word "subject" was present and one phrase absent. The
+    vocabulary ban below is what makes that impossible to repeat: a
+    surviving occurrence-identity or event-identity sentence has to
+    carry one of these words."""
+
+    OCCURRENCE_WORDS = (
+        "occurrence",
+        "event",
+        "incident",
+        "happened",
+        "real-world",
+    )
+
+    def test_no_occurrence_or_event_identity_wording(self) -> None:
+        lowered = DEDUP_PROMPT.lower()
+        for word in self.OCCURRENCE_WORDS:
+            with self.subTest(word=word):
+                self.assertNotIn(word, lowered)
+
+    def test_defines_identity_as_one_subject(self) -> None:
+        self.assertIn("A story covers ONE subject.", DEDUP_PROMPT)
+        self.assertIn("SAME subject", DEDUP_PROMPT)
+
+    def test_shared_identifiers_are_still_not_evidence(self) -> None:
+        self.assertIn(
+            "A shared identifier is NOT by itself evidence of a match. "
+            "A place, product, or person can appear in many unrelated "
+            "stories.",
+            DEDUP_PROMPT,
+        )
+
+    def test_preamble_claims_no_shared_identifier(self) -> None:
+        """`candidates` unions identifier matches with vector
+        neighbours, so a candidate can arrive with no shared identifier
+        at all. On a kb with no identifier vocabulary every page carries
+        `identifiers: []` and EVERY candidate arrives that way. The
+        preamble must state both reasons, never assert one."""
+        self.assertNotIn("already share at least one identifier", DEDUP_PROMPT)
+        self.assertIn(
+            "A candidate is listed because it shares an identifier with "
+            "the new summary, because its text is among the nearest "
+            "matches to it, or both.",
+            DEDUP_PROMPT,
+        )
+
+    def test_default_to_none_instruction_tests_subject_identity(self) -> None:
+        self.assertIn(
+            "Default to NONE. Answer with a candidate slug only if you are "
+            "confident the two pages have the SAME subject; otherwise "
+            "answer NONE.",
+            DEDUP_PROMPT,
+        )
+
+    def test_gut_check_tests_subject_identity(self) -> None:
+        self.assertIn(
+            "would a reader see one subject, or two subjects that merely "
+            "share an identifier? Two means NONE.",
+            DEDUP_PROMPT,
+        )
+
+    def test_one_line_reply_contract_unchanged(self) -> None:
+        self.assertIn(
+            'Reply with exactly one line: the candidate\'s slug, as '
+            'written in its "=== CANDIDATE: <slug> ===" heading, or the '
+            "literal word NONE. No other text, no explanation.",
+            DEDUP_PROMPT,
+        )
 
 
 if __name__ == "__main__":

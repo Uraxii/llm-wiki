@@ -263,7 +263,68 @@ class VectorsTest(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertEqual(out.getvalue(), "")
-        self.assertIn("pages without a current vector; run embed first", err.getvalue())
+        self.assertIn(
+            "llmwiki: search: 1 page without a current vector; run embed first",
+            err.getvalue(),
+        )
+
+    def test_search_refusal_pluralizes_two_or_more_pages(self) -> None:
+        self._write_page("north", "North Page")
+        self._write_page("south", "South Page")
+        self._write_config(None)
+
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = vectors.search(self.root, "north", n=5)
+
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "llmwiki: search: 2 pages without a current vector; run embed first",
+            err.getvalue(),
+        )
+
+    # -- agent-kb-5ty: missing [models] embed named as cause, not "no vector"
+
+    def test_status_names_missing_embed_config_instead_of_no_vector(self) -> None:
+        """Nothing CAN be stored (no embed model configured) differs
+        from nothing IS stored (stale); status must say which."""
+        self._write_page("north", "North Page")
+        (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\n')
+
+        out = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = vectors.status(self.root)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn(
+            "llmwiki: status: missing [models].embed in config.toml",
+            err.getvalue(),
+        )
+
+    def test_search_names_missing_embed_config_before_any_paid_call(self) -> None:
+        """Same cause as the status case above; search must also name
+        it, and never reach the paid query embed to find out."""
+        self._write_page("north", "North Page")
+        (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\n')
+
+        def vector_for(_text):
+            raise AssertionError("must not embed before the config check")
+
+        with FakeEndpoint(_respond(vector_for)) as fake:
+            out = io.StringIO()
+            err = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = vectors.search(self.root, "north", n=5)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn(
+            "llmwiki: search: missing [models].embed in config.toml",
+            err.getvalue(),
+        )
+        self.assertEqual(fake.requests, [])
 
     def test_embed_missing_config_key_named_and_exits_2(self) -> None:
         self._write_page("north", "North Page")

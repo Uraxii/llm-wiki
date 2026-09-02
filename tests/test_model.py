@@ -69,6 +69,29 @@ class ChatTest(unittest.TestCase):
         )
         self.assertEqual(request.headers.get("Authorization"), "Bearer secret-key")
 
+    def test_temperature_sent_only_when_given(self) -> None:
+        """`test_request_shape_and_response` pins the whole body of a
+        call that leaves `temperature` unset, so omission is already
+        proved there. This pins the other half: passing it adds one
+        key and moves nothing else."""
+        with FakeEndpoint(_ok_chat) as fake, _env(
+            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
+        ):
+            config = {
+                "endpoint": {"url": fake.url},
+                "models": {"dedup": "judge-model"},
+            }
+            chat(config, "dedup", "pick one", temperature=0.0)
+
+        self.assertEqual(
+            fake.requests[0].body,
+            {
+                "model": "judge-model",
+                "messages": [{"role": "user", "content": "pick one"}],
+                "temperature": 0,
+            },
+        )
+
     def test_model_from_config_when_no_override(self) -> None:
         captured = {}
 
