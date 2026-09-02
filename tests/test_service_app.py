@@ -268,6 +268,7 @@ class BuildAppTest(unittest.TestCase):
             self.store,
             self.failure_limiter,
             self.search_limiter,
+            None,
         )
 
     def test_wraps_the_starlette_app_in_the_forwarded_header_middleware(self) -> None:

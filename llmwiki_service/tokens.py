@@ -38,6 +38,12 @@ MAX_PEPPER_BYTES = 64  # blake2b's key limit
 BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 ROLES = ("reader", "writer", "admin")
 
+# The label is the friendly name a human types to revoke a token, so
+# anything past a long hostname plus a person's name is a paste
+# accident. Counted in characters, not bytes: the cap exists to keep a
+# log line readable, and a log line is characters.
+MAX_LABEL_CHARS = 128
+
 PEPPER_ENV_VAR = "LLM_WIKI_PEPPER"
 
 # Explicit, not sqlite3's implicit default: a concurrent writer gets
@@ -205,11 +211,24 @@ class TokenStore:
         A label holding a control character is refused, because the
         label is what a log line names in place of the token, and a
         label carrying a newline can forge a second line.
+
+        The whole label contract lives here rather than in a caller:
+        every caller of `mint` gets it, including a route, a test that
+        mints a fixture, and any later local command. A label is at
+        most `MAX_LABEL_CHARS` characters, is not empty or whitespace
+        only, has no leading or trailing whitespace, and holds no
+        character `flatten` would collapse. The whitespace rule is not
+        cosmetic: "ops" and "ops " are otherwise two rows that read
+        identically in a listing and revoke separately.
         """
         if role not in ROLES:
             raise ValueError(f"unknown role: {role}")
         if not label.strip():
             raise ValueError("a token needs a label to be revoked by")
+        if len(label) > MAX_LABEL_CHARS:
+            raise ValueError(f"a label is at most {MAX_LABEL_CHARS} characters")
+        if label.strip() != label:
+            raise ValueError("a label must not begin or end with whitespace")
         if flatten(label) != label:
             raise ValueError("a label must hold no control characters")
         row_id, token = new_token()

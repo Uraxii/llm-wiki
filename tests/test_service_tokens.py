@@ -272,6 +272,51 @@ class StoreTest(unittest.TestCase):
                     "a label must hold no control characters",
                 )
 
+    def test_mint_rejects_an_oversized_label(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self.store.mint("a" * (tokens.MAX_LABEL_CHARS + 1), "reader")
+        self.assertEqual(
+            str(caught.exception),
+            f"a label is at most {tokens.MAX_LABEL_CHARS} characters",
+        )
+        self.assertEqual(self.rows(), [])
+
+    def test_a_label_of_exactly_the_cap_is_accepted(self) -> None:
+        label = "a" * tokens.MAX_LABEL_CHARS
+        self.store.mint(label, "reader")
+        self.assertEqual([row.label for row in self.store.list_tokens()], [label])
+
+    def test_the_cap_counts_characters_not_bytes(self) -> None:
+        # Each of these is four UTF-8 bytes, so a byte cap would refuse
+        # a label the character cap accepts.
+        label = "\U0001f600" * tokens.MAX_LABEL_CHARS
+        self.store.mint(label, "reader")
+        self.assertEqual([row.label for row in self.store.list_tokens()], [label])
+
+    def test_mint_rejects_a_label_with_edge_whitespace(self) -> None:
+        for label in ("ops ", " ops", "\tops", "ops\n"):
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError) as caught:
+                    self.store.mint(label, "reader")
+                self.assertEqual(
+                    str(caught.exception),
+                    "a label must not begin or end with whitespace",
+                )
+        self.assertEqual(self.rows(), [])
+
+    def test_inner_whitespace_is_still_a_valid_label(self) -> None:
+        self.store.mint("nicole laptop", "reader")
+        self.assertEqual(
+            [row.label for row in self.store.list_tokens()], ["nicole laptop"]
+        )
+
+    def test_a_whitespace_only_label_is_refused_as_empty(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self.store.mint("  ", "reader")
+        self.assertEqual(
+            str(caught.exception), "a token needs a label to be revoked by"
+        )
+
     def test_a_non_ascii_token_verifies_to_none(self) -> None:
         self.assertIsNone(self.store.verify("\U0001f600" * 12))
 

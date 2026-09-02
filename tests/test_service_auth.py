@@ -391,6 +391,137 @@ class SearchLimiterTest(unittest.TestCase):
         self.assertGreater(result, 0)
 
 
+class AdminGateTest(unittest.TestCase):
+    """`authorize_admin`: the bootstrap credential first, then the token
+    database through `authorize` unchanged."""
+
+    BOOTSTRAP_VALUE = "bootstrap-secret"
+
+    def setUp(self) -> None:
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = tokens.TokenStore(
+            Path(self.dir.name) / "tokens.sqlite", PEPPERS
+        )
+        self.limiter = auth.FailureLimiter()
+        self.reader = self.store.mint("reader-key", "reader")
+        self.writer = self.store.mint("writer-key", "writer")
+        self.admin = self.store.mint("admin-key", "admin")
+
+    def gate(self, header, bootstrap=BOOTSTRAP_VALUE, access=CLOSED, client="peer"):
+        return auth.authorize_admin(
+            header, bootstrap, access, self.store, self.limiter, client
+        )
+
+    def test_the_bootstrap_value_authenticates(self) -> None:
+        self.assertIs(self.gate(bearer(self.BOOTSTRAP_VALUE)), auth.BOOTSTRAP)
+
+    def test_the_bootstrap_principal_is_an_admin_named_bootstrap(self) -> None:
+        self.assertEqual(auth.BOOTSTRAP.role, "admin")
+        self.assertEqual(auth.BOOTSTRAP.label, "bootstrap")
+
+    def test_the_bootstrap_token_id_is_never_the_anonymous_sentinel(self) -> None:
+        """`routes.py` keys the search limit on the address whenever
+        `token_id` is falsy, so an empty id here would pool the
+        operator with every anonymous caller."""
+        self.assertEqual(auth.BOOTSTRAP.token_id, "bootstrap")
+        self.assertNotEqual(auth.BOOTSTRAP.token_id, auth.ANONYMOUS.token_id)
+        self.assertIsNone(tokens._ID_PATTERN.fullmatch(auth.BOOTSTRAP.token_id))
+
+    def test_a_minted_admin_token_also_authenticates(self) -> None:
+        principal = self.gate(bearer(self.admin))
+        self.assertEqual((principal.label, principal.role), ("admin-key", "admin"))
+
+    def test_a_writer_and_a_reader_are_refused(self) -> None:
+        for token in (self.writer, self.reader):
+            with self.subTest(token=token):
+                self.assertIs(self.gate(bearer(token)), auth.UNAUTHORIZED)
+
+    def test_an_absent_credential_is_refused(self) -> None:
+        self.assertIs(self.gate(None), auth.UNAUTHORIZED)
+
+    def test_a_credential_one_byte_off_is_refused(self) -> None:
+        self.assertIs(
+            self.gate(bearer(self.BOOTSTRAP_VALUE + "x")), auth.UNAUTHORIZED
+        )
+        self.assertIs(
+            self.gate(bearer(self.BOOTSTRAP_VALUE[:-1])), auth.UNAUTHORIZED
+        )
+
+    def test_a_prefix_of_the_bootstrap_value_is_not_accepted(self) -> None:
+        self.assertIs(self.gate(bearer("bootstrap")), auth.UNAUTHORIZED)
+
+    def test_a_non_ascii_credential_is_refused_and_never_raises(self) -> None:
+        """`secrets.compare_digest` raises `TypeError` on a non-ASCII
+        string, and the caller controls the header, so a comparison on
+        strings would turn junk into a 500."""
+        self.assertIs(self.gate(bearer("café" * 9)), auth.UNAUTHORIZED)
+        self.assertIs(self.gate(bearer("\U0001f511" * 10)), auth.UNAUTHORIZED)
+
+    def test_a_non_ascii_bootstrap_value_still_compares(self) -> None:
+        self.assertIs(
+            self.gate(bearer("café"), bootstrap="café"), auth.BOOTSTRAP
+        )
+
+    def test_an_unset_bootstrap_value_matches_nothing(self) -> None:
+        for empty in (None, ""):
+            with self.subTest(bootstrap=empty):
+                self.assertIs(self.gate(None, bootstrap=empty), auth.UNAUTHORIZED)
+                self.assertIs(
+                    self.gate(bearer(""), bootstrap=empty), auth.UNAUTHORIZED
+                )
+                self.assertIs(
+                    self.gate("Bearer ", bootstrap=empty), auth.UNAUTHORIZED
+                )
+        self.assertEqual(self.gate(bearer(self.admin), bootstrap=None).role, "admin")
+
+    def test_access_admin_open_does_not_open_this_gate(self) -> None:
+        wide = {"read": "open", "write": "open", "admin": "open"}
+        self.assertIs(self.gate(None, access=wide), auth.UNAUTHORIZED)
+
+    def test_a_failed_guess_costs_one_failure_not_two(self) -> None:
+        self.gate(bearer("rubbish"))
+        self.assertEqual(self.limiter.retry_after("peer"), None)
+        for _ in range(auth.MAX_FAILURES_PER_WINDOW - 2):
+            self.gate(bearer("rubbish"))
+        self.assertIs(self.gate(bearer("rubbish")), auth.UNAUTHORIZED)
+        self.assertEqual(self.gate(bearer("rubbish")).reason, "rate_limited")
+
+    def test_the_two_gates_share_one_budget(self) -> None:
+        """Failures spent on the read gate leave none for this one."""
+        for _ in range(auth.MAX_FAILURES_PER_WINDOW):
+            auth.authorize(
+                bearer("rubbish"), "read", CLOSED, self.store, self.limiter, "peer"
+            )
+        refusal = self.gate(bearer(self.BOOTSTRAP_VALUE))
+        self.assertEqual(refusal.reason, "rate_limited")
+        self.assertGreater(refusal.retry_after, 0)
+
+    def test_the_budget_is_per_caller(self) -> None:
+        for _ in range(auth.MAX_FAILURES_PER_WINDOW + 1):
+            self.gate(bearer("rubbish"), client="noisy")
+        self.assertIs(
+            self.gate(bearer(self.BOOTSTRAP_VALUE), client="quiet"), auth.BOOTSTRAP
+        )
+
+    def test_a_rate_limited_caller_is_refused_even_with_the_right_value(self) -> None:
+        for _ in range(auth.MAX_FAILURES_PER_WINDOW):
+            self.gate(bearer("rubbish"))
+        self.assertEqual(
+            self.gate(bearer(self.BOOTSTRAP_VALUE)).reason, "rate_limited"
+        )
+
+    def test_a_successful_bootstrap_call_costs_no_budget(self) -> None:
+        for _ in range(auth.MAX_FAILURES_PER_WINDOW * 3):
+            self.assertIs(self.gate(bearer(self.BOOTSTRAP_VALUE)), auth.BOOTSTRAP)
+        self.assertEqual(self.limiter.tracked(), [])
+
+    def test_a_malformed_header_gives_the_same_refusal(self) -> None:
+        for header in ("", "Basic x", self.BOOTSTRAP_VALUE, "Bearer"):
+            with self.subTest(header=header):
+                self.assertIs(self.gate(header), auth.UNAUTHORIZED)
+
+
 class RequiredClientTest(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = tempfile.TemporaryDirectory()

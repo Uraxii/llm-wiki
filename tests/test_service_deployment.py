@@ -1,4 +1,4 @@
-"""The deployment file parser and the 13-row startup refusal table."""
+"""The deployment file parser and the 14-row startup refusal table."""
 from __future__ import annotations
 
 import os
@@ -276,6 +276,75 @@ class WriteOpenCheckTest(DeploymentTestBase):
             with self.subTest(typo=typo):
                 depl["access"]["write"] = typo
                 self.assertIsNone(deployment._check_write_open(depl, {}))
+
+
+class AdminOpenCheckTest(DeploymentTestBase):
+    """Row 14. The gate ignores `[access] admin`, so a file that sets it
+    to "open" describes a service that does not exist."""
+
+    def test_admin_open_refused(self) -> None:
+        depl = self.terminate_deployment()
+        depl["access"]["admin"] = "open"
+        message = deployment._check_admin_open(depl, {})
+        self.assertEqual(
+            message,
+            '[access] admin = "open" is refused; the gate opens only read, '
+            "so this describes a service that does not exist",
+        )
+
+    def test_admin_token_is_not_refused(self) -> None:
+        self.assertIsNone(
+            deployment._check_admin_open(self.terminate_deployment(), {})
+        )
+
+    def test_no_access_table_is_not_refused(self) -> None:
+        self.assertIsNone(deployment._check_admin_open({}, {}))
+
+    def test_a_typo_is_not_treated_as_open(self) -> None:
+        depl = self.terminate_deployment()
+        for typo in ("Open", "OPEN", "opn", " open"):
+            with self.subTest(typo=typo):
+                depl["access"]["admin"] = typo
+                self.assertIsNone(deployment._check_admin_open(depl, {}))
+
+    def test_read_open_does_not_trip_the_admin_row(self) -> None:
+        depl = self.terminate_deployment()
+        depl["access"]["read"] = "open"
+        self.assertIsNone(deployment._check_admin_open(depl, {}))
+
+    def test_the_whole_deployment_is_refused_by_setting_name(self) -> None:
+        depl = self.terminate_deployment()
+        depl["server"]["bind"] = "127.0.0.1:8443"
+        depl["access"]["admin"] = "open"
+        refusals = deployment.check_deployment(depl, base_environ())
+        self.assertEqual(len(refusals), 1)
+        self.assertIn('[access] admin = "open"', refusals[0])
+
+
+class BootstrapAdminTokenTest(unittest.TestCase):
+    """The one reader of the bootstrap variable, shared by row 5 and
+    `auth.authorize_admin`."""
+
+    def test_a_set_value_is_returned(self) -> None:
+        self.assertEqual(
+            deployment.bootstrap_admin_token({ADMIN_ENV: "secret"}), "secret"
+        )
+
+    def test_unset_is_none(self) -> None:
+        self.assertIsNone(deployment.bootstrap_admin_token({}))
+
+    def test_empty_is_none_not_an_empty_credential(self) -> None:
+        """An empty string reaching the gate would be a credential an
+        empty header matches."""
+        self.assertIsNone(deployment.bootstrap_admin_token({ADMIN_ENV: ""}))
+
+    def test_row_five_reads_it_through_this_function(self) -> None:
+        self.assertIsNotNone(
+            deployment._check_admin_bootstrap({}, {ADMIN_ENV: ""})
+        )
+        self.assertIsNone(
+            deployment._check_admin_bootstrap({}, {ADMIN_ENV: "secret"})
+        )
 
 
 class TlsModeCheckTest(DeploymentTestBase):
@@ -616,8 +685,12 @@ class CheckDeploymentTest(DeploymentTestBase):
         self.assertIn(str(self.state), joined)
         self.assertIn(str(self.kb), joined)
 
-    def test_registry_covers_exactly_the_ten_parsed_dict_rows(self) -> None:
-        self.assertEqual([check.row for check in deployment.REGISTRY], list(range(4, 14)))
+    def test_registry_covers_exactly_the_eleven_parsed_dict_rows(self) -> None:
+        """Rows 4 to 14, in the table's own order. Row 14 is appended
+        rather than placed beside row 6, its natural neighbour, because
+        every `Check` carries the row number the phase 2 table gives it
+        and inserting in the middle would renumber seven of them."""
+        self.assertEqual([check.row for check in deployment.REGISTRY], list(range(4, 15)))
 
 
 class StartupRefusalsTest(DeploymentTestBase):

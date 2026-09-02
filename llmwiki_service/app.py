@@ -1,7 +1,8 @@
 """The starlette app. Phase 2 adds `/health` and the forwarded-header
 handling every route sits behind; phase 3 wires the four read routes
-in `routes.py` behind the same middleware. This module stays wiring
-only: a route that decides anything belongs in `routes.py` instead.
+in `routes.py` behind the same middleware, and phase 6 the three admin
+routes in `admin.py`. This module stays wiring only: a route that
+decides anything belongs in one of those two instead.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
-from llmwiki_service import routes
+from llmwiki_service import admin, routes
 from llmwiki_service.auth import FailureLimiter, SearchLimiter
 from llmwiki_service.tokens import TokenStore
 
@@ -176,20 +177,37 @@ def build_app(
     store: TokenStore,
     failure_limiter: FailureLimiter,
     search_limiter: SearchLimiter,
+    bootstrap: str | None,
 ) -> ASGIApp:
-    """The service's ASGI app: `/health` plus the four routes
-    `routes.make_routes` builds from `deployment`, `store`, and the two
-    limiters, all wrapped in the forwarded-header middleware, which is
-    what the return type says.
+    """The service's ASGI app: `/health`, the four routes
+    `routes.make_routes` builds, and the three
+    `admin.make_admin_routes` builds, all wrapped in the
+    forwarded-header middleware, which is what the return type says.
 
     `trusted_proxy` gates forwarded-header trust for every route,
     `/health` included, per phase 2's rule that it is read only when a
     deployment names a proxy.
+
+    `bootstrap` is the value of `LLM_WIKI_BOOTSTRAP_ADMIN_TOKEN`, read
+    by `deployment.bootstrap_admin_token`, and it authenticates the
+    admin routes and nothing else. It has no default: a caller that
+    omitted it would get a service whose admin routes no operator can
+    reach, and no startup refusal covers that.
+
+    The admin routes share one listener with the read routes and one
+    `FailureLimiter`. A second listener would share this process, this
+    store, and this limiter anyway, and would add a bind key, a startup
+    refusal, and a second socket to protect a boundary the operator
+    draws better with a firewall rule or a proxy that does not route
+    `/admin` from outside.
     """
     app = Starlette(
         routes=[
             Route("/health", health, methods=["GET"]),
             *routes.make_routes(deployment, store, failure_limiter, search_limiter),
+            *admin.make_admin_routes(
+                deployment, store, failure_limiter, bootstrap
+            ),
         ],
         exception_handlers={
             HTTPException: _router_error,

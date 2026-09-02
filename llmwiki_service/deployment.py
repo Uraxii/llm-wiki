@@ -1,7 +1,7 @@
 """The deployment file and the startup refusals that gate it.
 
 Phase 2 of docs/plans/02-llmwiki-service/phase-02-tls.md defines both the
-deployment file's keys and its 13-row refusal table in one place. This
+deployment file's keys and its 14-row refusal table in one place. This
 module is that table made runnable: a later unit calls `startup_refusals`
 once, before it binds a socket, and gets back every reason this
 deployment must not start.
@@ -9,13 +9,13 @@ deployment must not start.
 The first three refusals fire before the file is parsed at all (no
 argument, the path does not exist, the path exists and cannot be read),
 so there is no parsed dict yet for a check function to read. They are
-handled by `pre_parse_refusal`, not by the registry below. The other ten
-are a registry of small, named checks over the parsed dict: an ordered
-table instead of a 13-branch function, so a reviewer can compare it
-against the spec's table row by row.
+handled by `pre_parse_refusal`, not by the registry below. The other
+eleven are a registry of small, named checks over the parsed dict: an
+ordered table instead of a 14-branch function, so a reviewer can compare
+it against the spec's table row by row.
 
-None of the ten registry rows needs the service actually running: every
-one is checkable from the deployment file, the filesystem, and the
+None of the eleven registry rows needs the service actually running:
+every one is checkable from the deployment file, the filesystem, and the
 environment alone.
 """
 from __future__ import annotations
@@ -180,11 +180,24 @@ def _check_pepper(deployment: dict, environ: Mapping[str, str]) -> str | None:
     return None
 
 
+def bootstrap_admin_token(environ: Mapping[str, str]) -> str | None:
+    """`LLM_WIKI_BOOTSTRAP_ADMIN_TOKEN`, or `None` when it is unset or
+    empty.
+
+    The one reader of that variable. Row 5 below gates startup on it and
+    `auth.authorize_admin` authenticates against it, and an empty string
+    must mean the same "no bootstrap credential" to both: a gate that
+    read the raw value would compare an empty credential against an
+    empty header and let anyone in.
+    """
+    return environ.get(BOOTSTRAP_ADMIN_TOKEN_ENV_VAR) or None
+
+
 def _check_admin_bootstrap(deployment: dict, environ: Mapping[str, str]) -> str | None:
     """Row 5: no bootstrap admin token and no existing admin row.
     Minting requires admin, so a deployment with neither can never
     administer itself."""
-    if environ.get(BOOTSTRAP_ADMIN_TOKEN_ENV_VAR):
+    if bootstrap_admin_token(environ) is not None:
         return None
     if _admin_row_exists(deployment):
         return None
@@ -338,6 +351,20 @@ def _check_kbs_writable(deployment: dict, _environ: Mapping[str, str]) -> str | 
     return None
 
 
+def _check_admin_open(deployment: dict, _environ: Mapping[str, str]) -> str | None:
+    """Row 14: `[access] admin = "open"`. `auth.authorize` opens only
+    `read`, and only on the exact word `open`, so this setting is inert
+    rather than dangerous. Refusing is for the operator: silently
+    inert means a file that describes an unauthenticated mint, and a
+    reader of that file believes something false."""
+    if deployment.get("access", {}).get("admin") == OPEN:
+        return (
+            '[access] admin = "open" is refused; the gate opens only read, '
+            "so this describes a service that does not exist"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class Check:
     """One row of the phase 2 refusal table, numbered as it appears
@@ -348,7 +375,7 @@ class Check:
     run: Callable[[dict, Mapping[str, str]], str | None]
 
 
-# The ten refusals checkable against an already-parsed deployment, in
+# The eleven refusals checkable against an already-parsed deployment, in
 # the table's own order, each named after that row's "Condition" column
 # so a reviewer can walk this list beside the spec.
 REGISTRY: tuple[Check, ...] = (
@@ -393,6 +420,7 @@ REGISTRY: tuple[Check, ...] = (
         "any [kbs.<name>] path not writable by the running user",
         _check_kbs_writable,
     ),
+    Check(14, '[access] admin = "open"', _check_admin_open),
 )
 
 
