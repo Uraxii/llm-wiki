@@ -29,9 +29,11 @@ scheme wrong gets a connection refused, which is the correct and loud outcome.
 library's own documentation says `http.server` is not recommended for
 production because it implements only basic security checks. That constraint
 is lifted for this package, so the argument for it is gone. The service runs on
-a real server: `uvicorn` with a small `starlette` app, seven routes total, four
-read and three admin. The application stays framework-light on purpose, so the
-dependency is a server and a router, not an ecosystem.
+a real server: `uvicorn` with a small `starlette` app, eight routes total: four
+read, one health check, and the three admin routes
+[phase 6](phase-06-admin-routes.md) adds. The application stays
+framework-light on purpose, so the dependency is a server and a router, not an
+ecosystem.
 
 *Terminate TLS in-process by default, and support upstream termination
 explicitly.* Most real deployments end up behind something, whether that is a
@@ -140,15 +142,21 @@ Secrets are not in this file. The pepper and the bootstrap admin token arrive
 from the environment, unchanged from phase 1: `LLM_WIKI_PEPPER` and
 `LLM_WIKI_BOOTSTRAP_ADMIN_TOKEN`. Phase 1 promised the second one without
 naming it, which left every later phase free to guess a different name, so it
-is named here beside the refusal that reads it. `[endpoint]` is not in this
-file either. It lives in each kb's own `config.toml`, and this phase does not
-refuse a kb whose `config.toml` holds one: which model and endpoint a kb uses
-is that kb's business, not this file's.
+is named here beside the refusal that reads it. Its value authenticates the
+three admin routes [phase 6](phase-06-admin-routes.md) adds, on a gate that
+compares it in constant time and never reads the token database, so revoking
+the bootstrap credential means unsetting this variable and restarting. Until
+phase 6 lands, the variable is read for presence only and authenticates
+nothing. `[endpoint]` is not in this file either. It lives in each kb's own
+`config.toml`, and this phase does not refuse a kb whose `config.toml` holds
+one: which model and endpoint a kb uses is that kb's business, not this
+file's.
 
 **Fail closed at startup.** The service refuses to start, with a message naming
 the setting or the path at fault, when any of these hold. None of them are
 warnings, and every one of them is checked before a socket is bound. The first
-three fire before the file is parsed at all.
+three fire before the file is parsed at all. The table holds 14 rows, numbered
+top to bottom, and `deployment.REGISTRY` carries those numbers.
 
 | Condition | Why refusing beats starting |
 |---|---|
@@ -165,6 +173,7 @@ three fire before the file is parsed at all.
 | `[access] read = "open"` and `mode = "upstream"` and `trusted_proxy` is unset or is not an IP address | every caller then arrives from the proxy's address, so `[limits]` collapses into one global bucket. A hostname is refused with it: forwarded headers are trusted by comparing this value against the transport peer, which is always a literal, so a name would pass the check and be ignored by the service. Phase 3 argues it |
 | `[server] state` missing, or not writable by the running user | the token database is silently recreated empty, and every token minted before the restart reads as unknown. Phase 5 argues it |
 | any `[kbs.<name>] path` not writable by the running user | the first `search` against a never-embedded kb fails on `mkdir`, and nothing else in the deployment reports it. Phase 5 argues it |
+| `[access] admin = "open"` | there is no deployment where an unauthenticated mint is intended. The gate opens only `read`, and only on the exact word `open`, so a file setting this describes a service that does not exist and the operator believes something false. Appended as row 14 rather than placed beside row 6 because the checks in `deployment.REGISTRY` carry these row numbers. Phase 6 argues it |
 
 **An unauthenticated health endpoint.** `/health` returns liveness only: no kb
 names, no version, no counts, nothing that describes the deployment. Containers

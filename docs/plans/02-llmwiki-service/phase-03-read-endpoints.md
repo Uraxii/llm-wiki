@@ -98,7 +98,7 @@ the whole corpus, which is what `list` is for.
 ## `schema` is what makes a remote usable at all
 
 `SCHEMA.md` is the contract the user's agent reads, and each kb writes its own
-(`cli.py:64` writes it at `init`). The CLI never parses it, so serving it is a
+(`cli.py:70` writes it at `init`). The CLI never parses it, so serving it is a
 byte copy of `kb.root / "SCHEMA.md"`.
 
 It looks like the smallest route and it is the one that matters most. Every
@@ -119,7 +119,7 @@ cannot.
 
 ## Ranking moves into `llmwiki`, and this is the only change there
 
-`vectors.search` (`vectors.py:364`) is a CLI verb. It prints tab separated
+`vectors.search` (`vectors.py:367`) is a CLI verb. It prints tab separated
 lines and returns an exit code: 0 when the search ran, including when it
 matched nothing, 1 for stale vectors, and 2 for a model failure. A service
 cannot call it, and reimplementing it inside the service breaks the constraint

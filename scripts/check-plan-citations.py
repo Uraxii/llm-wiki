@@ -14,6 +14,11 @@ falls inside the file). That is a much weaker guarantee: a citation whose
 target shifted but is still inside the file passes silently. See the
 module docstring in the repo's check for the exact class of rot this misses.
 
+A module under `llmwiki_service/` is cited with that one directory prefix,
+`llmwiki_service/<module>.py:<line>`, never the bare `<module>.py` form:
+`CODE_DIRS` never held `llmwiki_service`, so the bare form is ambiguous
+about which package it names and stays unresolved on purpose.
+
 Does not import `llmwiki`, so it runs under any Python 3 interpreter.
 """
 from __future__ import annotations
@@ -28,9 +33,11 @@ import re
 CODE_DIRS = ("llmwiki", "tests")
 
 CITATION_RE = re.compile(
-    r"([a-z_][a-z0-9_]*\.py):(\d+)(?:-(\d+))?"
+    r"((?:[a-z_][a-z0-9_]*/)?[a-z_][a-z0-9_]*\.py):(\d+)(?:-(\d+))?"
 )
-FULL_CITATION_RE = re.compile(r"[a-z_][a-z0-9_]*\.py:\d+(?:-\d+)?")
+FULL_CITATION_RE = re.compile(
+    r"(?:[a-z_][a-z0-9_]*/)?[a-z_][a-z0-9_]*\.py:\d+(?:-\d+)?"
+)
 BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 BARE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DOTTED_RE = re.compile(r"^([a-z_][a-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$")
@@ -63,7 +70,13 @@ def find_citations(doc: Path) -> list[Citation]:
 
 
 def find_module_file(module: str) -> Path | None:
+    """`module` is either a bare filename, resolved against `CODE_DIRS`,
+    or a `<dir>/<filename>` path (a service module cited with its
+    `llmwiki_service/` prefix), resolved directly from the repo root."""
     repo_root = Path(__file__).resolve().parent.parent
+    if "/" in module:
+        candidate = repo_root / module
+        return candidate if candidate.is_file() else None
     for code_dir in CODE_DIRS:
         candidate = repo_root / code_dir / module
         if candidate.is_file():
@@ -144,7 +157,7 @@ def nearby_candidates(doc_lines: list[str], doc_line: int, module_stem: str) -> 
 
 def check(citation: Citation, doc_lines: list[str]) -> str | None:
     """Returns a reason string if stale, None if sound."""
-    module_stem = citation.module[: -len(".py")]
+    module_stem = Path(citation.module).stem
     module_path = find_module_file(citation.module)
     if module_path is None:
         return f"module {citation.module} does not exist in {CODE_DIRS}"
