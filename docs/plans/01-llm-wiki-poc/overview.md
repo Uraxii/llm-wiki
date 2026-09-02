@@ -63,7 +63,7 @@ rungs 2 to 8.
 llmwiki/
   core.py        Kb paths, config.toml loader, frontmatter parse+render (lists),
                  slugify, atomic write, log line
-  lint.py        six checks, Finding, prompt_block
+  lint.py        seven checks, Finding, prompt_block
   sources.py     hash keying, bytes + provenance
   model.py       one HTTP client: chat and embeddings, credentials per design doc
   summarize.py   SUMMARIZE.md + prompt_block + source, summary page, self-lint

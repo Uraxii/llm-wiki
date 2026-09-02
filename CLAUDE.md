@@ -63,7 +63,7 @@ never overwrite it.
 |---|---|
 | `core.py` | `Kb` paths, `load_config`, frontmatter parse/render, `slugify`, `atomic_write_text`, `append_log_entry`. Every other module imports these and none re-implements them. |
 | `cli.py` | `main(argv)`, the `VERBS` table, root resolution, `init`. One thin `cmd_*` per verb; the work lives in the module behind it. |
-| `lint.py` | Six mechanical checks over `wiki/`. No warnings, no severities, no auto-fix. Also renders the identifier vocabulary into the summarizer prompt. |
+| `lint.py` | Seven mechanical checks over `wiki/`. No warnings, no severities, no auto-fix. Also renders the identifier vocabulary into the summarizer prompt. |
 | `sources.py` | Hash-keyed byte store plus provenance. The sidecar, not the byte file, is the exclusive claim that decides new from existing. |
 | `model.py` | The endpoint client. `ModelError` is its entire error contract; every failure path raises it. |
 | `summarize.py` | One summary page per source: build prompt, call the model, parse the reply, self-lint, keep or drop. |
@@ -96,7 +96,7 @@ moving parts is still a real property. Reach for a package when it is not, and
 say in one line what it bought.
 
 **A dropped constraint is not a mandate to rewrite.** The measured constants,
-the concurrency work in phase 14, and the six lint checks are the value in this
+the concurrency work in phase 14, and the seven lint checks are the value in this
 repo, and none of them gets better by being rebuilt on a library. Swap a piece
 out when the library is better at that piece, one piece at a time, each with
 its own tests staying green.
