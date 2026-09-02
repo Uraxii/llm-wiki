@@ -297,7 +297,7 @@ if one is set. Matching is exact. Case is the regex author's choice;
 normalising values for a join belongs to dedup, not lint.
 
 `llm-wiki lint [<page>...]` reads every page under `wiki/`, CLI-written or not,
-and runs six checks, each of which would hold for a recipe box as well as a
+and runs seven checks, each of which would hold for a recipe box as well as a
 security wiki:
 
 1. frontmatter does not parse

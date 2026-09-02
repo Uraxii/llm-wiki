@@ -41,8 +41,8 @@ relaxed here.
 A summary page written from an image is a `kind: summary` page like any other:
 same frontmatter keys, same `source:` digest, same identifiers, same body. So:
 
-- `lint`'s six checks are all frontmatter checks. `_check_dangling_source`
-  (`lint.py:96-105`) asks only whether the `source:` digest is present in
+- `lint`'s seven checks are all frontmatter checks. `_check_dangling_source`
+  (`lint.py:110-119`) asks only whether the `source:` digest is present in
   `sources/`, which it is. No check reads a source's bytes or its type.
 - `dedup` joins on identifiers and vectors over the summary text, not the
   source.
@@ -142,7 +142,7 @@ decode failure -> still a drop, and now it means a genuinely broken text file
 ```
 
 `SOURCE_DELIMITER` is `"\n\n=== SOURCE TEXT FOLLOWS ===\n\n"`
-(`summarize.py:79`). A visual source needs its own sibling constant, because
+(`summarize.py:80`). A visual source needs its own sibling constant, because
 "SOURCE TEXT FOLLOWS" is a lie when the source is a chart, and the model reply
 quality depends on the prompt being true.
 

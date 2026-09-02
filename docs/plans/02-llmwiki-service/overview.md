@@ -44,7 +44,7 @@ always null); per-page or per-kind permissions.
 ## Constraints
 
 - **The service imports `llmwiki`. It never forks it.** Frontmatter parsing,
-  the six lint checks, the ownership boundary, and the vector store must have
+  the seven lint checks, the ownership boundary, and the vector store must have
   exactly one implementation. Two copies drift, and the failure mode is a page
   the service accepts that the CLI rejects.
 - **The CLI and the service may both take any dependency**, on the user's

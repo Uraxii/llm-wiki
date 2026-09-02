@@ -25,7 +25,7 @@ nobody sweeps answers 503 from `search` forever.
 
 The table is small and has exactly two readers. `model._endpoint_url`
 (`model.py:88`) reads `[endpoint].url`, and `summarize._pdf_part`
-(`summarize.py:131`) reads `[endpoint].pdf_part`. Both become environment
+(`summarize.py:132`) reads `[endpoint].pdf_part`. Both become environment
 reads:
 
 | Was | Becomes | Absent |
@@ -133,7 +133,7 @@ before.
 `llmwiki_service` inside this repo's existing distribution, reached with
 `pip install '.[service]'`, rather than as a second distribution that depends
 on `llmwiki` by version. That is the packaging half of the constraint the whole
-plan rests on: one install, one copy of the six lint checks and the vector
+plan rests on: one install, one copy of the seven lint checks and the vector
 store, and no version pin that can drift because there is no second version.
 
 **In the image:** the venv at a fixed path, `llmwiki`, `llmwiki_service`, and

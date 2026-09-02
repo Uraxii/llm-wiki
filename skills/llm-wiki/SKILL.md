@@ -189,7 +189,7 @@ Give the page real identifiers if you want `ingest` to tell you when a
 new source touches it. Then:
 
 ```
-llmwiki lint            # six mechanical checks, one line per finding
+llmwiki lint            # seven mechanical checks, one line per finding
 llmwiki embed           # so search can find what you just wrote
 llmwiki status          # pages without a vector, sources without a summary
 ```
