@@ -102,7 +102,7 @@ No migration script. Two scalars, a handful of kbs, and a refusal that names
 the edit is under the bar where a script pays for itself, and a script that
 rewrites `config.toml` would cross the ownership boundary to save one deletion.
 
-`CONFIG_TOML` (`cli.py:29-30`) loses its commented `[endpoint]` block and gains
+`CONFIG_TOML` (`cli.py:34-64`) loses its commented `[endpoint]` block and gains
 one comment line naming the two variables, so a kb created after this phase
 never carries the section that would refuse.
 

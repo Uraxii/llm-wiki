@@ -8,11 +8,11 @@ into one shared kb at the same time.
 
 **Problem.** There is no locking anywhere in the package. An audit found
 eleven snapshot-then-write races. The five worst live in `dedup.py`, which
-snapshots the whole wiki at `dedup.py:295`, then writes from that snapshot at
-`dedup.py:248`. Two processes joining one story lose a member and leave a
+snapshots the whole wiki at `dedup.py:305`, then writes from that snapshot at
+`dedup.py:242`. Two processes joining one story lose a member and leave a
 dangling `story:` back-reference no lint check covers. Two processes finding
 no candidate both create a story for the same occurrence. A self-lint
-rollback at `dedup.py:261` can unlink a story another process just wrote.
+rollback at `dedup.py:271` can unlink a story another process just wrote.
 Outside dedup: `summarize.py:169` checks a slug free and `summarize.py:221`
 writes it, so two sources with the same model-chosen title destroy one page,
 which then reads as `no summary` in `status`. The audit called that permanent
@@ -50,7 +50,7 @@ first and serialize only the true invariant.
   span makes no model call, so it serializes milliseconds of disk work while
   `summarize` and `embed` stay concurrent.
 - `dedup --rebuild` takes the exclusive lock for the whole run. It unlinks
-  every story page at `dedup.py:429`, and decision row 27 already accepts a
+  every story page at `dedup.py:467`, and decision row 27 already accepts a
   window where summaries carry no story. That window is safe alone and unsafe
   beside any other writer.
 - The lock is `fcntl.flock`, standard library, released by the kernel when

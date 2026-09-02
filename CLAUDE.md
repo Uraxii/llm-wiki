@@ -131,7 +131,7 @@ should come with.
 **Network.** Never `urllib.request.urlopen` anywhere in this project. It
 reads `http_proxy` from the environment and follows redirects, and both
 resend the `Authorization` header to a host `config.toml` never named. Use
-`model._OPENER`. No retries, backoff, connection pooling, or response
+`model.OPENER`. No retries, backoff, connection pooling, or response
 caching.
 
 **Credentials.** From the environment only: `LLM_WIKI_API_KEY`, else

@@ -24,7 +24,7 @@ cases and changes nothing about the local one.
 
 A project reaches remote wikis by declaring them in `config.toml`. No new file
 and no new discovery path: `resolve_root` already walks up for any `.kb` that
-`is_dir()` and checks nothing else (`cli.py:80-83`), and `load_config` returns
+`is_dir()` and checks nothing else (`cli.py:86-89`), and `load_config` returns
 `{}` when there is no config file, so a `.kb/` holding only a `config.toml`
 with `[remotes]` is already legal and already found.
 
@@ -126,9 +126,13 @@ that mode safe rather than a service replacing it.
 3. [read endpoints: `search`, `page`, `list`, `schema`](phase-03-read-endpoints.md)
 4. [`[remotes]` in `config.toml`, and the CLI client that consumes them](phase-04-remotes.md)
 5. [container packaging and the mode 1 deployment](phase-05-packaging.md)
+6. [the three admin routes: mint, list, revoke](phase-06-admin-routes.md)
 
 Phase 1 is the only one with a nontrivial design. Phases 3 and 4 are
-independent of each other once 1 and 2 land.
+independent of each other once 1 and 2 land. Phase 6 needs 1 and 2 and nothing
+else, and it is numbered last rather than ordered last: it is what finally
+gives `mint` and `revoke` a caller, so a deployment that has to hand out a
+second token wants it before phase 5's image is worth cutting.
 
 ## Verification
 
