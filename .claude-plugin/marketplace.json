@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "agent-kb",
+  "name": "llm-wiki",
   "description": "The llm-wiki skill, packaged for Claude Code.",
   "owner": {
     "name": "Uraxii",
