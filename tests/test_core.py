@@ -14,6 +14,7 @@ from llmwiki.core import (  # noqa: E402
     append_log_entry,
     atomic_write_bytes,
     atomic_write_text,
+    flatten,
     load_config,
     parse_frontmatter,
     read_page_text,
@@ -57,6 +58,11 @@ class FrontmatterRoundTripTest(TmpDirTest):
         second = parse_frontmatter(rendered)
         self.assertEqual(second, first)
 
+    def test_round_trip_survives_unicode_line_separator_in_scalar(self) -> None:
+        fields = {"title": "part one\u2028part two"}
+        rendered = render_frontmatter(fields, "body\n")
+        self.assertEqual(parse_frontmatter(rendered), (fields, "body\n"))
+
 
 class FrontmatterMalformedTest(TmpDirTest):
     def test_no_closing_fence(self) -> None:
@@ -93,6 +99,45 @@ class LogEntryTest(TmpDirTest):
     def test_missing_log_raises(self) -> None:
         with self.assertRaises(FileNotFoundError):
             append_log_entry(self.tmp / "no-such-log.md", "kind", "title")
+
+    def test_title_with_unicode_line_separator_stays_one_line(self) -> None:
+        kb = self.copy("recipe")
+        log_path = kb / "log.md"
+        before = log_path.read_text(encoding="utf-8")
+        append_log_entry(log_path, "kind", "title\u2028forged line")
+        after = log_path.read_text(encoding="utf-8")
+        appended = after[len(before) :]
+        self.assertEqual(len(appended.splitlines()), 1)
+
+
+class FlattenTest(unittest.TestCase):
+    def test_collapses_ascii_control_chars(self) -> None:
+        self.assertEqual(flatten("a\nb\tc\x7fd"), "a b c d")
+
+    def test_collapses_unicode_line_breaks(self) -> None:
+        # NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR: str.splitlines()
+        # treats each as a line break, same as the ASCII breaks flatten
+        # already collapsed.
+        for name, char in (
+            ("NEL", "\x85"),
+            ("LINE SEPARATOR", "\u2028"),
+            ("PARAGRAPH SEPARATOR", "\u2029"),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(flatten(f"a{char}b"), "a b")
+
+    def test_collapses_every_splitlines_break_char(self) -> None:
+        # Hardcoded from the documented str.splitlines() break set
+        # (docs.python.org, str.splitlines, "Line boundaries" table),
+        # since Python exposes no API to read that set back.
+        splitlines_breaks = (
+            "\n", "\r", "\v", "\f",
+            "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029",
+        )
+        for char in splitlines_breaks:
+            with self.subTest(char=repr(char)):
+                flattened = flatten(f"a{char}b")
+                self.assertEqual(flattened.splitlines(), [flattened])
 
 
 class AtomicWriteTextTest(TmpDirTest):
