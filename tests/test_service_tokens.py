@@ -263,7 +263,7 @@ class StoreTest(unittest.TestCase):
         )
 
     def test_mint_rejects_a_label_that_could_forge_a_log_line(self) -> None:
-        for label in ("two\nlines", "tab\there", "bell\a"):
+        for label in ("two\nlines", "tab\there", "bell\a", "sep\u2028here"):
             with self.subTest(label=label):
                 with self.assertRaises(ValueError) as caught:
                     self.store.mint(label, "reader")

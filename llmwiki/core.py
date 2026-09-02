@@ -109,10 +109,10 @@ def load_config(root: Path) -> dict:
 
 
 def flatten(text: str) -> str:
-    """Collapse embedded control characters (newlines, tabs, ...) to
-    spaces, so a value never breaks a one-line record (log entry,
-    frontmatter scalar)."""
-    return re.sub(r"[\x00-\x1f\x7f]", " ", text)
+    """Collapse every character `str.splitlines()` treats as a line
+    break, plus DEL, to a space, so a value never breaks a one-line
+    record: C0 controls, `\\x85` NEL, U+2028, and U+2029."""
+    return re.sub(r"[\x00-\x1f\x7f\x85\u2028\u2029]", " ", text)
 
 
 def parse_frontmatter(
