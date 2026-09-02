@@ -1,4 +1,4 @@
-# agent-kb
+# llm-wiki
 
 An LLM wiki: a live model of an environment plus the accumulated reasoning over it.
 Built to give agents cheap, easy-to-retrieve context.
@@ -40,29 +40,29 @@ program. Install the plugin, then install the CLI as described under CLI above.
 Claude Code:
 
 ```bash
-claude plugin marketplace add Uraxii/agent-kb
-claude plugin install llm-wiki@agent-kb
+claude plugin marketplace add Uraxii/llm-wiki
+claude plugin install llm-wiki@llm-wiki
 ```
 
 Codex:
 
 ```bash
-codex plugin marketplace add Uraxii/agent-kb
-codex plugin add llm-wiki@agent-kb
+codex plugin marketplace add Uraxii/llm-wiki
+codex plugin add llm-wiki@llm-wiki
 ```
 
 Copilot CLI:
 
 ```bash
-copilot plugin install Uraxii/agent-kb
+copilot plugin install Uraxii/llm-wiki
 ```
 
 To load the skill from a local clone without installing anything, pass the
 clone to the harness for one session:
 
 ```bash
-claude --plugin-dir /path/to/agent-kb
-copilot --plugin-dir /path/to/agent-kb
+claude --plugin-dir /path/to/llm-wiki
+copilot --plugin-dir /path/to/llm-wiki
 ```
 
 `scripts/check-skill-sync.sh` fails if the manifest versions drift from

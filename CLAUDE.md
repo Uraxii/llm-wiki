@@ -34,7 +34,7 @@ Note the redirect: `unittest` reports on stderr, and `summarize` prints its
 planned call count to stdout.
 
 This repo is indexed in codebase-memory as
-`var-home-nicole-Projects-agent-kb`. Query the graph to locate a symbol
+`var-home-nicole-Projects-llm-wiki`. Query the graph to locate a symbol
 before reading modules wholesale; re-index after a phase lands.
 
 ## Architecture Overview

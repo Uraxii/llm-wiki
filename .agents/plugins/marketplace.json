@@ -1,14 +1,14 @@
 {
-  "name": "agent-kb",
+  "name": "llm-wiki",
   "interface": {
-    "displayName": "agent-kb"
+    "displayName": "llm-wiki"
   },
   "plugins": [
     {
       "name": "llm-wiki",
       "source": {
         "source": "url",
-        "url": "https://github.com/Uraxii/agent-kb.git",
+        "url": "https://github.com/Uraxii/llm-wiki.git",
         "ref": "main"
       },
       "policy": {

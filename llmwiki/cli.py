@@ -29,7 +29,7 @@ from llmwiki import dedup, ingest, remotes, summarize, vectors
 
 SCHEMA_SKELETON = resources.files("llmwiki").joinpath("SCHEMA.skeleton.md")
 
-GLOBAL_STORE = Path.home() / ".local" / "share" / "agent-kb"
+GLOBAL_STORE = Path.home() / ".local" / "share" / "llm-wiki"
 
 CONFIG_TOML = """\
 # One model per paid pipeline step, read from this file at run time.

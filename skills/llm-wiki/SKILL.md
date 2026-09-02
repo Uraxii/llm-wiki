@@ -22,8 +22,8 @@ Check first, because it is usually already there:
 llmwiki --help
 ```
 
-If that is not found, install it from a checkout of the `agent-kb`
-project (`github.com/Uraxii/agent-kb`):
+If that is not found, install it from a checkout of the `llm-wiki`
+project (`github.com/Uraxii/llm-wiki`):
 
 ```
 uv tool install .
@@ -39,7 +39,7 @@ In order:
 1. `llmwiki --kb PATH <verb>`, used exactly as given.
 2. Otherwise the nearest `.kb` directory, searching the working
    directory and then each parent.
-3. Otherwise the global store, `~/.local/share/agent-kb`.
+3. Otherwise the global store, `~/.local/share/llm-wiki`.
 
 `llmwiki where` prints the one that resolved. Run it first when you are
 unsure, and before any verb that writes.
@@ -284,7 +284,7 @@ it would have replaced survives.
 
 ## The service
 
-`agent-kb` also ships `llmwiki_service`, the HTTP service that answers
+`llm-wiki` also ships `llmwiki_service`, the HTTP service that answers
 the `/search` and `/page` routes a `[remotes]` entry points at.
 Setting one up is an operator task, covered in
 `docs/plans/02-llmwiki-service/` and `llmwiki_service/admin.py`, not
