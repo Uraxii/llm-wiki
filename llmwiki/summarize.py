@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
+from typing import Literal
 
 from llmwiki.core import (
     FrontmatterValue,
@@ -146,13 +147,15 @@ def _all_digests(kb: Kb) -> list[str]:
 
 def _summary_index(kb: Kb) -> dict[str, tuple[Path, str]]:
     """digest -> (page path, its recorded prompt_fingerprint), for
-    every existing summary page. A page unlinked between the glob and
-    this read is skipped, not raised on."""
+    every existing summary page. A page unlinked, or made unreadable
+    (permissions, a broken symlink), between the glob and this read is
+    skipped, not raised on. This loop runs before any digest is
+    processed, so one bad page must not take the whole sweep down."""
     index: dict[str, tuple[Path, str]] = {}
     for path in sorted(kb.wiki.glob("*.md")):
         try:
             text = read_page_text(path)
-        except FileNotFoundError:
+        except OSError:
             continue
         parsed = parse_frontmatter(text)
         if parsed is None:
@@ -260,6 +263,17 @@ def _build_fields(
     return fields
 
 
+def _fail(kb: Kb, digest: str, reason: str) -> None:
+    """Record a drop by printing the reason to stderr before writing
+    log.md. A missing log.md makes append_log_entry raise, and that
+    raise cannot hide the drop, because stderr already carries it. The
+    raise still ends the sweep right after this drop is reported. The
+    same shape lives in ingest._fail."""
+    message = f"{digest}: dropped ({reason})"
+    print(f"llmwiki: summarize: {message}", file=sys.stderr)
+    append_log_entry(kb.log, "summarize", message)
+
+
 def _commit_summary_page(
     kb: Kb, digest: str, page_path: Path, previous: bytes | None, content: str
 ) -> bool:
@@ -277,44 +291,56 @@ def _commit_summary_page(
     else:
         page_path.unlink()
     finding = findings[0]
-    append_log_entry(
-        kb.log, "summarize", f"{digest}: dropped ({finding.check}: {finding.detail})"
-    )
+    _fail(kb, digest, f"{finding.check}: {finding.detail}")
     return True
 
 
 def _resolve_content(
     kb: Kb, digest: str, prefix: str, pdf_part: str
-) -> tuple[str, tuple[str, bytes] | None, str, dict] | str:
+) -> (
+    tuple[str, tuple[str, bytes] | None, str, dict]
+    | tuple[Literal["inert", "actionable"], str]
+):
     """The prompt text, optional attachment, model step, and provenance
-    for `digest`, decided from its provenance `content_type`, or a drop
-    reason string when nothing can be sent. Reads no lock; source
-    bytes and provenance are immutable once `sources.store` writes
-    them, so a plain read here needs none."""
+    for `digest` (a 4-tuple), or a `(category, reason)` pair when
+    nothing can be sent. `category` is `"inert"` when the drop derives
+    only from the immutable source bytes and their recorded
+    content_type, so no rerun under any configuration can change it
+    (an undecodable text source, or a content_type this CLI does not
+    handle at all); `"actionable"` for every other reason, since a
+    missing sidecar can be restored, a permission bit can be fixed,
+    and [endpoint].pdf_part can be edited. Reads no lock; source bytes
+    and provenance are immutable once `sources.store` writes them, so
+    a plain read here needs none."""
     try:
         path = _source_path(kb, digest)
         provenance = read_provenance(kb, digest)
     except FileNotFoundError as exc:
-        return f"cannot read source: {exc}"
+        return "actionable", f"cannot read source: {exc}"
     except (OSError, ValueError) as exc:
-        return f"cannot read provenance: {exc}"
+        return "actionable", f"cannot read provenance: {exc}"
 
     content_type = str(provenance.get("content_type", ""))
     kind = _content_kind(content_type)
     if kind == "unsupported":
-        return f"unsupported content type: {content_type or '(none)'}"
+        return "inert", f"unsupported content type: {content_type or '(none)'}"
 
     if kind == "text":
         try:
             text = path.read_bytes().decode("utf-8")
         except UnicodeDecodeError as exc:
-            return f"cannot decode source: {exc}"
+            return "inert", f"cannot decode source: {exc}"
+        except OSError as exc:
+            return "actionable", f"cannot read source: {exc}"
         return prefix + SOURCE_DELIMITER + text, None, "summarize", provenance
 
     normalized = content_type.split(";")[0].strip().lower()
     if normalized == _PDF_TYPE and pdf_part == "none":
-        return "PDF attachments disabled: set [endpoint] pdf_part"
-    attachment = (normalized, path.read_bytes())
+        return "actionable", "PDF attachments disabled: set [endpoint] pdf_part"
+    try:
+        attachment = (normalized, path.read_bytes())
+    except OSError as exc:
+        return "actionable", f"cannot read source: {exc}"
     return (
         prefix + SOURCE_ATTACHMENT_NOTE,
         attachment,
@@ -339,15 +365,21 @@ def _process_digest(
     prefix: str,
     fingerprint: str,
     pdf_part: str,
-) -> bool:
-    """Summarize one source. Returns True if it was dropped. Source
-    bytes and provenance are read, and the model called, before any
-    lock is taken; the commit window opens only once there is content
-    to write."""
+) -> Literal["inert", "actionable"] | None:
+    """Summarize one source. Returns `None` when a page was kept,
+    `"inert"` when the drop derives only from the immutable source
+    bytes and their recorded content_type (no rerun under any
+    configuration can change it), or `"actionable"` for every other
+    drop, before or after the model call: a permission bit, a sidecar,
+    [endpoint].pdf_part, a prompt, or a config pattern could each make
+    a rerun succeed. Source bytes and provenance are read, and the
+    model called, before any lock is taken; the commit window opens
+    only once there is content to write."""
     resolved = _resolve_content(kb, digest, prefix, pdf_part)
-    if isinstance(resolved, str):
-        append_log_entry(kb.log, "summarize", f"{digest}: dropped ({resolved})")
-        return True
+    if len(resolved) == 2:  # (category, reason); a 4-tuple is success
+        category, reason = resolved
+        _fail(kb, digest, reason)
+        return category
     prompt, attachment, step, provenance = resolved
 
     if step == "summarize_image":
@@ -360,8 +392,8 @@ def _process_digest(
     title = str(parsed[0].get("title", "")).strip() if parsed else ""
     reason = _drop_reason(parsed, title)
     if reason:
-        append_log_entry(kb.log, "summarize", f"{digest}: dropped ({reason})")
-        return True
+        _fail(kb, digest, reason)
+        return "actionable"
 
     reply_fields, body = parsed
     fields = _build_fields(reply_fields, digest, provenance, model_used, fingerprint)
@@ -379,16 +411,20 @@ def _process_digest(
         dropped = _commit_summary_page(kb, digest, page_path, previous, content)
 
     if dropped:
-        return True
+        return "actionable"
 
     append_log_entry(kb.log, "summarize", f"{fields['title']}: {digest}")
-    return False
+    return None
 
 
 def run(root: Path, digests: list[str] | None) -> int:
     """Write a summary page for each of `digests`, or every stored
-    source when `None`. Returns 0 iff nothing was dropped or skipped
-    for a decode failure."""
+    source when `None`. Returns 1 when any drop was actionable, since
+    a rerun could change it. An inert drop, which no rerun can rescue,
+    fails the run only when the caller named explicit `digests`, so it
+    never fails a bare sweep forever. `_resolve_content` defines the
+    two categories. Every drop reason reaches stderr as well as
+    log.md."""
     kb = Kb(root)
     targets = digests if digests is not None else _all_digests(kb)
     index = _summary_index(kb)
@@ -406,14 +442,21 @@ def run(root: Path, digests: list[str] | None) -> int:
     ]
     print(f"summarize: {len(remaining)} planned")
 
-    dropped = False
+    dropped_actionable = False
+    dropped_inert = False
     for digest in remaining:
         try:
-            dropped = (
-                _process_digest(kb, digest, prefix, fingerprint, pdf_part) or dropped
-            )
+            kind = _process_digest(kb, digest, prefix, fingerprint, pdf_part)
         except ModelError as exc:
             print(f"llmwiki: summarize: {exc}", file=sys.stderr)
             return 1
+        if kind == "actionable":
+            dropped_actionable = True
+        elif kind == "inert":
+            dropped_inert = True
 
-    return 1 if dropped else 0
+    if dropped_actionable:
+        return 1
+    if dropped_inert and digests is not None:
+        return 1
+    return 0
