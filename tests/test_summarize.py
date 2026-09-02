@@ -79,6 +79,36 @@ class SummarizeTest(unittest.TestCase):
         )
         return digest
 
+    def _store_binary_source(
+        self, data: bytes, suffix: str, content_type: str
+    ) -> str:
+        digest = hashlib.sha256(data).hexdigest()
+        (self.root / "sources" / f"{digest}{suffix}").write_bytes(data)
+        (self.root / "sources" / f"{digest}.toml").write_text(
+            'url = "https://example.com/attachment"\n'
+            'fetched = "2024-01-01T00:00:00Z"\n'
+            f'content_type = "{content_type}"\n'
+            'job = "manual"\n'
+        )
+        return digest
+
+    @staticmethod
+    def _ordered_texts(first_label: str, second_label: str) -> tuple[str, str]:
+        """Two texts whose sha256 digests sort in the given order, so a
+        test asserting sweep order does not depend on which way an
+        arbitrary pair of strings happened to hash (agent-kb-74p item
+        E)."""
+        i = 0
+        while True:
+            first = f"{first_label} {i}"
+            second = f"{second_label} {i}"
+            if (
+                hashlib.sha256(first.encode()).hexdigest()
+                < hashlib.sha256(second.encode()).hexdigest()
+            ):
+                return first, second
+            i += 1
+
     def test_writes_summary_page_with_all_frontmatter_keys(self) -> None:
         digest = self._store_source()
         reply = (
@@ -317,6 +347,368 @@ class SummarizeTest(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn(digest, (self.root / "log.md").read_text())
+
+    def test_unreadable_source_does_not_abort_sweep_and_logs_without_traceback(
+        self,
+    ) -> None:
+        # agent-kb-74p item E: `blocked_text`/`second_text` are picked so
+        # `blocked`'s digest sorts before `second`'s (asserted below), so
+        # the "later digest still processed" half of this test is not
+        # riding on which way two arbitrary strings happen to hash.
+        # Also the axis this test pins: a chmod-000 source is now
+        # actionable (an operator can chmod it back), so a bare sweep
+        # over it returns 1, not 0 -- only the earlier ABORT was the bug.
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permissions")
+        blocked_text, second_text = self._ordered_texts(
+            "Blocked source text.", "Second source text."
+        )
+        blocked = self._store_source(blocked_text)
+        second = self._store_source(second_text)
+        self.assertLess(blocked, second)
+        blocked_path = self.root / "sources" / f"{blocked}.md"
+        blocked_path.chmod(0o000)
+        self.addCleanup(blocked_path.chmod, 0o644)
+        reply = (
+            "---\n"
+            "title: Second Widget\n"
+            "identifiers: []\n"
+            "---\n\n"
+            "An abstract.\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, None)
+
+        self.assertEqual(code, 1)
+        pages = list((self.root / "wiki").glob("*.md"))
+        self.assertEqual(len(pages), 1)
+        fields, _body = parse_frontmatter(pages[0].read_text())
+        self.assertEqual(fields["source"], second)
+        log = (self.root / "log.md").read_text()
+        self.assertIn(blocked, log)
+        self.assertIn("dropped", log)
+        stderr = err.getvalue()
+        self.assertIn(blocked, stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn("PermissionError", stderr)
+
+    def test_bare_sweep_over_undecodable_source_exits_0_and_reports_stderr_each_run(
+        self,
+    ) -> None:
+        data = b"\xff\xfe not utf-8"
+        digest = hashlib.sha256(data).hexdigest()
+        (self.root / "sources" / f"{digest}.bin").write_bytes(data)
+        (self.root / "sources" / f"{digest}.toml").write_text(
+            'url = "https://example.com/bad"\n'
+            'fetched = "2024-01-01T00:00:00Z"\n'
+            'content_type = "application/octet-stream"\n'
+            'job = "manual"\n'
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            err1 = io.StringIO()
+            with redirect_stderr(err1):
+                first = _run_quiet(self.root, None)
+            err2 = io.StringIO()
+            with redirect_stderr(err2):
+                second = _run_quiet(self.root, None)
+            self.assertEqual(len(fake.requests), 0)
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertIn(digest, err1.getvalue())
+        self.assertIn(digest, err2.getvalue())
+
+    def test_bare_sweep_over_undecodable_text_source_exits_0_twice(self) -> None:
+        # The ticket's own case (agent-kb-74p): a text content_type
+        # whose bytes are not valid UTF-8. `_resolve_content` returns
+        # "cannot decode source: ...", which is inert -- no rerun under
+        # any configuration fixes bytes that are not UTF-8 -- so a bare
+        # sweep must not exit 1 forever over it. The second run is the
+        # part that matters: "exits 1 forever" was the whole bug, and a
+        # fix that only worked once would still be broken.
+        data = b"Some markdown \xff\xfe not utf-8"
+        digest = hashlib.sha256(data).hexdigest()
+        (self.root / "sources" / f"{digest}.md").write_bytes(data)
+        (self.root / "sources" / f"{digest}.toml").write_text(
+            'url = "https://example.com/bad-text"\n'
+            'fetched = "2024-01-01T00:00:00Z"\n'
+            'content_type = "text/markdown"\n'
+            'job = "manual"\n'
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            err1 = io.StringIO()
+            with redirect_stderr(err1):
+                first = _run_quiet(self.root, None)
+            err2 = io.StringIO()
+            with redirect_stderr(err2):
+                second = _run_quiet(self.root, None)
+            self.assertEqual(len(fake.requests), 0)
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertIn("cannot decode source", err1.getvalue())
+        self.assertIn("cannot decode source", err2.getvalue())
+        self.assertEqual(list((self.root / "wiki").glob("*.md")), [])
+
+    def test_explicit_digest_over_undecodable_text_source_returns_1(self) -> None:
+        # Same case as above, but ingest.py calls
+        # summarize.run(root, [digest]) explicitly, and that path must
+        # still fail even though a bare sweep does not. Pinned next to
+        # the bare-sweep case since the two are easy to break together.
+        data = b"Some markdown \xff\xfe not utf-8"
+        digest = hashlib.sha256(data).hexdigest()
+        (self.root / "sources" / f"{digest}.md").write_bytes(data)
+        (self.root / "sources" / f"{digest}.toml").write_text(
+            'url = "https://example.com/bad-text"\n'
+            'fetched = "2024-01-01T00:00:00Z"\n'
+            'content_type = "text/markdown"\n'
+            'job = "manual"\n'
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            code = _run_quiet(self.root, [digest])
+            self.assertEqual(len(fake.requests), 0)
+
+        self.assertEqual(code, 1)
+
+    def test_bare_sweep_reply_level_drop_still_returns_1(self) -> None:
+        self._store_source()
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "not frontmatter"}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, None)
+
+        self.assertEqual(code, 1)
+        self.assertIn("unparseable reply", err.getvalue())
+
+    def test_bare_sweep_pdf_part_none_exits_1(self) -> None:
+        # A PDF source with pdf_part = "none" is an actionable drop: an
+        # operator can edit [endpoint].pdf_part and rerun, so it must
+        # not be lumped in with the two inert reasons.
+        digest = self._store_binary_source(
+            b"%PDF-1.4 fake", ".pdf", "application/pdf"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with (self.root / "config.toml").open("a") as handle:
+                handle.write('pdf_part = "none"\n')
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, None)
+            self.assertEqual(len(fake.requests), 0)
+
+        self.assertEqual(code, 1)
+        self.assertIn(digest, err.getvalue())
+        self.assertIn("pdf_part", err.getvalue())
+
+    def test_bare_sweep_missing_sidecar_exits_1(self) -> None:
+        digest = self._store_source()
+        (self.root / "sources" / f"{digest}.toml").unlink()
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, None)
+            self.assertEqual(fake.requests, [])
+
+        self.assertEqual(code, 1)
+        self.assertIn(digest, err.getvalue())
+
+    def test_bare_sweep_malformed_sidecar_exits_1(self) -> None:
+        digest = self._store_source()
+        (self.root / "sources" / f"{digest}.toml").write_text(
+            "content_type = = broken\n[[[\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, None)
+            self.assertEqual(fake.requests, [])
+
+        self.assertEqual(code, 1)
+        self.assertIn(digest, err.getvalue())
+        self.assertIn("provenance", err.getvalue())
+
+    def test_unreadable_sources_directory_is_actionable_not_a_traceback(self) -> None:
+        # agent-kb-74p item D as briefed claims `_source_path`'s glob can
+        # raise OSError when sources/ itself is unreadable, mislabeled by
+        # the `except (OSError, ValueError)` clause as "cannot read
+        # provenance". Verified against the runtime this repo pins
+        # (Python 3.14): `pathlib.Path.glob` swallows a scandir OSError
+        # and yields no matches instead of raising (glob.py's `_iterdir`,
+        # `except OSError: return`, the same fix `glob.glob` shipped in
+        # 3.13 for gh-101398). `_source_path` can then only ever raise
+        # `FileNotFoundError`, already labeled "cannot read source"
+        # correctly. This test proves that verified behavior: no
+        # traceback, actionable, no "cannot read provenance" mislabel.
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permissions")
+        self._store_source()
+        sources_dir = self.root / "sources"
+        sources_dir.chmod(0o000)
+        self.addCleanup(sources_dir.chmod, 0o755)
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, ["deadbeef" * 8])
+
+        self.assertEqual(code, 1)
+        stderr = err.getvalue()
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn("cannot read provenance", stderr)
+        self.assertIn("cannot read source", stderr)
+
+    def test_unreadable_visual_source_is_actionable_not_fatal(self) -> None:
+        # agent-kb-74p item A: the visual-branch OSError guard in
+        # `_resolve_content` (the `path.read_bytes()` call for an image
+        # or PDF attachment) had zero test coverage; deleting it by hand
+        # left the full suite green. This test fails without the guard:
+        # `path.read_bytes()` then raises PermissionError straight out
+        # of `run`, instead of a clean actionable drop.
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permissions")
+        digest = self._store_binary_source(b"\x89PNG fake bytes", ".png", "image/png")
+        image_path = self.root / "sources" / f"{digest}.png"
+        image_path.chmod(0o000)
+        self.addCleanup(image_path.chmod, 0o644)
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, [digest])
+            self.assertEqual(len(fake.requests), 0)
+
+        self.assertEqual(code, 1)
+        stderr = err.getvalue()
+        self.assertIn(digest, stderr)
+        self.assertIn("cannot read source", stderr)
+        self.assertNotIn("Traceback", stderr)
+
+    def test_unreadable_wiki_page_does_not_abort_summary_index(self) -> None:
+        # agent-kb-74p item B: `_summary_index` caught only
+        # FileNotFoundError from `core.read_page_text`, so a chmod-000
+        # page under wiki/ raised PermissionError before the sweep's
+        # loop even started (RC1's bug class, one function over).
+        #
+        # Isolation note: a second, separate gap with the identical
+        # shape lives in `llmwiki/lint.py`'s `_read_pages` (also
+        # FileNotFoundError-only; confirmed unchanged by the concurrent
+        # lint.py rework via `git diff -- llmwiki/lint.py`, which never
+        # touches that except clause). `_commit_summary_page` calls
+        # `lint_pages`, which globs and re-reads every page in wiki/
+        # for cross-page context regardless of which page it is asked
+        # to lint, so any run that still needs to write a page hits
+        # that second gap too, independent of this fix. lint.py is
+        # owned by another agent this session and is out of scope
+        # here, so this test drives the run through the path that
+        # stays in scope: a locked page present while every digest is
+        # already up to date, proving the sweep's setup (building the
+        # index) survives it instead of dying before it can even see
+        # what remains.
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permissions")
+        digest = self._store_source()
+        reply = (
+            "---\n"
+            "title: Widget\n"
+            "identifiers: []\n"
+            "---\n\n"
+            "An abstract.\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            first = _run_quiet(self.root, [digest])
+            self.assertEqual(first, 0)
+            self.assertEqual(len(fake.requests), 1)
+
+            locked_page = self.root / "wiki" / "locked.md"
+            locked_page.write_text("---\nkind: story\ntitle: Locked\n---\n\nBody.\n")
+            locked_page.chmod(0o000)
+            self.addCleanup(locked_page.chmod, 0o644)
+
+            second = _run_quiet(self.root, [digest])
+            self.assertEqual(len(fake.requests), 1)  # still up to date, no new call
+
+        self.assertEqual(second, 0)
+
+    def test_summary_index_skips_unreadable_page_directly(self) -> None:
+        # A tighter unit test at the exact call site item B names:
+        # `_summary_index` itself must not raise on a chmod-000 page,
+        # and must still index a good page alongside it.
+        if os.geteuid() == 0:
+            self.skipTest("root ignores file permissions")
+        digest = self._store_source()
+        good_page = self.root / "wiki" / "good.md"
+        good_page.write_text(
+            "---\n"
+            "kind: summary\n"
+            "title: Good\n"
+            f"source: {digest}\n"
+            "prompt_fingerprint: abc123\n"
+            "---\n\n"
+            "Body.\n"
+        )
+        locked_page = self.root / "wiki" / "locked.md"
+        locked_page.write_text("---\nkind: story\ntitle: Locked\n---\n\nBody.\n")
+        locked_page.chmod(0o000)
+        self.addCleanup(locked_page.chmod, 0o644)
+
+        index = summarize._summary_index(Kb(self.root))
+
+        self.assertIn(digest, index)
+        self.assertEqual(index[digest], (good_page, "abc123"))
 
     def test_title_collision_leaves_two_pages_each_with_own_source(self) -> None:
         digest_a = self._store_source("First source body.")
