@@ -304,6 +304,14 @@ class LintTest(unittest.TestCase):
         self.assertIn("- cve\t^CVE-", block)
         self.assertIn("- host\t(any non-empty value)\thost", block)
 
+    def test_prompt_block_tells_model_to_omit_inapplicable_keys(self) -> None:
+        import tomllib
+
+        config = tomllib.loads((FIXTURES / "security" / ".kb" / "config.toml").read_text())
+        block = prompt_block(config)
+        self.assertIn("Omit any key that does not apply", block)
+        self.assertIn("Never emit a key with an empty value", block)
+
 
 class LintCliTest(unittest.TestCase):
     def setUp(self) -> None:

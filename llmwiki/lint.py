@@ -262,4 +262,8 @@ def prompt_block(config: dict) -> str:
         pattern = spec.get("pattern", "(any non-empty value)")
         describe = spec.get("describe", key)
         lines.append(f"- {key}\t{pattern}\t{describe}")
+    lines.append(
+        "Omit any key that does not apply to this source. Never emit a key "
+        "with an empty value."
+    )
     return "\n".join(lines)
