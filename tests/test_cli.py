@@ -641,3 +641,76 @@ class PageVerbTest(RemoteCliFixture, unittest.TestCase):
         code, _out, err = self._run(["page"])
         self.assertEqual(code, 2)
         self.assertIn("usage", err)
+
+
+class MisplacedOptionTest(unittest.TestCase):
+    """agent-kb-h6i: an option a verb does not declare is a usage
+    error, never a source path. One check in `main` covers the whole
+    verb table, so these loop over `cli.VERBS` rather than name verbs."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(self.tmp)
+        patch = unittest.mock.patch.object(cli, "GLOBAL_STORE", self.tmp / "g")
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _run(self, argv: list[str]) -> tuple[int, str]:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(argv)
+        return code, stderr.getvalue()
+
+    def test_kb_after_the_verb_is_a_usage_error_on_every_verb(self) -> None:
+        for verb in cli.VERBS:
+            with self.subTest(verb=verb):
+                code, err = self._run([verb, "--kb", str(self.tmp)])
+                self.assertEqual(code, 2)
+                self.assertIn("--kb must come before the verb", err)
+                self.assertIn("usage: llmwiki [--kb PATH] <verb>", err)
+
+    def test_a_misplaced_option_never_resolves_a_root(self) -> None:
+        """The root is what the bug corrupted: the check runs before
+        `resolve_root`, so no verb can reach the global store."""
+        for verb in cli.VERBS:
+            with self.subTest(verb=verb):
+                with unittest.mock.patch.object(cli, "resolve_root") as root:
+                    code, _err = self._run([verb, "--kb", str(self.tmp)])
+                self.assertEqual(code, 2)
+                root.assert_not_called()
+
+    def test_an_undeclared_option_is_a_usage_error_on_every_verb(self) -> None:
+        for verb in cli.VERBS:
+            with self.subTest(verb=verb):
+                code, err = self._run([verb, "--no-such-option"])
+                self.assertEqual(code, 2)
+                self.assertIn("unknown option --no-such-option", err)
+
+    def test_every_option_a_verb_documents_is_declared(self) -> None:
+        """The table is the mechanism: a verb whose usage line offers an
+        option it does not declare would reject its own documented
+        flag."""
+        for verb, spec in cli.VERBS.items():
+            documented = {
+                word.strip("<>[].,|")
+                for word in spec.usage.split()
+                if word.startswith("--")
+            }
+            with self.subTest(verb=verb):
+                self.assertEqual(documented - set(spec.options), set())
+
+    def test_a_declared_option_still_reaches_its_verb(self) -> None:
+        code, err = self._run(["--kb", str(self.tmp), "dedup", "--rebuild",
+                               "extra"])
+        self.assertEqual(code, 2)
+        self.assertIn("--rebuild takes no other arguments", err)
+
+    def test_a_bare_dash_is_still_a_source(self) -> None:
+        """`ingest -` reads stdin; single-dash arguments are untouched."""
+        self.assertFalse("-".startswith("--"))
+        code, err = self._run(["ingest", "-", "--kb", str(self.tmp)])
+        self.assertEqual(code, 2)
+        self.assertIn("--kb must come before the verb", err)
