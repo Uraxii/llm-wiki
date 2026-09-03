@@ -31,7 +31,7 @@ from llmwiki.core import (
     slugify,
 )
 from llmwiki.lint import lint_pages
-from llmwiki.model import ModelError, chat, model_name
+from llmwiki.model import ModelError, chat, model_name, step_is_configured
 from llmwiki import vectors
 
 # The judge's own contract (decision agent-kb-0zf.5): a SUMMARIZE.md
@@ -186,11 +186,11 @@ def candidates(
 
 def _dedup_model_id(kb: Kb) -> str | None:
     """The configured `[models] dedup` id, or `None` when it is unset
-    (the deterministic-fallback path)."""
-    try:
-        return model_name(kb.config, "dedup", None)
-    except ModelError:
+    (the deterministic-fallback path). A present but malformed id
+    raises out of `model_name` instead of reading as unset."""
+    if not step_is_configured(kb.config, "dedup"):
         return None
+    return model_name(kb.config, "dedup", None)
 
 
 def _judge_prompt(page: Page, cands: list[Story]) -> str:

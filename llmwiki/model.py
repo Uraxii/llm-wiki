@@ -80,9 +80,12 @@ def model_name(config: dict, step: str, model: str | None) -> str:
     if model is not None:
         return model
     models = config.get("models", {})
-    if step not in models:
+    if not isinstance(models, dict) or step not in models:
         raise ModelError(f"missing [models].{step} in config.toml")
-    return models[step]
+    value = models[step]
+    if not isinstance(value, str) or not value:
+        raise ModelError(f"malformed [models].{step}: {value!r}")
+    return value
 
 
 def _endpoint_url(config: dict) -> str:
@@ -219,3 +222,13 @@ def embed(
             f"got {indices} for {len(texts)} texts"
         )
     return [item["embedding"] for item in ordered]
+
+
+def step_is_configured(config: dict, step: str) -> bool:
+    """True when `[models].<step>` is present. Answers only presence,
+    never validity: a present but malformed id makes `model_name`
+    raise rather than making this return False. Callers asking "is this
+    step turned on" use this instead of catching `ModelError`, so a
+    real config error can never read as "not configured"."""
+    models = config.get("models")
+    return isinstance(models, dict) and step in models

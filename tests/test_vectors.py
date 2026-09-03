@@ -337,6 +337,45 @@ class VectorsTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("missing [models].embed in config.toml", err.getvalue())
 
+    # -- agent-kb-yr0: a malformed [models].embed must fail loudly,
+    # never read as "embed not configured".
+
+    def test_model_id_raises_on_malformed_embed_instead_of_config_error(self) -> None:
+        """`_model_id` used to catch any `ModelError`, including one
+        from a malformed value, and hand it back as `config_error`
+        text. A malformed value must now raise instead."""
+        (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\nembed = 123\n')
+        from llmwiki.core import Kb
+
+        with self.assertRaises(vectors.ModelError) as ctx:
+            vectors._model_id(Kb(self.root))
+        self.assertIn("[models].embed", str(ctx.exception))
+        self.assertIn("123", str(ctx.exception))
+
+    def test_model_id_unset_embed_still_returns_config_error_text(self) -> None:
+        """A genuinely unset [models].embed keeps its documented
+        `(None, error text)` shape, byte-identical text: status and
+        search print it verbatim."""
+        (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\n')
+        from llmwiki.core import Kb
+
+        model_id, config_error = vectors._model_id(Kb(self.root))
+        self.assertIsNone(model_id)
+        self.assertEqual(config_error, "missing [models].embed in config.toml")
+
+    def test_embed_run_raises_on_malformed_config_instead_of_exiting_2(self) -> None:
+        """`run`'s own [models].embed check used to catch any
+        `ModelError`, printing "missing" and exiting 2 for a malformed
+        value too. It must now raise instead of misreporting the
+        failure as a missing key."""
+        self._write_page("north", "North Page")
+        (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\nembed = 123\n')
+
+        with self.assertRaises(vectors.ModelError) as ctx:
+            vectors.run(self.root, None)
+        self.assertIn("[models].embed", str(ctx.exception))
+        self.assertIn("123", str(ctx.exception))
+
     # -- P2: planned count ------------------------------------------------
 
     def test_sweep_prints_planned_count_before_the_paid_call(self) -> None:
