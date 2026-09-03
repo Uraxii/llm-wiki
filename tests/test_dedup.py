@@ -356,6 +356,28 @@ class DedupTest(unittest.TestCase):
         self.assertEqual(self._fields("story-a")["members"], [digest])
         self.assertEqual(self._fields("story-b")["members"], [])
 
+    # -- agent-kb-yr0: a malformed [models].dedup must fail loudly,
+    # never read as "dedup step not configured".
+
+    def test_malformed_dedup_config_raises_not_silently_unset(self) -> None:
+        """A typo'd or malformed [models].dedup used to be caught by
+        the same `except ModelError` that unset dedup hits, so dedup
+        silently took the deterministic-fallback path. It must now
+        raise instead."""
+        self._write_story("story-a", "Story A", [], ["tag:multi"])
+        digest = self._digest("malformed dedup source text")
+        self._write_summary("summary-file", digest, "Malformed Widget", ["tag:multi"])
+        self._write_config('[models]\nsummarize = "cheap"\ndedup = 123\n\n[identifiers.tag]\n')
+
+        from llmwiki.core import Kb, kb_lock
+        from llmwiki.model import ModelError
+
+        with self.assertRaises(ModelError) as ctx:
+            with kb_lock(self.root):
+                dedup.place(Kb(self.root), None)
+        self.assertIn("[models].dedup", str(ctx.exception))
+        self.assertIn("123", str(ctx.exception))
+
     # -- rebuild ----------------------------------------------------
 
     def test_rebuild_twice_is_stable(self) -> None:

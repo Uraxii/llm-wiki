@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from llmwiki.core import Kb, append_log_entry, as_list, flatten, kb_lock
-from llmwiki.model import ModelError, model_name
+from llmwiki.model import ModelError, step_is_configured
 from llmwiki import dedup, fetch, feeds, sources, summarize, vectors
 
 JOB = "manual"  # the job name for a plain `ingest`; `run_job` threads a real one
@@ -60,9 +60,7 @@ def _sweep_or_fail(kb: Kb) -> bool:
     before vectors.py existed (no embed step, never a pipeline
     failure). Once configured, a genuine `ModelError` from the sweep
     itself IS a pipeline failure. Returns False only for that case."""
-    try:
-        model_name(kb.config, "embed", None)
-    except ModelError:
+    if not step_is_configured(kb.config, "embed"):
         return True
     try:
         vectors.sweep(kb)

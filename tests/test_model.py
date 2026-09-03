@@ -13,7 +13,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR, ModelError, chat, embed  # noqa: E402
+from llmwiki.model import (  # noqa: E402
+    API_KEY_FILE_VAR,
+    API_KEY_VAR,
+    ModelError,
+    chat,
+    embed,
+    model_name,
+    step_is_configured,
+)
 from fake_endpoint import FakeEndpoint  # noqa: E402
 
 
@@ -452,6 +460,78 @@ class NoLeakTest(unittest.TestCase):
         ):
             config = {"endpoint": {"url": fake.url}, "models": {"summarize": "m"}}
             self._assert_no_leak(config, secret)
+
+
+class StepIsConfiguredTest(unittest.TestCase):
+    """agent-kb-yr0: `step_is_configured` answers presence only, and
+    never raises, whatever shape `[models]` or the step's value take."""
+
+    def test_step_present_is_true(self) -> None:
+        self.assertTrue(step_is_configured({"models": {"embed": "m"}}, "embed"))
+
+    def test_step_absent_is_false(self) -> None:
+        self.assertFalse(step_is_configured({"models": {"summarize": "m"}}, "embed"))
+
+    def test_models_table_absent_is_false(self) -> None:
+        self.assertFalse(step_is_configured({}, "embed"))
+
+    def test_models_not_a_table_is_false(self) -> None:
+        self.assertFalse(step_is_configured({"models": "embed-model"}, "embed"))
+        self.assertFalse(step_is_configured({"models": ["embed-model"]}, "embed"))
+
+    def test_malformed_value_still_reads_as_configured(self) -> None:
+        # The presence question and the validity question are separate
+        # on purpose: a typo'd or malformed value must fail loudly in
+        # model_name, never silently in step_is_configured.
+        self.assertTrue(step_is_configured({"models": {"embed": 123}}, "embed"))
+        self.assertTrue(step_is_configured({"models": {"embed": ""}}, "embed"))
+        self.assertTrue(step_is_configured({"models": {"embed": None}}, "embed"))
+
+
+class ModelNameTest(unittest.TestCase):
+    """agent-kb-yr0: a malformed `[models].<step>` value must raise,
+    not read as unset, so it can never be swallowed by a caller
+    catching `ModelError` to mean "not configured"."""
+
+    def test_missing_key_message_is_unchanged(self) -> None:
+        # vectors.status and vectors.search print this text verbatim;
+        # it must stay byte-identical.
+        with self.assertRaises(ModelError) as ctx:
+            model_name({"models": {}}, "embed", None)
+        self.assertEqual(str(ctx.exception), "missing [models].embed in config.toml")
+
+    def test_models_table_absent_raises_missing_key_message(self) -> None:
+        with self.assertRaises(ModelError) as ctx:
+            model_name({}, "embed", None)
+        self.assertEqual(str(ctx.exception), "missing [models].embed in config.toml")
+
+    def test_non_string_value_raises(self) -> None:
+        for bad in (123, ["m"], {"nested": "m"}, 1.5, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ModelError) as ctx:
+                    model_name({"models": {"embed": bad}}, "embed", None)
+                self.assertIn(repr(bad), str(ctx.exception))
+                self.assertIn("[models].embed", str(ctx.exception))
+
+    def test_empty_string_value_raises(self) -> None:
+        with self.assertRaises(ModelError) as ctx:
+            model_name({"models": {"embed": ""}}, "embed", None)
+        self.assertIn("[models].embed", str(ctx.exception))
+
+    def test_cli_override_wins_over_a_malformed_config_value(self) -> None:
+        # The override short-circuits before the config is even read,
+        # so a broken [models] table never blocks a caller that passed
+        # its own model.
+        self.assertEqual(
+            model_name({"models": {"embed": 123}}, "embed", "override-model"),
+            "override-model",
+        )
+
+    def test_well_formed_value_is_returned(self) -> None:
+        self.assertEqual(
+            model_name({"models": {"embed": "embed-model"}}, "embed", None),
+            "embed-model",
+        )
 
 
 if __name__ == "__main__":

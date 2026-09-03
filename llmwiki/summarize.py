@@ -25,7 +25,7 @@ from llmwiki.core import (
 )
 from llmwiki.fetch import ACCEPTED_TYPES
 from llmwiki.lint import lint_pages, prompt_block
-from llmwiki.model import ModelError, PDF_PART_SHAPES, chat, model_name
+from llmwiki.model import ModelError, PDF_PART_SHAPES, chat, model_name, step_is_configured
 from llmwiki.sources import read_provenance
 
 # The CLI's own summarizing rules (decision agent-kb-0zf.4): a
@@ -351,12 +351,11 @@ def _resolve_content(
 
 def _image_model(kb: Kb) -> str:
     """`[models].summarize_image`, falling back to `[models].summarize`
-    when unset. Reuses `model_name`'s own lookup and error for each
-    step rather than a second hand-rolled dict read."""
-    try:
-        return model_name(kb.config, "summarize_image", None)
-    except ModelError:
+    when unset. A present but malformed `summarize_image` id raises
+    out of `model_name` instead of falling back."""
+    if not step_is_configured(kb.config, "summarize_image"):
         return model_name(kb.config, "summarize", None)
+    return model_name(kb.config, "summarize_image", None)
 
 
 def _process_digest(

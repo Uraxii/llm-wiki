@@ -632,6 +632,56 @@ class SummarizeTest(unittest.TestCase):
         self.assertIn("cannot read source", stderr)
         self.assertNotIn("Traceback", stderr)
 
+    # -- agent-kb-yr0: a malformed [models].summarize_image must fail
+    # loudly, never read as "summarize_image not configured".
+
+    def test_malformed_summarize_image_config_fails_loud_not_fallback(self) -> None:
+        """A typo'd or malformed [models].summarize_image used to be
+        caught by the same `except ModelError` that unset
+        summarize_image hits, so an image source silently summarized
+        against the plain [models].summarize model instead. It must
+        now fail the run rather than fall back."""
+        digest = self._store_binary_source(b"\x89PNG fake bytes", ".png", "image/png")
+
+        def respond(_path: str, _body: dict) -> dict:
+            raise AssertionError("must not reach the model on a malformed config")
+
+        with FakeEndpoint(respond) as fake:
+            (self.root / "config.toml").write_text(
+                '[models]\nsummarize = "cheap"\nsummarize_image = 123\n\n'
+                f'[endpoint]\nurl = "{fake.url}"\n'
+            )
+            err = io.StringIO()
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(fake.requests, [])
+        stderr = err.getvalue()
+        self.assertIn("[models].summarize_image", stderr)
+        self.assertIn("123", stderr)
+        self.assertEqual(list((self.root / "wiki").glob("*.md")), [])
+
+    def test_unset_summarize_image_config_still_falls_back_to_summarize(self) -> None:
+        """A genuinely unset [models].summarize_image must still take
+        its documented fallback: the plain summarize model."""
+        digest = self._store_binary_source(b"\x89PNG fake bytes", ".png", "image/png")
+        reply = (
+            "---\ntitle: Picture Overview\nidentifiers: []\n---\n\n"
+            "An abstract of the picture.\n"
+        )
+
+        def respond(_path: str, body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)  # no summarize_image key
+            code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(fake.requests), 1)
+        self.assertEqual(fake.requests[0].body["model"], "cheap")
+
     def test_unreadable_wiki_page_does_not_abort_summary_index(self) -> None:
         # agent-kb-74p item B: `_summary_index` caught only
         # FileNotFoundError from `core.read_page_text`, so a chmod-000

@@ -30,7 +30,7 @@ from llmwiki.core import (
     read_page_text,
 )
 from llmwiki.lint import select_pages
-from llmwiki.model import ModelError, embed, model_name
+from llmwiki.model import ModelError, embed, model_name, step_is_configured
 
 TOP_K = 10              # default -n for search
 BODY_HEAD_CHARS = 2000  # body prefix embedded when a page has no summary field
@@ -66,11 +66,11 @@ def db_path(kb: Kb, model_id: str) -> Path:
 
 
 def _model_id(kb: Kb) -> tuple[str | None, str | None]:
-    """`[models] embed`'s id, or `(None, error text)` when unset."""
-    try:
-        return model_name(kb.config, "embed", None), None
-    except ModelError as exc:
-        return None, str(exc)
+    """`[models] embed`'s id, or `(None, error text)` when unset. A
+    malformed id raises instead."""
+    if not step_is_configured(kb.config, "embed"):
+        return None, "missing [models].embed in config.toml"
+    return model_name(kb.config, "embed", None), None
 
 
 def _connect(kb: Kb, model_id: str) -> sqlite3.Connection:
@@ -305,11 +305,10 @@ def sweep(kb: Kb, paths: list[Path] | None = None) -> int:
 def run(root: Path, paths: list[Path] | None) -> int:
     """CLI `embed`."""
     kb = Kb(root)
-    try:
-        model_id = model_name(kb.config, "embed", None)
-    except ModelError:
+    if not step_is_configured(kb.config, "embed"):
         print("llmwiki: embed: missing [models].embed in config.toml", file=sys.stderr)
         return 2
+    model_id = model_name(kb.config, "embed", None)
 
     embedded = 0
     deleted = 0

@@ -267,6 +267,52 @@ class IngestTest(unittest.TestCase):
         )
         self.assertEqual(billable_texts, 2)
 
+    # -- agent-kb-yr0: a malformed [models].embed must fail loudly,
+    # never read as "embed step not configured".
+
+    def test_malformed_embed_config_fails_loud_not_exit_zero(self) -> None:
+        """A typo'd or malformed [models].embed used to be caught by
+        the same `except ModelError` that unset embed hits, so the
+        pipeline skipped embedding and still exited 0. It must now
+        fail the source and the run."""
+        path = self._write_source_file("widget.txt", "Widget source text.")
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake:
+            (self.root / "config.toml").write_text(
+                '[models]\nsummarize = "cheap"\nembed = 123\n\n'
+                f'[endpoint]\nurl = "{fake.url}"\n'
+            )
+            code, records = _run(self.root, [str(path)])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(len(records), 1)
+        _digest, status, _url = records[0]
+        self.assertEqual(status, "failed")
+        self.assertIn("embed failed", (self.root / "log.md").read_text())
+
+    def test_unset_embed_config_still_skips_embedding_and_exits_zero(self) -> None:
+        """A genuinely unset [models].embed must still take its
+        documented fallback: no embed step, never a pipeline failure."""
+        path = self._write_source_file("widget.txt", "Widget source text.")
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)  # no embed key
+            code, records = _run(self.root, [str(path)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(records), 1)
+        _digest, status, _url = records[0]
+        self.assertEqual(status, "new")
+        self.assertEqual(
+            [r for r in fake.requests if r.path == "/embeddings"], []
+        )
+
     def test_same_file_twice_second_is_exists_one_model_call(self) -> None:
         path = self._write_source_file("widget.txt", "Widget source text.")
 
