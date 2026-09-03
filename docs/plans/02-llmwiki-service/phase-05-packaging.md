@@ -2,6 +2,18 @@
 
 # Phase 5: container packaging and the mode 1 deployment
 
+> **CANCELLED 2026-09-03, by user directive.** This phase is unbuilt and is
+> not scheduled. The `[endpoint]` move it plans below is the opposite of the
+> move the project took: `[endpoint]` does not become `LLM_WIKI_ENDPOINT_URL`
+> and `LLM_WIKI_ENDPOINT_PDF_PART`. It is replaced by a `[providers]` table in
+> `config.toml`, per [the multi-provider design](../../design/multi-provider.md)
+> and ticket `agent-kb-9i7`. Providers are wiki configuration and stay in the
+> file; only credential values live in the environment, named there by the
+> `key_env` and `key_file_env` keys of a provider table. The rest of this
+> phase, the image, the token database volume, the read-only kb mount, and the
+> mode 1 ingesting process, is kept as a written record. Nothing below this
+> note is a live plan. Do not build toward it.
+
 **Goal.** One image runs the service, an operator starts it with a deployment
 file, a kb volume, and three environment variables, and `[endpoint]` stops
 living in `config.toml` in both modes.
@@ -23,10 +35,13 @@ nobody sweeps answers 503 from `search` forever.
 
 ## `[endpoint]` moves to the environment, in both modes
 
-The table is small and has exactly two readers. `model._endpoint_url`
-(`model.py:88`) reads `[endpoint].url`, and `summarize._pdf_part`
-(`summarize.py:132`) reads `[endpoint].pdf_part`. Both become environment
-reads:
+The table is small and has exactly two readers. `model._endpoint_url` (then at
+line 88 of that module) reads `[endpoint].url`, and `summarize._pdf_part` (then
+at line 132) reads `[endpoint].pdf_part`. Both become environment reads:
+
+Both readers were deleted when `[providers]` landed, so the two line citations
+that stood here are written out as prose above: a cancelled plan must not carry
+machine-checked citations to symbols that no longer exist.
 
 | Was | Becomes | Absent |
 |---|---|---|
@@ -45,7 +60,7 @@ check. One home in both modes costs one variable and no rule at all.
 path convention, a discovery walk, a parse, and a refusal for every malformed
 case, all for two scalars. The environment already carries every other
 machine-scoped value this project has: the model credential
-(`model.API_KEY_VAR`, `model.py:17`), phase 1's pepper, and phase 1's bootstrap
+(`model.API_KEY_VAR`, then at line 17 of that module), phase 1's pepper, and phase 1's bootstrap
 admin token. Rung 1 has already been running this exact arrangement for the
 url, injecting `LLM_WIKI_ENDPOINT_URL` at run time so no host is checked in.
 This phase deletes that workaround by making it the design.
@@ -192,7 +207,7 @@ mount points.
 
 **The kb mount is read-write even for a read-only deployment.** Phase 3 records
 the one write that survives on the read path: `_connect` creates `vectors/` if
-it is absent (`vectors.py:76`), so the first `search` against a kb that has
+it is absent (`vectors.py:81-89`), so the first `search` against a kb that has
 never been embedded fails on a read-only mount. The sweeping job below writes
 there in earnest anyway. A read-only kb mount is not a supported deployment,
 and the startup check below refuses it rather than letting it fail on the first
@@ -231,7 +246,7 @@ in the repo, the image, or the deployment file.
   lives outside the checkout, and the build-context ignore file above keeps a
   stray one out of the context.
 - **Prefer the file form for the model key.** `model.API_KEY_FILE_VAR`
-  (`model.py:18`) names a path, so a secret mounted as a file never enters the
+  (then at line 18 of that module) names a path, so a secret mounted as a file never enters the
   process environment, where a process listing, a crash dump, and every child
   process can read it. The path is a mount, not a layer.
 - The pepper and the bootstrap admin token have no file form in phase 1 and

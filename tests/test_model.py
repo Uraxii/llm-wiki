@@ -1,4 +1,7 @@
-"""Chat and embed over the configured API endpoint, against the fake."""
+"""Chat and embed over a configured provider, against the fake. Also
+`resolve_target` and `step_is_configured`, the parse from `[models]`
+and `[providers]` down to one `ModelTarget`, tested directly over plain
+dicts with no HTTP in the way."""
 
 import io
 import logging
@@ -14,12 +17,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.model import (  # noqa: E402
-    API_KEY_FILE_VAR,
-    API_KEY_VAR,
     ModelError,
+    ModelTarget,
     chat,
     embed,
-    model_name,
+    resolve_target,
     step_is_configured,
 )
 from fake_endpoint import FakeEndpoint  # noqa: E402
@@ -48,20 +50,27 @@ def _env(values: dict):
                 os.environ[key] = value
 
 
+def _target(
+    url: str,
+    model: str = "chat-model",
+    *,
+    provider: str = "test",
+    key_env: str | None = None,
+    key_file_env: str | None = None,
+    pdf_part: str = "file",
+) -> ModelTarget:
+    return ModelTarget(provider, url, model, key_env, key_file_env, pdf_part)
+
+
 def _ok_chat(_path: str, _body: dict) -> dict:
     return {"choices": [{"message": {"content": "answer text"}}]}
 
 
 class ChatTest(unittest.TestCase):
     def test_request_shape_and_response(self) -> None:
-        with FakeEndpoint(_ok_chat) as fake, _env(
-            {API_KEY_VAR: "secret-key", API_KEY_FILE_VAR: None}
-        ):
-            config = {
-                "endpoint": {"url": fake.url},
-                "models": {"summarize": "chat-model"},
-            }
-            result = chat(config, "summarize", "hello there")
+        with FakeEndpoint(_ok_chat) as fake, _env({"K": "secret-key"}):
+            target = _target(fake.url, "chat-model", key_env="K")
+            result = chat(target, "hello there")
 
         self.assertEqual(result, "answer text")
         self.assertEqual(len(fake.requests), 1)
@@ -82,14 +91,9 @@ class ChatTest(unittest.TestCase):
         call that leaves `temperature` unset, so omission is already
         proved there. This pins the other half: passing it adds one
         key and moves nothing else."""
-        with FakeEndpoint(_ok_chat) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {
-                "endpoint": {"url": fake.url},
-                "models": {"dedup": "judge-model"},
-            }
-            chat(config, "dedup", "pick one", temperature=0.0)
+        with FakeEndpoint(_ok_chat) as fake:
+            target = _target(fake.url, "judge-model")
+            chat(target, "pick one", temperature=0.0)
 
         self.assertEqual(
             fake.requests[0].body,
@@ -100,56 +104,17 @@ class ChatTest(unittest.TestCase):
             },
         )
 
-    def test_model_from_config_when_no_override(self) -> None:
+    def test_model_is_read_from_the_target(self) -> None:
         captured = {}
 
         def respond(_path: str, body: dict) -> dict:
             captured["model"] = body["model"]
             return {"choices": [{"message": {"content": "x"}}]}
 
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {
-                "endpoint": {"url": fake.url},
-                "models": {"summarize": "config-model"},
-            }
-            chat(config, "summarize", "hi")
+        with FakeEndpoint(respond) as fake:
+            chat(_target(fake.url, "target-model"), "hi")
 
-        self.assertEqual(captured["model"], "config-model")
-
-    def test_model_override_wins(self) -> None:
-        captured = {}
-
-        def respond(_path: str, body: dict) -> dict:
-            captured["model"] = body["model"]
-            return {"choices": [{"message": {"content": "x"}}]}
-
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {
-                "endpoint": {"url": fake.url},
-                "models": {"summarize": "config-model"},
-            }
-            chat(config, "summarize", "hi", model="override-model")
-
-        self.assertEqual(captured["model"], "override-model")
-
-    def test_missing_endpoint_url_raises(self) -> None:
-        with _env({API_KEY_VAR: "k", API_KEY_FILE_VAR: None}):
-            with self.assertRaises(ModelError) as ctx:
-                chat({"models": {"summarize": "m"}}, "summarize", "hi")
-        message = str(ctx.exception)
-        self.assertIn("endpoint", message)
-        self.assertIn("url", message)
-
-    def test_missing_model_step_raises(self) -> None:
-        with _env({API_KEY_VAR: "k", API_KEY_FILE_VAR: None}):
-            with self.assertRaises(ModelError) as ctx:
-                config = {"endpoint": {"url": "http://unused"}, "models": {}}
-                chat(config, "summarize", "hi")
-        self.assertIn("summarize", str(ctx.exception))
+        self.assertEqual(captured["model"], "target-model")
 
 
 class EmbedTest(unittest.TestCase):
@@ -163,18 +128,12 @@ class EmbedTest(unittest.TestCase):
                 ]
             }
 
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {
-                "endpoint": {"url": fake.url},
-                "models": {"embed": "embed-model"},
-            }
-            vectors = embed(config, ["a", "b", "c"])
+        with FakeEndpoint(respond) as fake:
+            vectors = embed(_target(fake.url, "embed-model"), ["a", "b", "c"])
 
         self.assertEqual(vectors, [[0.0], [1.0], [2.0]])
 
-    def test_uses_models_embed_key_and_path(self) -> None:
+    def test_uses_the_targets_model_and_the_embeddings_path(self) -> None:
         captured = {}
 
         def respond(path: str, body: dict) -> dict:
@@ -182,35 +141,11 @@ class EmbedTest(unittest.TestCase):
             captured["path"] = path
             return {"data": [{"index": 0, "embedding": [1.0]}]}
 
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {
-                "endpoint": {"url": fake.url},
-                "models": {"embed": "embed-model"},
-            }
-            embed(config, ["only"])
+        with FakeEndpoint(respond) as fake:
+            embed(_target(fake.url, "embed-model"), ["only"])
 
         self.assertEqual(captured["model"], "embed-model")
         self.assertEqual(captured["path"], "/embeddings")
-
-    def test_embed_model_override(self) -> None:
-        captured = {}
-
-        def respond(_path: str, body: dict) -> dict:
-            captured["model"] = body["model"]
-            return {"data": [{"index": 0, "embedding": [1.0]}]}
-
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {
-                "endpoint": {"url": fake.url},
-                "models": {"embed": "embed-model"},
-            }
-            embed(config, ["only"], model="override")
-
-        self.assertEqual(captured["model"], "override")
 
 
 class CredentialTest(unittest.TestCase):
@@ -223,43 +158,68 @@ class CredentialTest(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return path
 
-    def _config(self, fake: FakeEndpoint) -> dict:
-        return {"endpoint": {"url": fake.url}, "models": {"summarize": "m"}}
-
-    def test_value_wins_when_both_set(self) -> None:
+    def test_key_env_wins_over_key_file_env(self) -> None:
         key_path = self._write_key_file("file-key\n")
 
         with FakeEndpoint(_ok_chat) as fake, _env(
-            {API_KEY_VAR: "value-key", API_KEY_FILE_VAR: str(key_path)}
+            {"K": "value-key", "KF": str(key_path)}
         ):
-            chat(self._config(fake), "summarize", "hi")
+            target = _target(fake.url, key_env="K", key_file_env="KF")
+            chat(target, "hi")
 
         self.assertEqual(
             fake.requests[0].headers.get("Authorization"), "Bearer value-key"
         )
 
-    def test_file_used_when_only_file_set_strips_one_newline(self) -> None:
+    def test_key_file_env_used_when_key_env_unset_strips_one_newline(self) -> None:
         key_path = self._write_key_file("file-key\n")
 
-        with FakeEndpoint(_ok_chat) as fake, _env(
-            {API_KEY_VAR: None, API_KEY_FILE_VAR: str(key_path)}
-        ):
-            chat(self._config(fake), "summarize", "hi")
+        with FakeEndpoint(_ok_chat) as fake, _env({"KF": str(key_path)}):
+            target = _target(fake.url, key_file_env="KF")
+            chat(target, "hi")
 
         self.assertEqual(
             fake.requests[0].headers.get("Authorization"), "Bearer file-key"
         )
 
-    def test_neither_set_raises_naming_both_vars(self) -> None:
-        with FakeEndpoint(_ok_chat) as fake, _env(
-            {API_KEY_VAR: None, API_KEY_FILE_VAR: None}
-        ):
-            with self.assertRaises(ModelError) as ctx:
-                chat(self._config(fake), "summarize", "hi")
+    def test_neither_field_set_sends_no_authorization_header(self) -> None:
+        """A provider that declares neither key_env nor key_file_env is
+        what a server on the operator's own machine usually wants: no
+        Authorization header, and no error."""
+        with FakeEndpoint(_ok_chat) as fake:
+            chat(_target(fake.url), "hi")
 
-        message = str(ctx.exception)
-        self.assertIn(API_KEY_VAR, message)
-        self.assertIn(API_KEY_FILE_VAR, message)
+        self.assertNotIn("Authorization", fake.requests[0].headers)
+
+    def test_key_env_named_but_unset_raises_naming_the_variable(self) -> None:
+        with FakeEndpoint(_ok_chat) as fake, _env({"K": None}):
+            target = _target(fake.url, key_env="K")
+            with self.assertRaises(ModelError) as ctx:
+                chat(target, "hi")
+        self.assertIn("K", str(ctx.exception))
+
+    def test_key_file_env_named_but_unset_raises_naming_the_variable(self) -> None:
+        with FakeEndpoint(_ok_chat) as fake, _env({"KF": None}):
+            target = _target(fake.url, key_file_env="KF")
+            with self.assertRaises(ModelError) as ctx:
+                chat(target, "hi")
+        self.assertIn("KF", str(ctx.exception))
+
+    def test_missing_key_file_raises_model_error(self) -> None:
+        with FakeEndpoint(_ok_chat) as fake, _env(
+            {"KF": "/nonexistent/path/key.txt"}
+        ):
+            target = _target(fake.url, key_file_env="KF")
+            with self.assertRaises(ModelError) as ctx:
+                chat(target, "hi")
+        self.assertIn("KF", str(ctx.exception))
+
+    def test_key_file_is_directory_raises_model_error(self) -> None:
+        with FakeEndpoint(_ok_chat) as fake, _env({"KF": self._tmp_dir}):
+            target = _target(fake.url, key_file_env="KF")
+            with self.assertRaises(ModelError) as ctx:
+                chat(target, "hi")
+        self.assertIn("KF", str(ctx.exception))
 
 
 class RedirectLeakTest(unittest.TestCase):
@@ -274,15 +234,10 @@ class RedirectLeakTest(unittest.TestCase):
                 lambda _p, _b: {},
                 status=302,
                 headers={"Location": victim.url + "/chat/completions"},
-            ) as redirector, _env(
-                {API_KEY_VAR: "secret-key", API_KEY_FILE_VAR: None}
-            ):
-                config = {
-                    "endpoint": {"url": redirector.url},
-                    "models": {"summarize": "m"},
-                }
+            ) as redirector, _env({"K": "secret-key"}):
+                target = _target(redirector.url, key_env="K")
                 with self.assertRaises(ModelError):
-                    chat(config, "summarize", "hi")
+                    chat(target, "hi")
 
             self.assertEqual(victim.requests, [])
 
@@ -292,41 +247,11 @@ class ProxyLeakTest(unittest.TestCase):
 
     def test_proxy_env_var_is_not_consulted(self) -> None:
         with FakeEndpoint(_ok_chat) as fake, _env(
-            {
-                API_KEY_VAR: "k",
-                API_KEY_FILE_VAR: None,
-                "http_proxy": "http://127.0.0.1:9",
-            }
+            {"http_proxy": "http://127.0.0.1:9"}
         ):
-            config = {"endpoint": {"url": fake.url}, "models": {"summarize": "m"}}
-            result = chat(config, "summarize", "hi")
+            result = chat(_target(fake.url), "hi")
 
         self.assertEqual(result, "answer text")
-
-
-class ApiKeyFileErrorTest(unittest.TestCase):
-    """F2: a bad LLM_WIKI_API_KEY_FILE raises ModelError, not a raw
-    OSError/ValueError subtype."""
-
-    def test_missing_key_file_raises_model_error(self) -> None:
-        with FakeEndpoint(_ok_chat) as fake, _env(
-            {API_KEY_VAR: None, API_KEY_FILE_VAR: "/nonexistent/path/key.txt"}
-        ):
-            config = {"endpoint": {"url": fake.url}, "models": {"summarize": "m"}}
-            with self.assertRaises(ModelError) as ctx:
-                chat(config, "summarize", "hi")
-        self.assertIn(API_KEY_FILE_VAR, str(ctx.exception))
-
-    def test_key_file_is_directory_raises_model_error(self) -> None:
-        tmp_dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp_dir)
-        with FakeEndpoint(_ok_chat) as fake, _env(
-            {API_KEY_VAR: None, API_KEY_FILE_VAR: tmp_dir}
-        ):
-            config = {"endpoint": {"url": fake.url}, "models": {"summarize": "m"}}
-            with self.assertRaises(ModelError) as ctx:
-                chat(config, "summarize", "hi")
-        self.assertIn(API_KEY_FILE_VAR, str(ctx.exception))
 
 
 class ResponseShapeTest(unittest.TestCase):
@@ -337,24 +262,18 @@ class ResponseShapeTest(unittest.TestCase):
         def respond(_path: str, _body: dict) -> dict:
             return {"error": "boom"}
 
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {"endpoint": {"url": fake.url}, "models": {"summarize": "m"}}
+        with FakeEndpoint(respond) as fake:
             with self.assertRaises(ModelError) as ctx:
-                chat(config, "summarize", "hi")
+                chat(_target(fake.url), "hi")
         self.assertIn("choices", str(ctx.exception))
 
     def test_embed_missing_data_raises_model_error(self) -> None:
         def respond(_path: str, _body: dict) -> dict:
             return {"error": "boom"}
 
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {"endpoint": {"url": fake.url}, "models": {"embed": "m"}}
+        with FakeEndpoint(respond) as fake:
             with self.assertRaises(ModelError) as ctx:
-                embed(config, ["a"])
+                embed(_target(fake.url), ["a"])
         self.assertIn("data", str(ctx.exception))
 
 
@@ -371,12 +290,9 @@ class EmbedIndexIntegrityTest(unittest.TestCase):
                 ]
             }
 
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {"endpoint": {"url": fake.url}, "models": {"embed": "m"}}
+        with FakeEndpoint(respond) as fake:
             with self.assertRaises(ModelError):
-                embed(config, ["a", "b", "c"])
+                embed(_target(fake.url), ["a", "b", "c"])
 
     def test_duplicated_index_raises_model_error(self) -> None:
         def respond(_path: str, _body: dict) -> dict:
@@ -387,12 +303,9 @@ class EmbedIndexIntegrityTest(unittest.TestCase):
                 ]
             }
 
-        with FakeEndpoint(respond) as fake, _env(
-            {API_KEY_VAR: "k", API_KEY_FILE_VAR: None}
-        ):
-            config = {"endpoint": {"url": fake.url}, "models": {"embed": "m"}}
+        with FakeEndpoint(respond) as fake:
             with self.assertRaises(ModelError):
-                embed(config, ["a", "b"])
+                embed(_target(fake.url), ["a", "b"])
 
 
 class _ListHandler(logging.Handler):
@@ -408,7 +321,7 @@ class _ListHandler(logging.Handler):
 
 
 class NoLeakTest(unittest.TestCase):
-    def _assert_no_leak(self, config: dict, secret: str) -> None:
+    def _assert_no_leak(self, target: ModelTarget, secret: str) -> None:
         handler = _ListHandler()
         root = logging.getLogger()
         root.addHandler(handler)
@@ -417,7 +330,7 @@ class NoLeakTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             with self.assertRaises(ModelError) as ctx:
-                chat(config, "summarize", "hi")
+                chat(target, "hi")
 
         self.assertNotIn(secret, str(ctx.exception))
         self.assertNotIn(secret, out.getvalue())
@@ -439,11 +352,8 @@ class NoLeakTest(unittest.TestCase):
         def respond(_path: str, _body: dict) -> dict:
             return {"error": "boom"}
 
-        with FakeEndpoint(respond, status=500) as fake, _env(
-            {API_KEY_VAR: secret, API_KEY_FILE_VAR: None}
-        ):
-            config = {"endpoint": {"url": fake.url}, "models": {"summarize": "m"}}
-            self._assert_no_leak(config, secret)
+        with FakeEndpoint(respond, status=500) as fake, _env({"K": secret}):
+            self._assert_no_leak(_target(fake.url, key_env="K"), secret)
 
     def test_key_never_appears_via_key_file(self) -> None:
         secret = "super-secret-file-value"
@@ -455,11 +365,8 @@ class NoLeakTest(unittest.TestCase):
         def respond(_path: str, _body: dict) -> dict:
             return {"error": "boom"}
 
-        with FakeEndpoint(respond, status=500) as fake, _env(
-            {API_KEY_VAR: None, API_KEY_FILE_VAR: str(key_path)}
-        ):
-            config = {"endpoint": {"url": fake.url}, "models": {"summarize": "m"}}
-            self._assert_no_leak(config, secret)
+        with FakeEndpoint(respond, status=500) as fake, _env({"KF": str(key_path)}):
+            self._assert_no_leak(_target(fake.url, key_file_env="KF"), secret)
 
 
 class StepIsConfiguredTest(unittest.TestCase):
@@ -482,56 +389,215 @@ class StepIsConfiguredTest(unittest.TestCase):
     def test_malformed_value_still_reads_as_configured(self) -> None:
         # The presence question and the validity question are separate
         # on purpose: a typo'd or malformed value must fail loudly in
-        # model_name, never silently in step_is_configured.
+        # resolve_target, never silently in step_is_configured.
         self.assertTrue(step_is_configured({"models": {"embed": 123}}, "embed"))
         self.assertTrue(step_is_configured({"models": {"embed": ""}}, "embed"))
         self.assertTrue(step_is_configured({"models": {"embed": None}}, "embed"))
 
+    def test_legacy_endpoint_config_raises(self) -> None:
+        # agent-kb-9i7: presence can never be answered past a stale
+        # config; step_is_configured refuses before it looks at
+        # [models] at all.
+        config = {"endpoint": {"url": "https://api.example.com/v1"}}
+        with self.assertRaises(ModelError) as ctx:
+            step_is_configured(config, "embed")
+        self.assertIn("[endpoint]", str(ctx.exception))
+        self.assertIn("[providers]", str(ctx.exception))
 
-class ModelNameTest(unittest.TestCase):
-    """agent-kb-yr0: a malformed `[models].<step>` value must raise,
-    not read as unset, so it can never be swallowed by a caller
-    catching `ModelError` to mean "not configured"."""
 
-    def test_missing_key_message_is_unchanged(self) -> None:
+class LegacyEndpointTest(unittest.TestCase):
+    """agent-kb-9i7: no back-compat shim. A config still holding
+    [endpoint] is refused loudly, naming the replacement, from both
+    public entry points."""
+
+    def test_resolve_target_refuses_naming_the_replacement(self) -> None:
+        config = {
+            "endpoint": {"url": "https://api.example.com/v1"},
+            "models": {"summarize": "hosted:m"},
+        }
+        with self.assertRaises(ModelError) as ctx:
+            resolve_target(config, "summarize")
+        message = str(ctx.exception)
+        self.assertIn("[endpoint]", message)
+        self.assertIn("[providers.hosted]", message)
+        self.assertIn('prefix every id under [models] with "hosted:"', message)
+
+
+class SplitModelIdTest(unittest.TestCase):
+    """agent-kb-9i7: every row of the split table `resolve_target`
+    covers, each error naming the step."""
+
+    PROVIDERS = {"hosted": {"url": "http://unused"}}
+
+    def _resolve(self, value: object) -> ModelTarget:
+        config = {"models": {"summarize": value}, "providers": self.PROVIDERS}
+        return resolve_target(config, "summarize")
+
+    def test_provider_and_model_split_on_first_colon(self) -> None:
+        target = self._resolve("hosted:some-model")
+        self.assertEqual((target.provider, target.model), ("hosted", "some-model"))
+
+    def test_colon_inside_model_portion_survives(self) -> None:
+        target = self._resolve("hosted:some-family:8b")
+        self.assertEqual((target.provider, target.model), ("hosted", "some-family:8b"))
+
+    def test_no_colon_raises_naming_the_step_and_missing_prefix(self) -> None:
+        with self.assertRaises(ModelError) as ctx:
+            self._resolve("some-model")
+        message = str(ctx.exception)
+        self.assertIn("[models].summarize", message)
+        self.assertIn("no provider prefix", message)
+        self.assertIn('"<provider>:some-model"', message)
+
+    def test_empty_provider_raises_naming_the_step(self) -> None:
+        with self.assertRaises(ModelError) as ctx:
+            self._resolve(":some-model")
+        message = str(ctx.exception)
+        self.assertIn("[models].summarize", message)
+        self.assertIn("empty provider name", message)
+
+    def test_empty_model_raises_naming_the_step(self) -> None:
+        with self.assertRaises(ModelError) as ctx:
+            self._resolve("hosted:")
+        message = str(ctx.exception)
+        self.assertIn("[models].summarize", message)
+        self.assertIn("names no model", message)
+
+    def test_unknown_provider_raises_naming_the_step_and_provider(self) -> None:
+        with self.assertRaises(ModelError) as ctx:
+            self._resolve("nope:some-model")
+        message = str(ctx.exception)
+        self.assertIn("[models].summarize", message)
+        self.assertIn("nope", message)
+        self.assertIn("[providers.nope]", message)
+        self.assertIn("not in config.toml", message)
+
+    def test_non_string_value_raises_naming_the_step(self) -> None:
+        for bad in (123, ["m"], {"nested": "m"}, 1.5, True):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ModelError) as ctx:
+                    self._resolve(bad)
+                message = str(ctx.exception)
+                self.assertIn("[models].summarize", message)
+                self.assertIn("not a string", message)
+
+    def test_missing_step_raises_the_unchanged_missing_key_message(self) -> None:
         # vectors.status and vectors.search print this text verbatim;
         # it must stay byte-identical.
         with self.assertRaises(ModelError) as ctx:
-            model_name({"models": {}}, "embed", None)
+            resolve_target({"models": {}, "providers": self.PROVIDERS}, "embed")
         self.assertEqual(str(ctx.exception), "missing [models].embed in config.toml")
 
     def test_models_table_absent_raises_missing_key_message(self) -> None:
         with self.assertRaises(ModelError) as ctx:
-            model_name({}, "embed", None)
+            resolve_target({}, "embed")
         self.assertEqual(str(ctx.exception), "missing [models].embed in config.toml")
 
-    def test_non_string_value_raises(self) -> None:
-        for bad in (123, ["m"], {"nested": "m"}, 1.5, True):
-            with self.subTest(bad=bad):
-                with self.assertRaises(ModelError) as ctx:
-                    model_name({"models": {"embed": bad}}, "embed", None)
-                self.assertIn(repr(bad), str(ctx.exception))
-                self.assertIn("[models].embed", str(ctx.exception))
 
-    def test_empty_string_value_raises(self) -> None:
+class ProviderTableTest(unittest.TestCase):
+    """agent-kb-9i7: a [providers.<name>] table is checked as strictly
+    as [remotes]'s tables are: an unknown key is an error, and every
+    recognized key is validated."""
+
+    def _resolve(self, provider_table: dict) -> ModelTarget:
+        config = {
+            "models": {"summarize": "hosted:m"},
+            "providers": {"hosted": provider_table},
+        }
+        return resolve_target(config, "summarize")
+
+    def test_recognized_keys_all_come_through(self) -> None:
+        target = self._resolve(
+            {
+                "url": "http://example.test",
+                "key_env": "K",
+                "key_file_env": "KF",
+                "pdf_part": "image_url",
+            }
+        )
+        self.assertEqual(target.url, "http://example.test")
+        self.assertEqual(target.key_env, "K")
+        self.assertEqual(target.key_file_env, "KF")
+        self.assertEqual(target.pdf_part, "image_url")
+
+    def test_pdf_part_defaults_to_file(self) -> None:
+        target = self._resolve({"url": "http://example.test"})
+        self.assertEqual(target.pdf_part, "file")
+
+    def test_unrecognized_key_raises(self) -> None:
         with self.assertRaises(ModelError) as ctx:
-            model_name({"models": {"embed": ""}}, "embed", None)
-        self.assertIn("[models].embed", str(ctx.exception))
+            self._resolve({"url": "http://example.test", "vendor": "acme"})
+        message = str(ctx.exception)
+        self.assertIn("[providers.hosted]", message)
+        self.assertIn("vendor", message)
 
-    def test_cli_override_wins_over_a_malformed_config_value(self) -> None:
-        # The override short-circuits before the config is even read,
-        # so a broken [models] table never blocks a caller that passed
-        # its own model.
-        self.assertEqual(
-            model_name({"models": {"embed": 123}}, "embed", "override-model"),
-            "override-model",
-        )
+    def test_missing_url_raises(self) -> None:
+        with self.assertRaises(ModelError) as ctx:
+            self._resolve({"key_env": "K"})
+        self.assertIn("[providers.hosted]", str(ctx.exception))
 
-    def test_well_formed_value_is_returned(self) -> None:
-        self.assertEqual(
-            model_name({"models": {"embed": "embed-model"}}, "embed", None),
-            "embed-model",
-        )
+    def test_provider_table_not_a_table_raises(self) -> None:
+        config = {
+            "models": {"summarize": "hosted:m"},
+            "providers": {"hosted": "not-a-table"},
+        }
+        with self.assertRaises(ModelError) as ctx:
+            resolve_target(config, "summarize")
+        self.assertIn("[providers.hosted]", str(ctx.exception))
+
+    def test_bad_pdf_part_raises(self) -> None:
+        with self.assertRaises(ModelError) as ctx:
+            self._resolve({"url": "http://example.test", "pdf_part": "carrier-pigeon"})
+        message = str(ctx.exception)
+        self.assertIn("[providers.hosted]", message)
+        self.assertIn("pdf_part", message)
+        self.assertIn("carrier-pigeon", message)
+
+
+class TwoProviderTest(unittest.TestCase):
+    """agent-kb-9i7: the reason this feature exists. Two [models] ids
+    under two [providers] tables resolve to, and pay, two independent
+    endpoints -- a summarize model on a hosted endpoint and an embed
+    model on the machine under your desk are no longer mutually
+    exclusive."""
+
+    def test_summarize_and_embed_reach_different_providers(self) -> None:
+        def respond_hosted(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "answer"}}]}
+
+        def respond_desktop(_path: str, body: dict) -> dict:
+            return {
+                "data": [
+                    {"index": i, "embedding": [1.0]}
+                    for i in range(len(body["input"]))
+                ]
+            }
+
+        with FakeEndpoint(respond_hosted) as hosted, FakeEndpoint(
+            respond_desktop
+        ) as desktop:
+            config = {
+                "models": {
+                    "summarize": "hosted:chat-model",
+                    "embed": "desktop:embed-model",
+                },
+                "providers": {
+                    "hosted": {"url": hosted.url},
+                    "desktop": {"url": desktop.url},
+                },
+            }
+            text_target = resolve_target(config, "summarize")
+            embed_target = resolve_target(config, "embed")
+
+            chat(text_target, "hi")
+            embed(embed_target, ["a", "b"])
+
+        self.assertEqual(text_target.url, hosted.url)
+        self.assertEqual(embed_target.url, desktop.url)
+        self.assertEqual(len(hosted.requests), 1)
+        self.assertEqual(hosted.requests[0].path, "/chat/completions")
+        self.assertEqual(len(desktop.requests), 1)
+        self.assertEqual(desktop.requests[0].path, "/embeddings")
 
 
 if __name__ == "__main__":

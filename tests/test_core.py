@@ -201,7 +201,7 @@ class LoadConfigTest(TmpDirTest):
     def test_real_fixture_config_loads(self) -> None:
         kb = self.copy("recipe")
         config = load_config(kb)
-        self.assertEqual(config["models"]["summarize"], "cheap")
+        self.assertEqual(config["models"]["summarize"], "test:cheap")
 
 
 if __name__ == "__main__":

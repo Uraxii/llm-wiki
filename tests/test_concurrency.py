@@ -53,17 +53,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import Kb, as_list, parse_frontmatter, render_frontmatter  # noqa: E402
-from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
 from llmwiki import summarize, vectors  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+from kb_config import config_toml  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _subprocess_env() -> dict:
-    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), API_KEY_VAR: "test-key"}
-    env.pop(API_KEY_FILE_VAR, None)
-    return env
+    return {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
 
 
 def _fields(root: Path, name: str) -> dict:
@@ -150,8 +148,11 @@ class Hazard1LostUpdate(unittest.TestCase):
         env = _subprocess_env()
         with FakeEndpoint(respond, concurrent=True) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\nsummarize = "cheap"\ndedup = "cheap"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n\n[identifiers.tag]\n'
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "dedup": "cheap"},
+                    extra="[identifiers.tag]\n",
+                )
             )
             proc_b = self._dedup(self.digest2, env)
             self.assertTrue(
@@ -385,8 +386,7 @@ class Hazard3SlugCollision(unittest.TestCase):
         env = _subprocess_env()
         with FakeEndpoint(respond, concurrent=True) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\nsummarize = "cheap"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n\n[identifiers.tag]\n'
+                config_toml(fake.url, {"summarize": "cheap"}, extra="[identifiers.tag]\n")
             )
             proc_a = self._summarize(digest1, env)
             proc_b = self._summarize(digest2, env)
@@ -514,8 +514,7 @@ class Hazard4RollbackDeletesRival(unittest.TestCase):
         env = _subprocess_env()
         with FakeEndpoint(respond, concurrent=True) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\ndedup = "cheap"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n\n[identifiers.tag]\n'
+                config_toml(fake.url, {"dedup": "cheap"}, extra="[identifiers.tag]\n")
             )
             proc_a = self._dedup(self.digest_a, env)
             proc_b = self._dedup(self.digest_b, env)

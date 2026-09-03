@@ -25,7 +25,7 @@ from llmwiki.core import (
 )
 from llmwiki.fetch import ACCEPTED_TYPES
 from llmwiki.lint import lint_pages, prompt_block
-from llmwiki.model import ModelError, PDF_PART_SHAPES, chat, model_name, step_is_configured
+from llmwiki.model import ModelError, ModelTarget, chat, resolve_target, step_is_configured
 from llmwiki.sources import read_provenance
 
 # The CLI's own summarizing rules (decision agent-kb-0zf.4): a
@@ -127,16 +127,6 @@ def _content_kind(content_type: str) -> str:
     if normalized in _IMAGE_TYPES or normalized == _PDF_TYPE:
         return "visual"
     return "unsupported"
-
-
-def _pdf_part(config: dict) -> str:
-    """[endpoint].pdf_part, defaulting to "file". Read and validated
-    once at the top of `run`, so a typo is a startup-visible error
-    instead of surfacing only once a PDF happens to appear."""
-    value = config.get("endpoint", {}).get("pdf_part", "file")
-    if value not in PDF_PART_SHAPES:
-        raise ModelError(f"unrecognized [endpoint].pdf_part: {value!r}")
-    return value
 
 
 def _all_digests(kb: Kb) -> list[str]:
@@ -309,9 +299,9 @@ def _resolve_content(
     (an undecodable text source, or a content_type this CLI does not
     handle at all); `"actionable"` for every other reason, since a
     missing sidecar can be restored, a permission bit can be fixed,
-    and [endpoint].pdf_part can be edited. Reads no lock; source bytes
-    and provenance are immutable once `sources.store` writes them, so
-    a plain read here needs none."""
+    and the provider's pdf_part can be edited. Reads no lock; source
+    bytes and provenance are immutable once `sources.store` writes
+    them, so a plain read here needs none."""
     try:
         path = _source_path(kb, digest)
         provenance = read_provenance(kb, digest)
@@ -336,7 +326,7 @@ def _resolve_content(
 
     normalized = content_type.split(";")[0].strip().lower()
     if normalized == _PDF_TYPE and pdf_part == "none":
-        return "actionable", "PDF attachments disabled: set [endpoint] pdf_part"
+        return "actionable", "PDF attachments disabled: set pdf_part on the provider"
     try:
         attachment = (normalized, path.read_bytes())
     except OSError as exc:
@@ -349,13 +339,15 @@ def _resolve_content(
     )
 
 
-def _image_model(kb: Kb) -> str:
-    """`[models].summarize_image`, falling back to `[models].summarize`
-    when unset. A present but malformed `summarize_image` id raises
-    out of `model_name` instead of falling back."""
+def _image_target(kb: Kb) -> ModelTarget:
+    """`[models].summarize_image` when configured, else
+    `[models].summarize`. Resolving rather than naming means the
+    fallback moves the url and the credential too, not just the model
+    name. A present but malformed `summarize_image` id raises out of
+    `resolve_target` instead of falling back."""
     if not step_is_configured(kb.config, "summarize_image"):
-        return model_name(kb.config, "summarize", None)
-    return model_name(kb.config, "summarize_image", None)
+        return resolve_target(kb.config, "summarize")
+    return resolve_target(kb.config, "summarize_image")
 
 
 def _process_digest(
@@ -363,30 +355,30 @@ def _process_digest(
     digest: str,
     prefix: str,
     fingerprint: str,
-    pdf_part: str,
+    text_target: ModelTarget,
+    visual_target: ModelTarget,
 ) -> Literal["inert", "actionable"] | None:
     """Summarize one source. Returns `None` when a page was kept,
     `"inert"` when the drop derives only from the immutable source
     bytes and their recorded content_type (no rerun under any
     configuration can change it), or `"actionable"` for every other
     drop, before or after the model call: a permission bit, a sidecar,
-    [endpoint].pdf_part, a prompt, or a config pattern could each make
-    a rerun succeed. Source bytes and provenance are read, and the
-    model called, before any lock is taken; the commit window opens
+    the provider's pdf_part, a prompt, or a config pattern could each
+    make a rerun succeed. `_resolve_content` is gated on
+    `visual_target.pdf_part`, the limit of the endpoint that will
+    actually receive the PDF. Source bytes and provenance are read, and
+    the model called, before any lock is taken; the commit window opens
     only once there is content to write."""
-    resolved = _resolve_content(kb, digest, prefix, pdf_part)
+    resolved = _resolve_content(kb, digest, prefix, visual_target.pdf_part)
     if len(resolved) == 2:  # (category, reason); a 4-tuple is success
         category, reason = resolved
         _fail(kb, digest, reason)
         return category
     prompt, attachment, step, provenance = resolved
 
-    if step == "summarize_image":
-        model_used = _image_model(kb)
-    else:
-        model_used = model_name(kb.config, "summarize", None)
+    target = visual_target if step == "summarize_image" else text_target
 
-    reply = chat(kb.config, step, prompt, model=model_used, attachment=attachment)
+    reply = chat(target, prompt, attachment=attachment)
     parsed = parse_frontmatter(_unwrap_fence(reply))
     title = str(parsed[0].get("title", "")).strip() if parsed else ""
     reason = _drop_reason(parsed, title)
@@ -395,7 +387,7 @@ def _process_digest(
         return "actionable"
 
     reply_fields, body = parsed
-    fields = _build_fields(reply_fields, digest, provenance, model_used, fingerprint)
+    fields = _build_fields(reply_fields, digest, provenance, target.id, fingerprint)
 
     with kb_lock(kb.root):
         index = _summary_index(kb)
@@ -431,7 +423,8 @@ def run(root: Path, digests: list[str] | None) -> int:
     fingerprint = prompt_fingerprint(prefix)
 
     try:
-        pdf_part = _pdf_part(kb.config)
+        text_target = resolve_target(kb.config, "summarize")
+        visual_target = _image_target(kb)
     except ModelError as exc:
         print(f"llmwiki: summarize: {exc}", file=sys.stderr)
         return 1
@@ -445,7 +438,9 @@ def run(root: Path, digests: list[str] | None) -> int:
     dropped_inert = False
     for digest in remaining:
         try:
-            kind = _process_digest(kb, digest, prefix, fingerprint, pdf_part)
+            kind = _process_digest(
+                kb, digest, prefix, fingerprint, text_target, visual_target
+            )
         except ModelError as exc:
             print(f"llmwiki: summarize: {exc}", file=sys.stderr)
             return 1

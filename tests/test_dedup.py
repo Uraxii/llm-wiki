@@ -3,23 +3,22 @@ kb and the fake endpoint for the judge."""
 
 import hashlib
 import io
-import os
 import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import parse_frontmatter, render_frontmatter  # noqa: E402
-from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
 from llmwiki import cli, dedup  # noqa: E402
 from llmwiki.dedup import DEDUP_PROMPT  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+from kb_config import config_toml  # noqa: E402
 
-DEFAULT_CONFIG = '[models]\nsummarize = "cheap"\n\n[identifiers.tag]\n'
+DEFAULT_CONFIG = config_toml("http://unused", {"summarize": "cheap"}, extra="[identifiers.tag]\n")
 
 
 def _run_quiet(root, digests=None):
@@ -37,25 +36,6 @@ def _rebuild_quiet(root):
     return code, buf.getvalue()
 
 
-@contextmanager
-def _env(values: dict):
-    sentinel = object()
-    previous = {key: os.environ.get(key, sentinel) for key in values}
-    for key, value in values.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is sentinel:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
 class DedupTest(unittest.TestCase):
     """A from-scratch kb per test: dirs, log, a default identifier
     vocabulary. Page file names are deliberately unrelated to their
@@ -70,9 +50,6 @@ class DedupTest(unittest.TestCase):
             (self.root / sub).mkdir(parents=True)
         (self.root / "log.md").write_text("# log\n")
         self._write_config(DEFAULT_CONFIG)
-        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
-        env_cm.__enter__()
-        self.addCleanup(env_cm.__exit__, None, None, None)
 
     def _write_config(self, text: str) -> None:
         (self.root / "config.toml").write_text(text)
@@ -155,8 +132,11 @@ class DedupTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             self._write_config(
-                '[models]\nsummarize = "cheap"\ndedup = "judge"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n\n[identifiers.tag]\n'
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "dedup": "judge"},
+                    extra="[identifiers.tag]\n",
+                )
             )
             code, _out = _run_quiet(self.root)
 
@@ -174,8 +154,11 @@ class DedupTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             self._write_config(
-                '[models]\nsummarize = "cheap"\ndedup = "judge"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n\n[identifiers.tag]\n'
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "dedup": "judge"},
+                    extra="[identifiers.tag]\n",
+                )
             )
             code, _out = _run_quiet(self.root)
 
@@ -197,8 +180,11 @@ class DedupTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             self._write_config(
-                '[models]\nsummarize = "cheap"\ndedup = "judge"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n\n[identifiers.tag]\n'
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "dedup": "judge"},
+                    extra="[identifiers.tag]\n",
+                )
             )
             code, _out = _run_quiet(self.root)
 
@@ -218,8 +204,11 @@ class DedupTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             self._write_config(
-                '[models]\nsummarize = "cheap"\ndedup = "judge"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n\n[identifiers.tag]\n'
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "dedup": "judge"},
+                    extra="[identifiers.tag]\n",
+                )
             )
             code, _out = _run_quiet(self.root)
 
@@ -376,7 +365,7 @@ class DedupTest(unittest.TestCase):
             with kb_lock(self.root):
                 dedup.place(Kb(self.root), None)
         self.assertIn("[models].dedup", str(ctx.exception))
-        self.assertIn("123", str(ctx.exception))
+        self.assertIn("not a string", str(ctx.exception))
 
     # -- rebuild ----------------------------------------------------
 

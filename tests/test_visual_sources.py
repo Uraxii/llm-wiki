@@ -5,23 +5,22 @@ built by hand below, never downloaded and never larger than ~2KB.
 
 import hashlib
 import io
-import os
 import shutil
 import struct
 import sys
 import tempfile
 import unittest
 import zlib
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import Kb, parse_frontmatter  # noqa: E402
 from llmwiki.lint import lint_pages  # noqa: E402
-from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
 from llmwiki import summarize  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+from kb_config import config_toml  # noqa: E402
 
 
 def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
@@ -77,25 +76,6 @@ def _run_quiet(root, digests):
         return summarize.run(root, digests)
 
 
-@contextmanager
-def _env(values: dict):
-    sentinel = object()
-    previous = {key: os.environ.get(key, sentinel) for key in values}
-    for key, value in values.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is sentinel:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
 GOOD_REPLY = (
     "---\n"
     "title: A Photographed Chart\n"
@@ -113,14 +93,10 @@ class VisualSourceTest(unittest.TestCase):
         for sub in ("wiki", "sources"):
             (self.root / sub).mkdir(parents=True)
         (self.root / "log.md").write_text("# log\n")
-        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
-        env_cm.__enter__()
-        self.addCleanup(env_cm.__exit__, None, None, None)
 
-    def _write_config(self, url: str, extra: str = "") -> None:
+    def _write_config(self, url: str, pdf_part: str | None = None) -> None:
         (self.root / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\n\n'
-            f'[endpoint]\nurl = "{url}"\n' + extra
+            config_toml(url, {"summarize": "cheap"}, pdf_part=pdf_part)
         )
 
     def _store(self, data: bytes, content_type: str) -> str:
@@ -183,7 +159,7 @@ class VisualSourceTest(unittest.TestCase):
             return {"choices": [{"message": {"content": GOOD_REPLY}}]}
 
         with FakeEndpoint(respond) as fake:
-            self._write_config(fake.url, 'pdf_part = "file"\n')
+            self._write_config(fake.url, pdf_part="file")
             code = _run_quiet(self.root, [digest])
 
         self.assertEqual(code, 0)
@@ -198,7 +174,7 @@ class VisualSourceTest(unittest.TestCase):
             return {"choices": [{"message": {"content": "unused"}}]}
 
         with FakeEndpoint(respond) as fake:
-            self._write_config(fake.url, 'pdf_part = "none"\n')
+            self._write_config(fake.url, pdf_part="none")
             code = _run_quiet(self.root, [digest])
             self.assertEqual(fake.requests, [])
 
@@ -275,9 +251,10 @@ class VisualSourceTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\nsummarize = "cheap"\n'
-                'summarize_image = "vision-model"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n'
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "summarize_image": "vision-model"},
+                )
             )
             _run_quiet(self.root, [digest])
 
@@ -305,7 +282,7 @@ class VisualSourceTest(unittest.TestCase):
 
         err = io.StringIO()
         with FakeEndpoint(respond) as fake:
-            self._write_config(fake.url, 'pdf_part = "carrier-pigeon"\n')
+            self._write_config(fake.url, pdf_part="carrier-pigeon")
             with redirect_stderr(err):
                 code = _run_quiet(self.root, [digest])
             self.assertEqual(fake.requests, [])

@@ -1,7 +1,6 @@
 """Ingest: the serial per-source pipeline (store, summarize, dedup)."""
 
 import io
-import os
 import shutil
 import sys
 import tempfile
@@ -9,16 +8,16 @@ import threading
 import unittest
 import unittest.mock
 from collections.abc import Callable
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import Kb, parse_frontmatter  # noqa: E402
-from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
 from llmwiki import ingest, sources, summarize  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+from kb_config import config_toml  # noqa: E402
 
 # A real-looking address for llmwiki.fetch._resolved_addresses to hand
 # back, so the fetch guard's real is_global check passes against a
@@ -115,25 +114,6 @@ def _rss(items: list[tuple[str, str]]) -> bytes:
     return f"<rss version='2.0'><channel>{body}</channel></rss>".encode()
 
 
-@contextmanager
-def _env(values: dict):
-    sentinel = object()
-    previous = {key: os.environ.get(key, sentinel) for key in values}
-    for key, value in values.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is sentinel:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
 GOOD_REPLY = (
     "---\n"
     "title: Some Title\n"
@@ -176,14 +156,10 @@ class IngestTest(unittest.TestCase):
         for sub in ("wiki", "sources"):
             (self.root / sub).mkdir(parents=True)
         (self.root / "log.md").write_text("# log\n")
-        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
-        env_cm.__enter__()
-        self.addCleanup(env_cm.__exit__, None, None, None)
 
     def _write_config(self, url: str, identifiers: str = "") -> None:
         (self.root / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\n\n'
-            f'[endpoint]\nurl = "{url}"\n\n' + identifiers
+            config_toml(url, {"summarize": "cheap"}, extra=identifiers)
         )
 
     def _write_source_file(self, name: str, text: str) -> Path:
@@ -255,8 +231,7 @@ class IngestTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\nsummarize = "cheap"\nembed = "embed-model"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n'
+                config_toml(fake.url, {"summarize": "cheap", "embed": "embed-model"})
             )
             code, records = _run(self.root, [str(path)])
 
@@ -282,8 +257,8 @@ class IngestTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\nsummarize = "cheap"\nembed = 123\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n'
+                '[models]\nsummarize = "test:cheap"\nembed = 123\n\n'
+                f'[providers.test]\nurl = "{fake.url}"\n'
             )
             code, records = _run(self.root, [str(path)])
 
@@ -610,14 +585,10 @@ class RunJobTest(unittest.TestCase):
         for sub in ("wiki", "sources"):
             (self.root / sub).mkdir(parents=True)
         (self.root / "log.md").write_text("# log\n")
-        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
-        env_cm.__enter__()
-        self.addCleanup(env_cm.__exit__, None, None, None)
 
     def _write_config(self, endpoint_url: str, jobs_toml: str = "") -> None:
         (self.root / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\n\n'
-            f'[endpoint]\nurl = "{endpoint_url}"\n\n' + jobs_toml
+            config_toml(endpoint_url, {"summarize": "cheap"}, extra=jobs_toml)
         )
 
     def _server(self) -> _RoutedServer:

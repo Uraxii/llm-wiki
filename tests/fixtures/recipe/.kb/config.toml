@@ -1,5 +1,8 @@
 [models]
-summarize = "cheap"
+summarize = "test:cheap"
+
+[providers.test]
+url = "http://unused"
 
 [identifiers.ingredient]
 describe = "an ingredient as the recipe names it"

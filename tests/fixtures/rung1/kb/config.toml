@@ -1,6 +1,6 @@
 # Recipe box, acceptance rung 1.
 #
-# The endpoint url is appended at run time by run_rung1.py from the
+# The provider url is appended at run time by run_rung1.py from the
 # LLM_WIKI_ENDPOINT_URL environment variable, so no host and no
 # credential is ever checked in here.
 
@@ -12,7 +12,7 @@
 # The same prompt on this model returns "3" exactly, and every other field
 # came back clean on the same replies, so this was token corruption on
 # that route, not a prompting failure. Measured in phase 10.
-summarize = "google/gemini-2.5-flash"
+summarize = "hosted:google/gemini-2.5-flash"
 
 # No identifier vocabulary. A recipe box has nothing an identifier
 # would buy: no catalogue number, no advisory id, no stable external

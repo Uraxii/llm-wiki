@@ -7,8 +7,8 @@ call. Reused by every later phase's tests that need a model.
         return {"choices": [{"message": {"content": "hi"}}]}
 
     with FakeEndpoint(respond) as fake:
-        config = {"endpoint": {"url": fake.url}, ...}
-        chat(config, "summarize", "hello")
+        target = ModelTarget("test", fake.url, "some-model", None, None, "file")
+        chat(target, "hello")
         fake.requests[0].path      # "/chat/completions"
         fake.requests[0].method    # "POST"
         fake.requests[0].body      # parsed JSON request body

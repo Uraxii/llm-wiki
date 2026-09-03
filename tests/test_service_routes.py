@@ -49,9 +49,9 @@ def _write_kb(root: Path, *, embed_model: str | None = None, endpoint_url: str |
         (root / sub).mkdir(parents=True, exist_ok=True)
     lines = []
     if embed_model is not None:
-        lines.append(f'[models]\nembed = "{embed_model}"\n')
+        lines.append(f'[models]\nembed = "test:{embed_model}"\n')
     if endpoint_url is not None:
-        lines.append(f'[endpoint]\nurl = "{endpoint_url}"\n')
+        lines.append(f'[providers.test]\nurl = "{endpoint_url}"\n')
     (root / "config.toml").write_text("\n".join(lines))
     return root
 

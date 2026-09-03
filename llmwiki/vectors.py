@@ -30,7 +30,7 @@ from llmwiki.core import (
     read_page_text,
 )
 from llmwiki.lint import select_pages
-from llmwiki.model import ModelError, embed, model_name, step_is_configured
+from llmwiki.model import ModelError, ModelTarget, embed, resolve_target, step_is_configured
 
 TOP_K = 10              # default -n for search
 BODY_HEAD_CHARS = 2000  # body prefix embedded when a page has no summary field
@@ -55,27 +55,32 @@ NEIGHBOUR_FLOOR = 0.35
 # user's agent's job, not this module's.
 
 
+NO_EMBED_MODEL = "missing [models].embed in config.toml"
+
+
 def slug(model_id: str) -> str:
     """`/` and `:` become `--`, so a model id is one filename."""
     return model_id.replace("/", "--").replace(":", "--")
 
 
-def db_path(kb: Kb, model_id: str) -> Path:
-    """Creates no directory."""
-    return kb.vectors / f"{slug(model_id)}.sqlite"
+def db_path(kb: Kb, target: ModelTarget) -> Path:
+    """Creates no directory. Keyed on `target.id`, so two providers
+    serving the same model name get separate databases."""
+    return kb.vectors / f"{slug(target.id)}.sqlite"
 
 
-def _model_id(kb: Kb) -> tuple[str | None, str | None]:
-    """`[models] embed`'s id, or `(None, error text)` when unset. A
-    malformed id raises instead."""
+def _embed_target(kb: Kb) -> ModelTarget | None:
+    """The configured embed target, or `None` when `[models].embed` is
+    unset. Callers print NO_EMBED_MODEL for the `None` case. A
+    malformed id raises instead of reading as unset."""
     if not step_is_configured(kb.config, "embed"):
-        return None, "missing [models].embed in config.toml"
-    return model_name(kb.config, "embed", None), None
+        return None
+    return resolve_target(kb.config, "embed")
 
 
-def _connect(kb: Kb, model_id: str) -> sqlite3.Connection:
+def _connect(kb: Kb, target: ModelTarget) -> sqlite3.Connection:
     kb.vectors.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path(kb, model_id))
+    conn = sqlite3.connect(db_path(kb, target))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     conn.enable_load_extension(True)
@@ -277,8 +282,8 @@ def sweep(kb: Kb, paths: list[Path] | None = None) -> int:
     [models] embed is unset. `to_delete` names rows as of `_plan`'s one
     walk; each is rechecked against disk immediately before its row is
     deleted, so a page that came back in between keeps its row."""
-    model_id = model_name(kb.config, "embed", None)
-    with contextlib.closing(_connect(kb, model_id)) as conn:
+    target = resolve_target(kb.config, "embed")
+    with contextlib.closing(_connect(kb, target)) as conn:
         stale, to_delete, _seen = _plan(kb, conn)
         if paths is not None:
             wanted = {p.resolve() for p in paths}
@@ -295,8 +300,8 @@ def sweep(kb: Kb, paths: list[Path] | None = None) -> int:
         if not stale:
             return 0
         rows = [_page_row(p) for p in stale]
-        vectors = embed(kb.config, [row[4] for row in rows])
-        _ensure_table(conn, len(vectors[0]), db_path(kb, model_id))
+        vectors = embed(target, [row[4] for row in rows])
+        _ensure_table(conn, len(vectors[0]), db_path(kb, target))
         for row, vector in zip(rows, vectors):
             _write_page(conn, row, vector)
         return len(stale)
@@ -306,13 +311,13 @@ def run(root: Path, paths: list[Path] | None) -> int:
     """CLI `embed`."""
     kb = Kb(root)
     if not step_is_configured(kb.config, "embed"):
-        print("llmwiki: embed: missing [models].embed in config.toml", file=sys.stderr)
+        print(f"llmwiki: embed: {NO_EMBED_MODEL}", file=sys.stderr)
         return 2
-    model_id = model_name(kb.config, "embed", None)
+    target = resolve_target(kb.config, "embed")
 
     embedded = 0
     deleted = 0
-    with contextlib.closing(_connect(kb, model_id)) as conn:
+    with contextlib.closing(_connect(kb, target)) as conn:
         stale, to_delete, _seen = _plan(kb, conn)
         if paths is not None:
             wanted = {p.resolve() for p in paths}
@@ -329,11 +334,11 @@ def run(root: Path, paths: list[Path] | None) -> int:
         if stale:
             rows = [_page_row(p) for p in stale]
             try:
-                vectors = embed(kb.config, [row[4] for row in rows])
+                vectors = embed(target, [row[4] for row in rows])
             except ModelError as exc:
                 print(f"llmwiki: embed: {exc}", file=sys.stderr)
                 return 1
-            _ensure_table(conn, len(vectors[0]), db_path(kb, model_id))
+            _ensure_table(conn, len(vectors[0]), db_path(kb, target))
             for row, vector in zip(rows, vectors):
                 _write_page(conn, row, vector)
                 print(f"{row[0]}\tembedded")
@@ -346,15 +351,15 @@ def run(root: Path, paths: list[Path] | None) -> int:
 def status(root: Path) -> int:
     """CLI `status`. Read-only, no model call."""
     kb = Kb(root)
-    model_id, config_error = _model_id(kb)
-    conn = _connect(kb, model_id) if model_id is not None else None
+    target = _embed_target(kb)
+    conn = _connect(kb, target) if target is not None else None
     try:
         stale, _to_delete, seen = _plan(kb, conn)
     finally:
         if conn is not None:
             conn.close()
-    if config_error is not None:
-        print(f"llmwiki: status: {config_error}", file=sys.stderr)
+    if target is None:
+        print(f"llmwiki: status: {NO_EMBED_MODEL}", file=sys.stderr)
     else:
         for path in stale:
             print(f"{path.name}\tno vector")
@@ -405,13 +410,13 @@ def neighbours(kb: Kb, path: Path, kind: str, n: int = TOP_K) -> list[tuple[floa
     vec0 shadow table, a locked database) propagates: the caller
     decides what a real failure means for its run, same contract as
     `_nearest`."""
-    model_id, _config_error = _model_id(kb)
-    if model_id is None:
+    target = _embed_target(kb)
+    if target is None:
         return []
-    db = db_path(kb, model_id)
+    db = db_path(kb, target)
     if not db.is_file():
         return []
-    conn = _connect(kb, model_id)
+    conn = _connect(kb, target)
     try:
         row = conn.execute(
             "SELECT embedding FROM pages WHERE path = ?", (path.name,)
@@ -478,7 +483,7 @@ class StaleVectors(Exception):
 
 
 class NoEmbedModel(Exception):
-    """Raised by `rank` when `[models] embed` is unset: `_model_id`
+    """Raised by `rank` when `[models] embed` is unset: `_embed_target`
     then returns `None` before `_plan` ever runs. `missing` carries
     the same count `StaleVectors` would, for the service's response
     shape; `config_error` is the real `ModelError` text `search`
@@ -503,18 +508,18 @@ def rank(kb: Kb, query: str, n: int = TOP_K, kind: str | None = None) -> Ranking
     body has to report it. Raises ModelError from the endpoint. ONE
     _plan walk and ONE connection, per _plan's own contract at
     vectors.py:180."""
-    model_id, config_error = _model_id(kb)
-    conn = _connect(kb, model_id) if model_id is not None else None
+    target = _embed_target(kb)
+    conn = _connect(kb, target) if target is not None else None
     try:
         stale, _to_delete, seen = _plan(kb, conn)
-        if model_id is None:
-            raise NoEmbedModel(len(stale), config_error)
+        if target is None:
+            raise NoEmbedModel(len(stale), NO_EMBED_MODEL)
         if stale:
             raise StaleVectors(len(stale))
         unsummarized = len(_unsummarized(kb, seen))
 
         try:
-            (vector,) = embed(kb.config, [query])
+            (vector,) = embed(target, [query])
         except ModelError as exc:
             raise RankModelError(unsummarized, exc) from exc
 

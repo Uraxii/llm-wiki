@@ -9,8 +9,8 @@ endpoint through the CLI subprocess; this script makes no HTTP calls of its
 own.
 
 Run:
-    LLM_WIKI_API_KEY=... LLM_WIKI_ENDPOINT_URL=... .venv/bin/python run_rung1.py
-    LLM_WIKI_API_KEY=... LLM_WIKI_ENDPOINT_URL=... .venv/bin/python run_rung1.py --vocab
+    LLM_WIKI_API_KEY_HOSTED=... LLM_WIKI_ENDPOINT_URL=... .venv/bin/python run_rung1.py
+    LLM_WIKI_API_KEY_HOSTED=... LLM_WIKI_ENDPOINT_URL=... .venv/bin/python run_rung1.py --vocab
 
 `--vocab` also runs the vocab-appendix pass (phase 10's second half): it
 resummarizes every source and rebuilds dedup, doubling the paid calls.
@@ -168,7 +168,10 @@ def load_story_pages(wiki_dir: Path) -> list[tuple[Path, list[str]]]:
 
 
 def check_env_or_exit() -> None:
-    missing = [n for n in ("LLM_WIKI_API_KEY", "LLM_WIKI_ENDPOINT_URL") if not os.environ.get(n)]
+    missing = [
+        n for n in ("LLM_WIKI_API_KEY_HOSTED", "LLM_WIKI_ENDPOINT_URL")
+        if not os.environ.get(n)
+    ]
     if missing:
         print(
             f"rung1: refusing to start, missing environment variable(s): {', '.join(missing)}",
@@ -187,7 +190,11 @@ def print_intro(inbox_files: list[Path], vocab: bool) -> None:
 
 def overlay_base(kb_root: Path, endpoint_url: str) -> None:
     print(f"=== STEP {next(STEP)}: overlay config.toml, SCHEMA.md, SUMMARIZE.md")
-    config = read_text(OVERLAY_DIR / "config.toml") + f'\n[endpoint]\nurl = "{endpoint_url}"\n'
+    config = (
+        read_text(OVERLAY_DIR / "config.toml")
+        + f'\n[providers.hosted]\nurl = "{endpoint_url}"\n'
+        + 'key_env = "LLM_WIKI_API_KEY_HOSTED"\n'
+    )
     replace_file(kb_root / "config.toml", config)
     replace_file(kb_root / "SCHEMA.md", read_text(OVERLAY_DIR / "SCHEMA.md"), announce=False)
     replace_file(kb_root / "SUMMARIZE.md", read_text(OVERLAY_DIR / "SUMMARIZE.md"), announce=False)

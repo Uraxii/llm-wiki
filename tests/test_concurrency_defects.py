@@ -10,7 +10,6 @@ failure is the proof the defect is real. No production code changes
 here.
 """
 
-import os
 import shutil
 import sqlite3
 import struct
@@ -25,9 +24,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sqlite_vec  # noqa: E402
 
 from llmwiki.core import Kb, render_frontmatter  # noqa: E402
-from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
+from llmwiki.model import ModelTarget  # noqa: E402
 from llmwiki import dedup, lint, summarize, vectors  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+from kb_config import config_toml  # noqa: E402
+
+EMBED_TARGET = ModelTarget("test", "http://unused", "embed-model", None, None, "file")
 
 
 def _respond(vector_for):
@@ -60,20 +62,6 @@ class _KbTestCase(unittest.TestCase):
         for sub in ("wiki", "sources"):
             (self.root / sub).mkdir(parents=True)
         (self.root / "log.md").write_text("# log\n")
-        previous_key = os.environ.get(API_KEY_VAR)
-        previous_key_file = os.environ.get(API_KEY_FILE_VAR)
-        os.environ[API_KEY_VAR] = "test-key"
-        os.environ.pop(API_KEY_FILE_VAR, None)
-
-        def restore() -> None:
-            if previous_key is None:
-                os.environ.pop(API_KEY_VAR, None)
-            else:
-                os.environ[API_KEY_VAR] = previous_key
-            if previous_key_file is not None:
-                os.environ[API_KEY_FILE_VAR] = previous_key_file
-
-        self.addCleanup(restore)
 
     def _write_page(self, name: str, title: str, kind: str = "note", body: str = "Body text.") -> Path:
         path = self.root / "wiki" / f"{name}.md"
@@ -82,12 +70,11 @@ class _KbTestCase(unittest.TestCase):
 
     def _write_config(self, url: str) -> None:
         (self.root / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\nembed = "embed-model"\n\n'
-            f'[endpoint]\nurl = "{url}"\n'
+            config_toml(url, {"summarize": "cheap", "embed": "embed-model"})
         )
 
     def _open_vec_db(self, kb: Kb) -> sqlite3.Connection:
-        conn = sqlite3.connect(vectors.db_path(kb, "embed-model"))
+        conn = sqlite3.connect(vectors.db_path(kb, EMBED_TARGET))
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
