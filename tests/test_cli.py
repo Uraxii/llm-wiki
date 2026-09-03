@@ -264,7 +264,7 @@ class MainErrorBoundaryTest(unittest.TestCase):
             raise ValueError("kaboom")
 
         stderr = io.StringIO()
-        with unittest.mock.patch.dict(cli.VERBS, {"where": (boom, cli.VERBS["where"][1])}):
+        with unittest.mock.patch.dict(cli.VERBS, {"where": cli.VERBS["where"]._replace(run=boom)}):
             with contextlib.redirect_stderr(stderr):
                 rc = cli.main(["--kb", str(self.tmp), "where"])
 
@@ -275,7 +275,7 @@ class MainErrorBoundaryTest(unittest.TestCase):
         def interrupt(root: Path, args: list[str]) -> int:
             raise KeyboardInterrupt
 
-        with unittest.mock.patch.dict(cli.VERBS, {"where": (interrupt, cli.VERBS["where"][1])}):
+        with unittest.mock.patch.dict(cli.VERBS, {"where": cli.VERBS["where"]._replace(run=interrupt)}):
             with self.assertRaises(KeyboardInterrupt):
                 cli.main(["--kb", str(self.tmp), "where"])
 
