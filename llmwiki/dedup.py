@@ -31,7 +31,7 @@ from llmwiki.core import (
     slugify,
 )
 from llmwiki.lint import lint_pages
-from llmwiki.model import ModelError, chat, model_name, step_is_configured
+from llmwiki.model import ModelError, ModelTarget, chat, resolve_target, step_is_configured
 from llmwiki import vectors
 
 # The judge's own contract (decision agent-kb-0zf.5): a SUMMARIZE.md
@@ -184,13 +184,13 @@ def candidates(
     return [story for _shared, story in scored]
 
 
-def _dedup_model_id(kb: Kb) -> str | None:
-    """The configured `[models] dedup` id, or `None` when it is unset
-    (the deterministic-fallback path). A present but malformed id
-    raises out of `model_name` instead of reading as unset."""
+def _dedup_target(kb: Kb) -> ModelTarget | None:
+    """The configured dedup judge, or `None` when `[models].dedup` is
+    unset (the deterministic-fallback path). A malformed id raises
+    rather than reading as unset."""
     if not step_is_configured(kb.config, "dedup"):
         return None
-    return model_name(kb.config, "dedup", None)
+    return resolve_target(kb.config, "dedup")
 
 
 def _judge_prompt(page: Page, cands: list[Story]) -> str:
@@ -207,15 +207,11 @@ def judge(kb: Kb, page: Page, cands: list[Story]) -> Story | None:
     propagates; the caller decides what that means for the run."""
     if not cands:
         return None
-    if _dedup_model_id(kb) is None:
+    target = _dedup_target(kb)
+    if target is None:
         return cands[0]
 
-    reply = chat(
-        kb.config,
-        "dedup",
-        _judge_prompt(page, cands),
-        temperature=JUDGE_TEMPERATURE,
-    )
+    reply = chat(target, _judge_prompt(page, cands), temperature=JUDGE_TEMPERATURE)
     first_line = reply.split("\n", 1)[0].strip()
     for story in cands:
         if first_line == story.path.stem:
@@ -397,13 +393,14 @@ def _pick_target(
     # and the closest unrelated pair measured in the arena corpus is
     # 0.6922 similarity. With no dedup model, dedup must behave
     # exactly as it does today.
-    if _dedup_model_id(kb) is not None:
+    target = _dedup_target(kb)
+    if target is not None:
         for _score, path in vectors.neighbours(kb, summary.path, "story"):
             story = stories.get(path)
             if story is not None:
                 extra.append(story)
     cands = candidates(summary, stories.values(), extra)
-    return judge(kb, summary, cands), _dedup_model_id(kb) or "none"
+    return judge(kb, summary, cands), target.id if target is not None else "none"
 
 
 def _place_summary(
@@ -558,7 +555,7 @@ def place(kb: Kb, digests: list[str] | None) -> tuple[int, int]:
     Prints one stderr line when [models] dedup is set: the run then
     holds the lock across one model call per target, and a second
     writer gets KbBusy after LOCK_WAIT_TIMEOUT_SEC."""
-    if _dedup_model_id(kb) is not None:
+    if _dedup_target(kb) is not None:
         print(
             "llmwiki: dedup: [models] dedup is set, so this run holds the "
             "kb lock across one model call per target; a second writer "

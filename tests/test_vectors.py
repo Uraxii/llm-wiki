@@ -2,13 +2,12 @@
 queried by `search` and by dedup's vector-neighbour seam."""
 
 import io
-import os
 import shutil
 import sqlite3
 import struct
 import tempfile
 import unittest
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import sys
@@ -18,28 +17,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sqlite_vec  # noqa: E402
 
 from llmwiki.core import render_frontmatter  # noqa: E402
-from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
+from llmwiki.model import ModelTarget  # noqa: E402
 from llmwiki import dedup, vectors  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+from kb_config import config_toml  # noqa: E402
 
-
-@contextmanager
-def _env(values: dict):
-    sentinel = object()
-    previous = {key: os.environ.get(key, sentinel) for key in values}
-    for key, value in values.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is sentinel:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+# A target matching the id `config_toml(..., {"embed": "embed-model"})`
+# produces ("test:embed-model"), for tests that talk to db_path/_connect
+# directly rather than through a config file.
+EMBED_TARGET = ModelTarget("test", "http://unused", "embed-model", None, None, "file")
 
 
 def _respond(vector_for, chat_reply="NONE\n"):
@@ -90,14 +76,19 @@ class VectorsTest(unittest.TestCase):
         for sub in ("wiki", "sources"):
             (self.root / sub).mkdir(parents=True)
         (self.root / "log.md").write_text("# log\n")
-        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
-        env_cm.__enter__()
-        self.addCleanup(env_cm.__exit__, None, None, None)
 
     def _write_config(self, url: str | None = None, extra: str = "") -> None:
-        endpoint = f'[endpoint]\nurl = "{url}"\n\n' if url else ""
+        # `url=None` still writes a resolvable provider table: every
+        # `url=None` caller only exercises a staleness or status path
+        # that raises before any network call, so a placeholder url is
+        # enough. resolve_target, unlike the old model_name, needs the
+        # provider table to exist to answer "which target is this".
         (self.root / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\nembed = "embed-model"\n\n' + endpoint + extra
+            config_toml(
+                url or "http://unused",
+                {"summarize": "cheap", "embed": "embed-model"},
+                extra=extra,
+            )
         )
 
     def _write_page(self, name: str, title: str, kind: str = "note", body: str = "Body text.") -> Path:
@@ -243,7 +234,7 @@ class VectorsTest(unittest.TestCase):
 
             kb = Kb(self.root)
             vectors.sweep(kb)
-            db = vectors.db_path(kb, "embed-model")
+            db = vectors.db_path(kb, EMBED_TARGET)
             self.assertEqual(set(_rows(db)), {"north.md", "south.md"})
 
             north.unlink()
@@ -340,28 +331,27 @@ class VectorsTest(unittest.TestCase):
     # -- agent-kb-yr0: a malformed [models].embed must fail loudly,
     # never read as "embed not configured".
 
-    def test_model_id_raises_on_malformed_embed_instead_of_config_error(self) -> None:
-        """`_model_id` used to catch any `ModelError`, including one
-        from a malformed value, and hand it back as `config_error`
-        text. A malformed value must now raise instead."""
+    def test_embed_target_raises_on_malformed_embed_instead_of_config_error(self) -> None:
+        """`_embed_target` used to catch any `ModelError`, including one
+        from a malformed value, and hand it back as error text. A
+        malformed value must now raise instead."""
         (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\nembed = 123\n')
         from llmwiki.core import Kb
 
         with self.assertRaises(vectors.ModelError) as ctx:
-            vectors._model_id(Kb(self.root))
+            vectors._embed_target(Kb(self.root))
         self.assertIn("[models].embed", str(ctx.exception))
-        self.assertIn("123", str(ctx.exception))
+        self.assertIn("not a string", str(ctx.exception))
 
-    def test_model_id_unset_embed_still_returns_config_error_text(self) -> None:
-        """A genuinely unset [models].embed keeps its documented
-        `(None, error text)` shape, byte-identical text: status and
-        search print it verbatim."""
+    def test_embed_target_unset_embed_returns_none(self) -> None:
+        """A genuinely unset [models].embed returns `None`; callers
+        print the byte-identical NO_EMBED_MODEL text status and search
+        print verbatim."""
         (self.root / "config.toml").write_text('[models]\nsummarize = "cheap"\n')
         from llmwiki.core import Kb
 
-        model_id, config_error = vectors._model_id(Kb(self.root))
-        self.assertIsNone(model_id)
-        self.assertEqual(config_error, "missing [models].embed in config.toml")
+        self.assertIsNone(vectors._embed_target(Kb(self.root)))
+        self.assertEqual(vectors.NO_EMBED_MODEL, "missing [models].embed in config.toml")
 
     def test_embed_run_raises_on_malformed_config_instead_of_exiting_2(self) -> None:
         """`run`'s own [models].embed check used to catch any
@@ -374,7 +364,7 @@ class VectorsTest(unittest.TestCase):
         with self.assertRaises(vectors.ModelError) as ctx:
             vectors.run(self.root, None)
         self.assertIn("[models].embed", str(ctx.exception))
-        self.assertIn("123", str(ctx.exception))
+        self.assertIn("not a string", str(ctx.exception))
 
     # -- P2: planned count ------------------------------------------------
 
@@ -420,8 +410,10 @@ class VectorsTest(unittest.TestCase):
 
         with FakeEndpoint(_respond(vector_for, chat_reply="NONE\n")) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\nsummarize = "cheap"\nembed = "embed-model"\ndedup = "judge"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n'
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "embed": "embed-model", "dedup": "judge"},
+                )
             )
             from llmwiki.core import Kb
 
@@ -430,7 +422,7 @@ class VectorsTest(unittest.TestCase):
             with redirect_stdout(embed_out):
                 embed_code = vectors.run(self.root, [self.root / "wiki" / "nosuchpage.md"])
             self.assertEqual(embed_code, 0)
-            self.assertTrue(vectors.db_path(kb, "embed-model").is_file())
+            self.assertTrue(vectors.db_path(kb, EMBED_TARGET).is_file())
 
             self.assertEqual(vectors.neighbours(kb, summary_path, "story"), [])
 
@@ -472,7 +464,7 @@ class VectorsTest(unittest.TestCase):
                 search_code = vectors.search(self.root, "cafe", n=5)
             self.assertEqual(search_code, 0)
 
-            db = vectors.db_path(Kb(self.root), "embed-model")
+            db = vectors.db_path(Kb(self.root), EMBED_TARGET)
 
         self.assertIn("bad.md", _rows(db))
 
@@ -482,8 +474,8 @@ class VectorsTest(unittest.TestCase):
         from llmwiki.core import Kb
 
         kb = Kb(self.root)
-        db = vectors.db_path(kb, "embed-model")
-        conn = vectors._connect(kb, "embed-model")
+        db = vectors.db_path(kb, EMBED_TARGET)
+        conn = vectors._connect(kb, EMBED_TARGET)
         try:
             vectors._ensure_table(conn, 3, db)  # must not raise
         finally:
@@ -493,8 +485,8 @@ class VectorsTest(unittest.TestCase):
         from llmwiki.core import Kb
 
         kb = Kb(self.root)
-        db = vectors.db_path(kb, "embed-model")
-        conn = vectors._connect(kb, "embed-model")
+        db = vectors.db_path(kb, EMBED_TARGET)
+        conn = vectors._connect(kb, EMBED_TARGET)
         try:
             vectors._ensure_table(conn, 3, db)
             vectors._ensure_table(conn, 3, db)  # existing table, must not raise
@@ -508,8 +500,8 @@ class VectorsTest(unittest.TestCase):
         from llmwiki.core import Kb
 
         kb = Kb(self.root)
-        db = vectors.db_path(kb, "embed-model")
-        conn = vectors._connect(kb, "embed-model")
+        db = vectors.db_path(kb, EMBED_TARGET)
+        conn = vectors._connect(kb, EMBED_TARGET)
         try:
             vectors._ensure_table(conn, 3, db)
             with self.assertRaises(ValueError) as ctx:
@@ -868,16 +860,13 @@ class DedupVectorSeamTest(unittest.TestCase):
         for sub in ("wiki", "sources"):
             (self.root / sub).mkdir(parents=True)
         (self.root / "log.md").write_text("# log\n")
-        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
-        env_cm.__enter__()
-        self.addCleanup(env_cm.__exit__, None, None, None)
 
     def _write_config(self, url: str, with_dedup_model: bool) -> None:
-        dedup_line = 'dedup = "judge"\n' if with_dedup_model else ""
+        models = {"summarize": "cheap", "embed": "embed-model"}
+        if with_dedup_model:
+            models["dedup"] = "judge"
         (self.root / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\nembed = "embed-model"\n'
-            + dedup_line
-            + f'\n[endpoint]\nurl = "{url}"\n\n[identifiers.tag]\n'
+            config_toml(url, models, extra="[identifiers.tag]\n")
         )
 
     def _seed(self) -> tuple[str, Path]:
@@ -955,6 +944,42 @@ class DedupVectorSeamTest(unittest.TestCase):
         self.assertNotEqual(self._fields(self.root / "wiki" / "summary-new.md")["story"], "story-other")
         self.assertNotIn(digest, self._fields(self.root / "wiki" / "story-other.md")["members"])
         self.assertFalse(any(r.path == "/chat/completions" for r in fake.requests))
+
+
+class TwoProvidersSameModelNameTest(unittest.TestCase):
+    """agent-kb-9i7: `db_path` keys on `target.id`, the full
+    `provider:model` string, so two providers serving a model of the
+    same bare name never share one vectors/*.sqlite file."""
+
+    def test_db_path_differs_by_provider(self) -> None:
+        from llmwiki.core import Kb
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        kb_root = root / ".kb"
+        for sub in ("wiki", "sources"):
+            (kb_root / sub).mkdir(parents=True)
+        (kb_root / "log.md").write_text("# log\n")
+        (kb_root / "config.toml").write_text(
+            "[models]\n"
+            'summarize = "hosted:cheap"\n\n'
+            '[providers.hosted]\n'
+            'url = "http://unused-a"\n\n'
+            '[providers.desktop]\n'
+            'url = "http://unused-b"\n'
+        )
+        kb = Kb(kb_root)
+
+        hosted = ModelTarget("hosted", "http://unused-a", "same-name", None, None, "file")
+        desktop = ModelTarget("desktop", "http://unused-b", "same-name", None, None, "file")
+
+        self.assertNotEqual(vectors.db_path(kb, hosted), vectors.db_path(kb, desktop))
+        self.assertEqual(
+            vectors.db_path(kb, hosted).name, "hosted--same-name.sqlite"
+        )
+        self.assertEqual(
+            vectors.db_path(kb, desktop).name, "desktop--same-name.sqlite"
+        )
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ kept re-runnable so a later chain can check the substrate still clears it.
 | path | what it is |
 |---|---|
 | `inbox/` | the thirteen input files a person would hand the CLI: twelve recipes as `.md` and `.txt`, plus one photo of a recipe card with no extractable text |
-| `kb/config.toml` | the machine settings, with an empty `[identifiers]` table. No endpoint host and no credential: the harness appends `[endpoint] url` from the environment at run time |
+| `kb/config.toml` | the machine settings, with an empty `[identifiers]` table. No provider host and no credential: the harness appends `[providers.hosted]` (its `url` from the environment, its `key_env` naming `LLM_WIKI_API_KEY_HOSTED`) at run time |
 | `kb/SCHEMA.md` | the contract the user's agent reads. The CLI never parses it |
 | `kb/SUMMARIZE.md` | the per-kb summarizer prompt, appended to the CLI's built-in skeleton |
 | `kb/config.vocab-appendix.toml`, `kb/SUMMARIZE.vocab-appendix.md` | appended to the two files above only in the `--vocab` pass |
@@ -23,7 +23,7 @@ kept re-runnable so a later chain can check the substrate still clears it.
 
 ```
 export PROTON_PASS_SESSION_DIR="/tmp/pass-agent-$USER"
-LLM_WIKI_API_KEY="$(...)" \
+LLM_WIKI_API_KEY_HOSTED="$(...)" \
 LLM_WIKI_ENDPOINT_URL=https://openrouter.ai/api/v1 \
   python3 tests/fixtures/rung1/run_rung1.py [--vocab]
 ```

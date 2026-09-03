@@ -373,22 +373,48 @@ at rebuild. No opt-out: a page with no identifiers never matches.
 
 ## Models and configuration
 
-Every paid pipeline step (summarize, embed, dedup) has its own model, set in
-`.kb/config.toml` beside `SCHEMA.md`:
+Every paid pipeline step (summarize, summarize_image, embed, dedup) has its own
+model, set in `.kb/config.toml` beside `SCHEMA.md`. Each id is
+`"<provider>:<model>"`: the prefix names a table under `[providers]`, and the
+rest is a model that provider serves. The prefix is always required, so an id
+says which endpoint answers it without the reader counting how many providers
+are declared.
 
 ```toml
 [models]
-summarize = "deepseek/deepseek-v3.2"
-embed = "..."
-dedup = "..."
+summarize = "hosted:your-summarize-model"
+embed = "desktop:your-embed-model"
+dedup = "hosted:your-judge-model"
+
+[providers.hosted]
+url = "https://api.example.com/v1"
+key_env = "LLM_WIKI_API_KEY_HOSTED"
+pdf_part = "file"
+
+[providers.desktop]
+url = "http://127.0.0.1:1234/v1"
 ```
 
-Model ids are whatever the configured API endpoint accepts. A CLI flag overrides
-a step's model for one run; there are no environment variables, since they are
-invisible in a cron log. The file is read with the standard library `tomllib`,
-no dependency. The embed model selects the vector file (see Vectors). No spend
-ceiling exists: paid runs print their planned counts and the operations journal
-records what ran.
+A provider table takes four keys and rejects any other: `url`, `key_env`,
+`key_file_env`, and `pdf_part`. `key_env` and `key_file_env` name environment
+variables, never hold a value, and are both optional: a provider naming neither
+gets no `Authorization` header, which is what a server on the operator's own
+machine wants. `pdf_part` says how that one endpoint takes a PDF, so two
+endpoints with different limits no longer share one global answer. This
+replaces the single `[endpoint]` table, and a config still holding `[endpoint]`
+is refused with a message naming what to write instead.
+
+Model ids are whatever the named provider accepts. There is no per-run model
+override flag. The file is read with the standard library `tomllib`. The embed
+target selects the vector file, keyed on the full `provider:model` string so
+two providers serving the same model name get separate databases (see Vectors).
+No spend ceiling exists: paid runs print their planned counts and the
+operations journal records what ran.
+
+Asking whether a step is turned on is a separate question from asking whether
+its id is valid. A missing `[models]` key means the step is off and its caller
+takes a documented fallback; a key that is present but malformed raises, so a
+typo can never read as "not configured" and quietly do less work.
 
 ## Media
 

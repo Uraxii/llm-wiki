@@ -19,9 +19,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki import cli, remotes  # noqa: E402
-from llmwiki.model import API_KEY_VAR  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
 from fake_wiki import FakeWiki, Reply  # noqa: E402
+from kb_config import config_toml  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,10 +60,9 @@ class VerbTableTest(unittest.TestCase):
         self.fake = FakeEndpoint(respond)
         self.addCleanup(self.fake.close)
         (self.kb / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\n\n'
-            f'[endpoint]\nurl = "{self.fake.url}"\n'
+            config_toml(self.fake.url, {"summarize": "cheap"})
         )
-        self.env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), API_KEY_VAR: "fake-key"}
+        self.env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(self.kb), *args]
@@ -148,24 +147,27 @@ class VerbTableTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("[jobs.no-such-job]", result.stderr)
 
-    def test_init_generates_config_with_an_active_embed_model(self) -> None:
+    def test_init_generates_config_with_a_prefixed_embed_id(self) -> None:
         """Decision .1 (P6) required the embed model uncommented from
         day one so vectors exist without a manual edit; superseded by
         CLAUDE.md's ban on vendor names in example configs, so the
-        line is now a vendor-free placeholder, still uncommented so
-        `embed` never fails with a missing-config error on a fresh
-        kb."""
+        line is a vendor-free placeholder, still uncommented so `embed`
+        never fails with a MISSING [models].embed error on a fresh kb.
+        agent-kb-9i7: the id itself is now "<provider>:<model>", and
+        both `[providers]` tables ship commented out, so `embed`
+        instead fails naming the table to uncomment."""
         fresh = self.tmp / "fresh-embed" / ".kb"
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(fresh), "init"]
         subprocess.run(cmd, cwd=str(self.tmp), capture_output=True, text=True, env=self.env)
 
         config = (fresh / "config.toml").read_text()
-        self.assertRegex(config, r'(?m)^embed = "\S+/\S+"$')
+        self.assertRegex(config, r'(?m)^embed = "desktop:\S+"$')
 
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(fresh), "embed"]
         result = subprocess.run(cmd, cwd=str(self.tmp), capture_output=True, text=True, env=self.env)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("missing [models].embed", result.stderr)
+        self.assertIn("[providers.desktop]", result.stderr)
 
 
 class EmbedAwareCliTest(unittest.TestCase):
@@ -193,10 +195,9 @@ class EmbedAwareCliTest(unittest.TestCase):
         self.fake = FakeEndpoint(respond)
         self.addCleanup(self.fake.close)
         (self.kb / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\nembed = "embed-model"\n\n'
-            f'[endpoint]\nurl = "{self.fake.url}"\n'
+            config_toml(self.fake.url, {"summarize": "cheap", "embed": "embed-model"})
         )
-        self.env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), API_KEY_VAR: "fake-key"}
+        self.env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(self.kb), *args]
@@ -340,11 +341,13 @@ class RemoteCliFixture:
         self.endpoint = FakeEndpoint(respond)
         self.addCleanup(self.endpoint.close)
         (self.kb / "config.toml").write_text(
-            '[models]\nembed = "cheap-embed"\n\n'
-            f'[endpoint]\nurl = "{self.endpoint.url}"\n'
+            '[models]\nembed = "test:cheap-embed"\n\n'
+            '[providers.test]\n'
+            f'url = "{self.endpoint.url}"\n'
+            'key_env = "MODEL_KEY_ENV"\n'
         )
         self.env = unittest.mock.patch.dict(
-            os.environ, {API_KEY_VAR: "model-key-value"}
+            os.environ, {"MODEL_KEY_ENV": "model-key-value"}
         )
         self.env.start()
         self.addCleanup(self.env.stop)

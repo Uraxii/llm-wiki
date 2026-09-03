@@ -14,11 +14,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki import remotes  # noqa: E402
-from llmwiki.model import API_KEY_VAR  # noqa: E402
 from fake_wiki import FakeWiki, Reply  # noqa: E402
 
 TOKEN_VAR = "HOMELAB_KB_TOKEN"
 TOKEN = "token-value-nothing-may-print"
+MODEL_KEY_VAR = "LLM_WIKI_API_KEY_HOSTED"  # unrelated to remotes.py; a distractor value
 
 
 def _hits_body(*titles: str) -> bytes:
@@ -315,7 +315,7 @@ class SearchOneTest(unittest.TestCase):
 
     def test_the_model_key_never_reaches_a_wiki(self) -> None:
         wiki = self._answering(Reply(body=_hits_body("North")))
-        env = {API_KEY_VAR: "model-key-value", TOKEN_VAR: TOKEN}
+        env = {MODEL_KEY_VAR: "model-key-value", TOKEN_VAR: TOKEN}
         with unittest.mock.patch.dict(os.environ, env):
             remotes.search_one(self._remote(wiki, TOKEN_VAR), "cold", 10, None)
         sent = str(wiki.requests[0].headers)

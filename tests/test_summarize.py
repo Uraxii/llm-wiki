@@ -8,15 +8,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import Kb, parse_frontmatter  # noqa: E402
-from llmwiki.model import API_KEY_FILE_VAR, API_KEY_VAR  # noqa: E402
 from llmwiki import summarize  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
+from kb_config import config_toml  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -31,25 +31,6 @@ def _run_quiet(root, digests):
         return summarize.run(root, digests)
 
 
-@contextmanager
-def _env(values: dict):
-    sentinel = object()
-    previous = {key: os.environ.get(key, sentinel) for key in values}
-    for key, value in values.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is sentinel:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
 class SummarizeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -58,14 +39,10 @@ class SummarizeTest(unittest.TestCase):
         for sub in ("wiki", "sources"):
             (self.root / sub).mkdir(parents=True)
         (self.root / "log.md").write_text("# log\n")
-        env_cm = _env({API_KEY_VAR: "test-key", API_KEY_FILE_VAR: None})
-        env_cm.__enter__()
-        self.addCleanup(env_cm.__exit__, None, None, None)
 
     def _write_config(self, url: str, identifiers: str = "") -> None:
         (self.root / "config.toml").write_text(
-            '[models]\nsummarize = "cheap"\n\n'
-            f'[endpoint]\nurl = "{url}"\n\n' + identifiers
+            config_toml(url, {"summarize": "cheap"}, extra=identifiers)
         )
 
     def _store_source(self, text: str = "Some widget source text.") -> str:
@@ -136,7 +113,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(fields["source"], digest)
         self.assertEqual(fields["source_url"], "https://example.com/widget")
         self.assertEqual(fields["fetched"], "2024-01-01T00:00:00Z")
-        self.assertEqual(fields["model"], "cheap")
+        self.assertEqual(fields["model"], "test:cheap")
         self.assertIn("prompt_fingerprint", fields)
         self.assertEqual(fields["identifiers"], ["isbn:1234567890123"])
         self.assertEqual(body.strip(), "A short abstract of the widget.")
@@ -648,8 +625,8 @@ class SummarizeTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\nsummarize = "cheap"\nsummarize_image = 123\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n'
+                '[models]\nsummarize = "test:cheap"\nsummarize_image = 123\n\n'
+                f'[providers.test]\nurl = "{fake.url}"\n'
             )
             err = io.StringIO()
             with redirect_stderr(err):
@@ -659,7 +636,7 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(fake.requests, [])
         stderr = err.getvalue()
         self.assertIn("[models].summarize_image", stderr)
-        self.assertIn("123", stderr)
+        self.assertIn("not a string", stderr)
         self.assertEqual(list((self.root / "wiki").glob("*.md")), [])
 
     def test_unset_summarize_image_config_still_falls_back_to_summarize(self) -> None:
@@ -1154,14 +1131,13 @@ class SummarizeCliTest(unittest.TestCase):
 
         with FakeEndpoint(respond) as fake:
             (self.root / "config.toml").write_text(
-                '[models]\nsummarize = "cheap"\n\n'
-                f'[endpoint]\nurl = "{fake.url}"\n'
+                config_toml(fake.url, {"summarize": "cheap"})
             )
             cmd = [
                 sys.executable, "-m", "llmwiki",
                 "--kb", str(self.root), "summarize", digest,
             ]
-            env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), API_KEY_VAR: "cli-key"}
+            env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
             run = subprocess.run(
                 cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, env=env
             )

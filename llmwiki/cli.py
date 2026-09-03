@@ -33,16 +33,37 @@ GLOBAL_STORE = Path.home() / ".local" / "share" / "llm-wiki"
 
 CONFIG_TOML = """\
 # One model per paid pipeline step, read from this file at run time.
-# Replace both with model ids your own endpoint serves.
+# Each id is "<provider>:<model>": the prefix names a table under
+# [providers] below, and the rest is a model that provider serves. The
+# prefix is always required. Replace these with ids your own endpoints
+# serve.
 [models]
-summarize = "your-provider/your-summarize-model"
-embed = "your-provider/your-embed-model"
+summarize = "hosted:your-summarize-model"
+embed = "desktop:your-embed-model"
+dedup = "hosted:your-judge-model"
 
-# The API endpoint that serves the models above. Uncomment and set
-# your own url; until then, summarize and embed fail with "missing
-# [endpoint].url in config.toml".
-# [endpoint]
+# Optional. A vision model for images and PDFs. Unset, visual sources
+# use [models].summarize.
+# summarize_image = "hosted:your-vision-model"
+
+# One table per endpoint the ids above name. Uncomment and set your own
+# urls; until then every paid step fails with "[models].summarize names
+# provider "hosted", but [providers.hosted] is not in config.toml".
+#
+# key_env names the environment variable holding that provider's API
+# key. key_file_env names one holding a path to read the key from. Set
+# neither and no Authorization header is sent, which is what a server on
+# your own machine usually wants. Never put a key value in this file.
+#
+# pdf_part is how this endpoint takes a PDF: "file", "image_url", or
+# "none" to never send one. It defaults to "file".
+# [providers.hosted]
 # url = "https://api.example.com/v1"
+# key_env = "LLM_WIKI_API_KEY_HOSTED"
+# pdf_part = "file"
+
+# [providers.desktop]
+# url = "http://127.0.0.1:1234/v1"
 
 # Identifier vocabulary. Each key can appear in a page's "identifiers"
 # field as "key:value". The CLI appends this table to the summarizer
@@ -112,7 +133,7 @@ def cmd_init(root: Path, args: list[str]) -> int:
         atomic_write_text(root / name, content)
     print(
         f"llmwiki: init: wrote {root}; edit config.toml and set "
-        "[endpoint].url and your own [models] before running ingest"
+        "your own [providers] and [models] before running ingest"
     )
     return 0
 
