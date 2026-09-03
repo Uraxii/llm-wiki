@@ -195,8 +195,9 @@ and only remotes makes zero paid calls and still searches.
 Similarity scores are comparable only within one embedding model's
 distribution. Phase 3 pins the reasoning and the evidence:
 `NEIGHBOUR_FLOOR = 0.35` (`vectors.py:47`) is calibrated to one model over 1653
-page pairs, and `vectors._model_id` reads each kb's model from that kb's own
-`config.toml` (`vectors.py:68-73`), so two remotes can already be ranking with
+page pairs, and `vectors._embed_target` reads each kb's embed target from
+that kb's own `config.toml` (`vectors.py:72-78`), so two remotes can already
+be ranking with
 different models. A 0.61 from one wiki and a 0.58 from another are two readings
 from two instruments.
 
