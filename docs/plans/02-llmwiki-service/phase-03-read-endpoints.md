@@ -119,7 +119,7 @@ cannot.
 
 ## Ranking moves into `llmwiki`, and this is the only change there
 
-`vectors.search` (`vectors.py:367`) is a CLI verb. It prints tab separated
+`vectors.search` (`vectors.py:371-401`) is a CLI verb. It prints tab separated
 lines and returns an exit code: 0 when the search ran, including when it
 matched nothing, 1 for stale vectors, and 2 for a model failure. A service
 cannot call it, and reimplementing it inside the service breaks the constraint
@@ -161,9 +161,9 @@ make:
 
 - **`rank` returns `Ranking`, not a bare list.** `search`'s "sources without a
   summary" warning needs the `seen` set `_plan` returns, bound inside
-  `vectors.search` (`vectors.py:370`).
+  `vectors.search` (`vectors.py:371-401`).
   `_plan`'s docstring pins one walk of `wiki/*.md` for the whole module and
-  says so in as many words (`vectors.py:194-201`). A bare `list[Hit]` would
+  says so in as many words (`vectors.py:199-223`). A bare `list[Hit]` would
   force `search` to walk a second time to rebuild that count. `unsummarized`
   rides back on the return value instead.
 - **`rank` raises where `search` returns an exit code.** Exit codes are a CLI
@@ -204,9 +204,10 @@ distribution. `NEIGHBOUR_FLOOR = 0.35` (`vectors.py:47`) is the standing proof.
 It is calibrated to one model, measured over all 1653 page pairs of the arena
 corpus, where cross-domain pairs top out at 0.3123 and within-domain pairs run
 a p50 of 0.3025. Change the model and every number in that comment moves.
-`vectors._model_id` reads the embedding model from each kb's own `config.toml`
-(`vectors.py:68-73`), so two kbs on one service can already name different
-models, and their scores already mean different things.
+`vectors._embed_target` reads the embed target from each kb's own
+`config.toml` (`vectors.py:72-78`), returning a `ModelTarget` whose `.id`
+names provider and model, so two kbs on one service can already name
+different models, and their scores already mean different things.
 
 **The rule this pins for phase 4.** The CLI client fans out over the single-kb
 routes and keeps the answers apart: one ranked list per wiki, labelled with the
@@ -352,7 +353,7 @@ subject it has pages for. That is the same reasoning that rejected a degrade
 path when `sqlite-vec` is missing, recorded in the project's dependency rule.
 
 A kb with no `[models] embed` is a different fault and gets a different answer.
-`vectors._model_id` returns `None` there (`vectors.py:68-73`), and `_plan` then
+`vectors._embed_target` returns `None` there (`vectors.py:72-78`), and `_plan` then
 treats every page as stale (`vectors.py:200`), so a naive route reports the
 whole wiki as missing vectors. That names the wrong problem, and an operator
 chasing it re-runs `embed` forever. `rank` raises `NoEmbedModel`, and the route
@@ -379,7 +380,7 @@ here so a later reader does not add a lock that would let any reader stall
 every writer.
 
 One write does survive on the read path and is not removed here: `_connect`
-opens with `kb.vectors.mkdir(parents=True, exist_ok=True)` (`vectors.py:76`),
+opens with `kb.vectors.mkdir(parents=True, exist_ok=True)` (`vectors.py:81-89`),
 so a `search` against a kb that has never been embedded creates an empty
 `vectors/`. It takes no lock, races nothing, and destroys nothing, and
 `vectors/` is the CLI's own directory rather than the agent's. Named so the

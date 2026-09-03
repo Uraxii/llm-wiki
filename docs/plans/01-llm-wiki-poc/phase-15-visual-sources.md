@@ -14,7 +14,7 @@ logging "cannot read source". Nothing retries it, because nothing knows it is
 retryable.
 
 The observable symptom is a source that never leaves the backlog.
-`vectors._unsummarized` (`vectors.py:221-225`) lists every stored digest with
+`vectors._unsummarized` (`vectors.py:226-230`) lists every stored digest with
 no summary page, so `llmwiki status` reports the image forever and `search`
 prints its "N sources without a summary" warning forever. PDFs are already in
 this state today: `sources.EXTENSIONS` maps `application/pdf` to `.pdf`
@@ -62,7 +62,8 @@ That containment is the design. If a change to this phase starts touching
 recorded measurement, not a citation.**
 
 `model._post` targets an OpenAI-compatible endpoint whose url comes from
-`[endpoint] url`, which `model._endpoint_url` reads (`model.py:88-92`).
+`[providers.<name>].url`, which `model.resolve_target` reads into
+`ModelTarget.url` (`model.py:149-178`).
 "OpenAI-compatible" is a claim about `/chat/completions` and `/embeddings`
 with text. Attachment support varies by
 server, and it varies differently for images and for PDFs.
@@ -267,7 +268,7 @@ specific calls made while implementing.
   because both derived from the same prefix, so nothing at runtime could
   move one without moving the other.
 - `[models] summarize_image` falls back to `[models] summarize` through
-  `model_name`, no parallel lookup.
+  `_image_target`, no parallel lookup.
 - `.nikki-agents/probe-attachments.py` exists and has now been run
   (2026-09-01, `https://openrouter.ai/api/v1`). It confirms the D2 default:
   `google/gemini-2.5-flash` accepted all three shapes, `openai/gpt-4o-mini`
