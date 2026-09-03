@@ -375,38 +375,86 @@ def _write_local_page(kb: Kb, name: str) -> int:
 
 
 Verb = Callable[[Path, list[str]], int]
-VERBS: dict[str, tuple[Verb, str]] = {
-    "init": (cmd_init, "init            create a kb at the resolved root"),
-    "where": (cmd_where, "where           print the resolved kb root"),
-    "ingest": (
+
+
+class VerbSpec(NamedTuple):
+    """A verb's runner, its usage line, and every `--option` it takes.
+    `options` has no default: a new verb must state its own, because
+    `main` refuses any other `--` token before the verb runs."""
+
+    run: Verb
+    usage: str
+    options: frozenset[str]
+
+
+VERBS: dict[str, VerbSpec] = {
+    "init": VerbSpec(
+        cmd_init, "init            create a kb at the resolved root",
+        frozenset(),
+    ),
+    "where": VerbSpec(
+        cmd_where, "where           print the resolved kb root", frozenset(),
+    ),
+    "ingest": VerbSpec(
         cmd_ingest,
         "ingest <url|path>... | - | --job <name>   store sources and run the "
         "pipeline, or run one declared job",
+        frozenset({"--job"}),
     ),
-    "summarize": (cmd_summarize, "summarize [<hash>...]  write a summary page per source"),
-    "dedup": (
+    "summarize": VerbSpec(
+        cmd_summarize, "summarize [<hash>...]  write a summary page per source",
+        frozenset(),
+    ),
+    "dedup": VerbSpec(
         cmd_dedup,
         "dedup [--rebuild] [<hash>...]  join or start a story per summary",
+        frozenset({"--rebuild"}),
     ),
-    "lint": (cmd_lint, "lint [<page>...] check wiki pages, one line per finding"),
-    "embed": (
+    "lint": VerbSpec(
+        cmd_lint, "lint [<page>...] check wiki pages, one line per finding",
+        frozenset(),
+    ),
+    "embed": VerbSpec(
         cmd_embed,
         "embed [<page>...]  write a vector per wiki page, skipping current ones",
+        frozenset(),
     ),
-    "status": (cmd_status, "status          pages without a vector, sources without a summary"),
-    "search": (
+    "status": VerbSpec(
+        cmd_status,
+        "status          pages without a vector, sources without a summary",
+        frozenset(),
+    ),
+    "search": VerbSpec(
         cmd_search,
         "search <query> [-n N] [--kind K] [--remote NAME]... [--all]  "
         "nearest pages, one line each",
+        frozenset({"--kind", "--remote", "--all"}),
     ),
-    "page": (cmd_page, "page [--remote NAME] <page>  print one page's bytes"),
+    "page": VerbSpec(
+        cmd_page, "page [--remote NAME] <page>  print one page's bytes",
+        frozenset({"--remote"}),
+    ),
 }
+
+GLOBAL_OPTIONS = frozenset({"--kb"})
 
 
 def _usage() -> str:
     lines = ["usage: llmwiki [--kb PATH] <verb> [args]", ""]
-    lines.extend(usage for _fn, usage in VERBS.values())
+    lines.extend(spec.usage for spec in VERBS.values())
     return "\n".join(lines)
+
+
+def stray_option(verb: str, args: list[str]) -> str | None:
+    """The first `--` token in `args` that `verb` does not declare, or
+    `None`. Anything a verb does not declare would be read as a path, a
+    hash, or a query, so a misplaced `--kb` would silently retarget the
+    run at another kb. Single-dash arguments are untouched: `ingest -`
+    reads stdin and `search -n` takes a count."""
+    options = VERBS[verb].options
+    return next(
+        (a for a in args if a.startswith("--") and a not in options), None
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -425,7 +473,16 @@ def main(argv: list[str] | None = None) -> int:
         print(_usage(), file=sys.stderr)
         return 2
 
-    verb, fn = args[0], VERBS[args[0]][0]
+    verb, fn = args[0], VERBS[args[0]].run
+    stray = stray_option(verb, args[1:])
+    if stray is not None:
+        misplaced = (
+            f"{stray} must come before the verb"
+            if stray in GLOBAL_OPTIONS
+            else f"unknown option {stray}"
+        )
+        print(f"llmwiki: {verb}: {misplaced}\n{_usage()}", file=sys.stderr)
+        return 2
     try:
         root = resolve_root(kb_path, for_init=verb == "init")
         return fn(root, args[1:])
