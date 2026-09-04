@@ -235,6 +235,94 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(fields["title"], "Fenced Body Widget")
         self.assertIn("widget = 1", body)
 
+    def test_fence_around_a_frontmatter_block_that_kept_its_dashes(self) -> None:
+        """The fence closes on the frontmatter's own closing `---`, and
+        the body sits outside it and ends with a fenced block of its
+        own. Everything after that first closing fence is body."""
+        digest = self._store_source()
+        reply = (
+            "```markdown\n"
+            "---\n"
+            "title: Dashed Widget\n"
+            "identifiers: []\n"
+            "---\n"
+            "```\n"
+            "\n"
+            "Abstract text.\n"
+            "\n"
+            "```py\n"
+            "widget = 1\n"
+            "```\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 0)
+        pages = list((self.root / "wiki").glob("*.md"))
+        self.assertEqual(len(pages), 1)
+        fields, body = parse_frontmatter(pages[0].read_text())
+        self.assertEqual(fields["title"], "Dashed Widget")
+        self.assertTrue(body.strip().startswith("Abstract text."))
+        self.assertIn("widget = 1", body)
+
+    def test_a_fenced_page_with_no_dashes_drops_rather_than_guessing(self) -> None:
+        """The whole reply is fenced and carries no `---` line. Reading
+        the fence markers as the frontmatter's own would swallow the
+        first body line that holds a colon and write a page with an
+        empty body, so this drops instead."""
+        digest = self._store_source()
+        reply = (
+            "```\n"
+            "title: Guessed Widget\n"
+            "identifiers: []\n"
+            "\n"
+            "Overview: this widget does things.\n"
+            "```"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 1)
+        self.assertIn("unparseable reply", err.getvalue())
+        self.assertEqual(list((self.root / "wiki").glob("*.md")), [])
+
+    def test_source_of_exactly_the_text_cap_is_summarized(self) -> None:
+        digest = self._store_source(
+            "w" * summarize.MAX_SOURCE_TEXT_BYTES, "text/plain", ".txt"
+        )
+        reply = (
+            "---\n"
+            "title: Capped Widget\n"
+            "identifiers: []\n"
+            "---\n\n"
+            "Abstract text.\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list((self.root / "wiki").glob("*.md"))), 1)
+
     def test_unparseable_drop_names_what_arrived_instead(self) -> None:
         digest = self._store_source()
 
@@ -252,6 +340,24 @@ class SummarizeTest(unittest.TestCase):
             self.assertIn("unparseable reply", message)
             self.assertIn("```yaml", message)
             self.assertIn("16 chars", message)
+
+    def test_a_long_reply_is_excerpted_not_copied_into_the_log(self) -> None:
+        digest = self._store_source()
+        reply = "x" * 500
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                _run_quiet(self.root, [digest])
+
+        message = err.getvalue()
+        self.assertIn("500 chars", message)
+        self.assertIn("x" * summarize.REPLY_EXCERPT_CHARS, message)
+        self.assertNotIn("x" * (summarize.REPLY_EXCERPT_CHARS + 1), message)
 
     def test_text_types_off_the_network_allowlist_are_summarized(self) -> None:
         """`.xml`, `.json` and `.py` are what the operator ingests from
