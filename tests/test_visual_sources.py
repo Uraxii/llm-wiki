@@ -206,21 +206,27 @@ class VisualSourceTest(unittest.TestCase):
         self.assertIn(str(MAX_ATTACHMENT_BYTES), message)
         self.assertTrue((self.root / "sources" / f"{digest}.png").exists())
 
-    def test_unsupported_content_type_drops_naming_the_type(self) -> None:
-        digest = self._store(b"binary junk", "application/octet-stream")
+    def test_a_content_type_that_is_neither_image_nor_pdf_goes_as_text(
+        self,
+    ) -> None:
+        """The content type decides image or PDF and nothing else. Bytes
+        that are not one of those and decode as UTF-8 are text, whatever
+        the sidecar calls them."""
+        digest = self._store(b"plain words", "application/octet-stream")
+        sent = []
 
-        def respond(_path: str, _body: dict) -> dict:
-            return {"choices": [{"message": {"content": "unused"}}]}
+        def respond(_path: str, body: dict) -> dict:
+            sent.append(body)
+            return {"choices": [{"message": {"content": GOOD_REPLY}}]}
 
         with FakeEndpoint(respond) as fake:
             self._write_config(fake.url)
             code = _run_quiet(self.root, [digest])
-            self.assertEqual(fake.requests, [])
 
-        self.assertEqual(code, 1)
-        log = (self.root / "log.md").read_text()
-        self.assertIn(digest, log)
-        self.assertIn("application/octet-stream", log)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("plain words", sent[0]["messages"][0]["content"])
+        self.assertEqual(len(list((self.root / "wiki").glob("*.md"))), 1)
 
     def test_truncated_text_file_drops_as_decode_failure_distinguishably(
         self,
