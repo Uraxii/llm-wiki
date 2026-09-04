@@ -162,16 +162,21 @@ def _unwrap_fence(reply: str) -> str:
     A model fences the whole reply, or fences the frontmatter alone and
     leaves the body outside it. In the second case the fenced block
     carries no `---` lines of its own, so the fence markers stand where
-    those lines belong and this puts them back. A reply that does not
-    open with a fence, or never closes the one it opens, is returned
-    stripped.
+    those lines belong and this puts them back. The line after the
+    opening fence tells the two apart, which also decides which fence
+    closes the opener: the reply's last line when the fence wraps a
+    whole page, so a fenced block inside the body keeps its own fences,
+    and otherwise the first fence, which is the one that ends the
+    frontmatter. A reply that does not open with a fence, or never
+    closes the one it opens, is returned stripped.
     """
     stripped = reply.strip()
     if not stripped.startswith(FENCE):
         return stripped
     lines = stripped.split("\n")
-    if len(lines) > 1 and lines[-1].rstrip() == FENCE:
-        close = len(lines) - 1  # the whole reply: a fenced body keeps its fences
+    wraps_whole_page = lines[1:2] == ["---"]
+    if wraps_whole_page and lines[-1].rstrip() == FENCE:
+        close = len(lines) - 1
     else:
         close = next(
             (i for i, line in enumerate(lines[1:], 1) if line.rstrip() == FENCE),
@@ -180,7 +185,7 @@ def _unwrap_fence(reply: str) -> str:
     if close is None:
         return stripped
     inside, after = lines[1:close], lines[close + 1 :]
-    if inside[:1] == ["---"]:
+    if wraps_whole_page:
         return "\n".join(inside + after)
     return "\n".join(["---", *inside, "---", *after])
 
