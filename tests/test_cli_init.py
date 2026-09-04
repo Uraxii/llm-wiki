@@ -9,7 +9,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llmwiki.cli import CONFIG_TOML, SCHEMA_SKELETON, main  # noqa: E402
+from llmwiki import cli  # noqa: E402
+from llmwiki.cli import (  # noqa: E402
+    CONFIG_TOML,
+    GLOBAL_STORE,
+    SCHEMA_SKELETON,
+    main,
+)
 from llmwiki.core import atomic_write_text, load_config  # noqa: E402
 
 EXPECTED_ENTRIES = {
@@ -138,6 +144,82 @@ class ConfigIdentifiersExampleTest(unittest.TestCase):
         comment = "\n".join(comment_lines)
         self.assertIn("JOIN key", comment)
         self.assertIn("discriminate", comment)
+
+
+class FreshInitAgreementTest(TmpDirTest):
+    """A clean `lint` beside a failing `status` is the state these two
+    tests exist to prevent. The skill tells an agent to run `lint`
+    before finishing, so a clean `lint` is what it reports success on."""
+
+    def test_unedited_stub_fails_both_lint_and_status(self) -> None:
+        self.run_main(["--kb", str(self.kb), "init"])
+        lint_code, out, _err = self.run_main(["--kb", str(self.kb), "lint"])
+        status_code, _out, err = self.run_main(["--kb", str(self.kb), "status"])
+        self.assertEqual((lint_code, status_code), (1, 1))
+        for stream in (out, err):
+            self.assertIn("[providers.hosted] is not in config.toml", stream)
+
+    def test_uncommenting_one_provider_table_passes_both(self) -> None:
+        self.run_main(["--kb", str(self.kb), "init"])
+        with (self.kb / "config.toml").open("a", encoding="utf-8") as handle:
+            handle.write('\n[providers.hosted]\nurl = "http://unused"\n')
+        lint_code, out, _err = self.run_main(["--kb", str(self.kb), "lint"])
+        status_code, _out, _err = self.run_main(["--kb", str(self.kb), "status"])
+        self.assertEqual((lint_code, out, status_code), (0, "", 0))
+
+    def test_every_models_id_names_one_provider(self) -> None:
+        # The stub used to point embed at a second provider, so
+        # uncommenting the one table the comments and the error message
+        # both name still left the kb broken. One provider means one
+        # edit clears every fault at once, which the test above proves.
+        with tempfile.TemporaryDirectory() as tmp:
+            atomic_write_text(Path(tmp) / "config.toml", CONFIG_TOML)
+            models = load_config(Path(tmp))["models"]
+        providers = {value.partition(":")[0] for value in models.values()}
+        self.assertEqual(len(providers), 1)
+        self.assertIn(f"[providers.{providers.pop()}]", CONFIG_TOML)
+
+
+class GlobalStoreFallbackTest(TmpDirTest):
+    """Resolution falling through to the global store from inside a
+    repository used to be silent, so project knowledge landed in the
+    global store and nothing complained."""
+
+    def where_from(self, cwd: Path) -> tuple[int, str, str]:
+        with contextlib.chdir(cwd):
+            return self.run_main(["where"])
+
+    def test_repository_without_a_kb_gets_a_stderr_note(self) -> None:
+        repo = self.tmp / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "sub").mkdir()
+        code, out, err = self.where_from(repo / "sub")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), str(GLOBAL_STORE))
+        self.assertIn(f"no .kb in {repo}", err)
+
+    def test_repository_with_a_kb_stays_silent(self) -> None:
+        repo = self.tmp / "repo-with-kb"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".kb").mkdir()
+        code, out, err = self.where_from(repo)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.strip(), str(repo / ".kb"))
+
+    def test_plain_directory_stays_silent(self) -> None:
+        plain = self.tmp / "not-a-repo"
+        plain.mkdir()
+        code, out, err = self.where_from(plain)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.strip(), str(GLOBAL_STORE))
+
+
+class VersionTest(TmpDirTest):
+    def test_names_the_package_directory_that_ran(self) -> None:
+        code, out, _err = self.run_main(["--version"])
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("llmwiki "))
+        self.assertIn(str(Path(cli.__file__).resolve().parent), out)
 
 
 if __name__ == "__main__":
