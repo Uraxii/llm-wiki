@@ -135,7 +135,8 @@ Set neither `key_env` nor `key_file_env` and no `Authorization` header is
 sent, which is what a server on your own machine usually wants.
 
 An older kb whose `config.toml` still has an `[endpoint]` table is
-refused. Run `llmwiki lint`, which names the exact replacement.
+refused. `llmwiki lint` names the fault in one line; `llmwiki status`
+prints the exact replacement to write, table by table.
 
 **Check the config before you trust it.** `llmwiki lint` resolves every
 id under `[models]` against `[providers]` and prints one line per fault,
@@ -261,9 +262,9 @@ mode = "read"
 `url` must be `https`, with no userinfo, query, or fragment.
 `token_env` names an environment variable holding that remote's
 credential, read fresh on every call; a remote with no `token_env`
-sends no credential. That credential is separate from
-`LLM_WIKI_API_KEY`, which only ever talks to this kb's own model
-endpoint. `mode` is advisory; `read` is the only value accepted today.
+sends no credential. That credential is separate from every provider's
+`key_env`, which only ever talks to this kb's own model endpoints.
+`mode` is advisory; `read` is the only value accepted today.
 
 ```
 llmwiki search "query" --remote otherwiki

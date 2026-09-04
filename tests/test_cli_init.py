@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import re
 import shutil
 import sys
 import tempfile
@@ -27,6 +28,26 @@ EXPECTED_ENTRIES = {
     "sources",
     "wiki",
 }
+
+
+TABLE_HEADER = re.compile(r"^# \[providers\.\w+\]$")
+TABLE_ENTRY = re.compile(r"^# \w+ = ")
+
+
+def uncomment_provider_table(config: str) -> str:
+    """`config` with the comment marker stripped from every commented
+    `[providers.*]` header and the run of `key = value` lines under it,
+    which is the edit the stub's own comments tell an operator to make.
+    Prose lines starting with a key name, such as `# key_env names the
+    environment variable`, carry no `=` and stay commented."""
+    lines, inside = [], False
+    for line in config.splitlines():
+        if TABLE_HEADER.match(line):
+            inside = True
+        elif not TABLE_ENTRY.match(line):
+            inside = False
+        lines.append(line[2:] if inside else line)
+    return "\n".join(lines)
 
 
 class TmpDirTest(unittest.TestCase):
@@ -159,10 +180,13 @@ class FreshInitAgreementTest(TmpDirTest):
         for stream in (out, err):
             self.assertIn("[providers.hosted] is not in config.toml", stream)
 
-    def test_uncommenting_one_provider_table_passes_both(self) -> None:
+    def test_uncommenting_the_shipped_provider_table_passes_both(self) -> None:
+        # Uncomments the block the stub ships rather than appending a
+        # fresh one, so this also proves every line of that block is
+        # valid TOML the CLI accepts, keys included.
         self.run_main(["--kb", str(self.kb), "init"])
-        with (self.kb / "config.toml").open("a", encoding="utf-8") as handle:
-            handle.write('\n[providers.hosted]\nurl = "http://unused"\n')
+        config = self.kb / "config.toml"
+        config.write_text(uncomment_provider_table(config.read_text()))
         lint_code, out, _err = self.run_main(["--kb", str(self.kb), "lint"])
         status_code, _out, _err = self.run_main(["--kb", str(self.kb), "status"])
         self.assertEqual((lint_code, out, status_code), (0, "", 0))
