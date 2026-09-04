@@ -421,8 +421,13 @@ class LintConfigTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(
             findings[0].detail,
-            "config.toml still has [endpoint]; this version reads [providers].",
+            "config.toml still has [endpoint]; this version reads "
+            "[providers]. Run 'llmwiki status' for the replacement to write.",
         )
+
+    def test_a_one_line_fault_gets_no_pointer_to_status(self) -> None:
+        kb = self.kb_with('[models]\nsummarize = "hosted:a"\n')
+        self.assertNotIn("llmwiki status", lint_config(kb)[0].detail)
 
     def test_resolvable_config_and_absent_models_are_both_clean(self) -> None:
         resolvable = self.kb_with(
