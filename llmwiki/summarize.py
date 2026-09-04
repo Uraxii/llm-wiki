@@ -94,10 +94,12 @@ FENCE = "```"
 REPLY_EXCERPT_CHARS = 60  # of the reply's opening line, for a drop reason
 
 # `ingest.ingest_path` reads a local file of any size, so without a cap
-# here a 200 MB log becomes one prompt. 5 MB is what fetch.MAX_BYTES
-# already allows a source arriving over the network, and five times the
-# 961 KB source measured end to end through a real endpoint.
-MAX_SOURCE_TEXT_BYTES = 5_000_000
+# here a 200 MB log becomes one prompt. 1 MB is roughly 250k tokens,
+# which fits every context this CLI can be pointed at, and it sits above
+# the largest source measured working end to end (964054 chars). A
+# source refused here is one log line and the sweep carries on, where a
+# source the endpoint refuses raises ModelError and ends the sweep.
+MAX_SOURCE_TEXT_BYTES = 1_000_000
 
 _PDF_TYPE = "application/pdf"
 
@@ -160,34 +162,35 @@ def _unwrap_fence(reply: str) -> str:
     frontmatter block, ready for `core.parse_frontmatter`.
 
     A model fences the whole reply, or fences the frontmatter alone and
-    leaves the body outside it. In the second case the fenced block
-    carries no `---` lines of its own, so the fence markers stand where
-    those lines belong and this puts them back. The line after the
-    opening fence tells the two apart, which also decides which fence
-    closes the opener: the reply's last line when the fence wraps a
-    whole page, so a fenced block inside the body keeps its own fences,
-    and otherwise the first fence, which is the one that ends the
-    frontmatter. A reply that does not open with a fence, or never
-    closes the one it opens, is returned stripped.
+    leaves the body outside it. Text after the first closing fence is
+    that second shape, and it decides everything: the fenced block is
+    the frontmatter, and the `---` lines go back around it unless it
+    already brought its own. With nothing after that fence, the reply is
+    one fenced page, and only the fence on its last line closes it, so a
+    fenced block inside the body keeps its own fences.
+
+    A reply that opens with a fence it never closes is returned
+    stripped, and so is a fenced page carrying no `---` line: wrapping
+    that one would read its first prose line holding a colon as a
+    frontmatter field and write a page with no body at all.
     """
     stripped = reply.strip()
     if not stripped.startswith(FENCE):
         return stripped
     lines = stripped.split("\n")
-    wraps_whole_page = lines[1:2] == ["---"]
-    if wraps_whole_page and lines[-1].rstrip() == FENCE:
-        close = len(lines) - 1
-    else:
-        close = next(
-            (i for i, line in enumerate(lines[1:], 1) if line.rstrip() == FENCE),
-            None,
-        )
-    if close is None:
-        return stripped
-    inside, after = lines[1:close], lines[close + 1 :]
-    if wraps_whole_page:
-        return "\n".join(inside + after)
-    return "\n".join(["---", *inside, "---", *after])
+    close = next(
+        (i for i, line in enumerate(lines[1:], 1) if line.rstrip() == FENCE), None
+    )
+    if close is not None and any(line.strip() for line in lines[close + 1 :]):
+        block, body = lines[1:close], lines[close + 1 :]
+        if block[:1] == ["---"]:
+            return "\n".join(block + body)
+        return "\n".join(["---", *block, "---", *body])
+
+    page = "\n".join(lines[1:-1])
+    if lines[-1].rstrip() == FENCE and page.startswith("---\n"):
+        return page
+    return stripped
 
 
 def _unparseable_reason(reply: str) -> str:
@@ -398,8 +401,8 @@ def _process_digest(
 ) -> Literal["inert", "actionable"] | None:
     """Summarize one source. Returns `None` when a page was kept,
     `"inert"` when the drop derives only from the immutable source
-    bytes and their recorded content_type (no rerun under any
-    configuration can change it), or `"actionable"` for every other
+    bytes (no rerun under any configuration can change it), or
+    `"actionable"` for every other
     drop, before or after the model call: a permission bit, a sidecar,
     the provider's pdf_part, a prompt, or a config pattern could each
     make a rerun succeed. `_resolve_content` is gated on
