@@ -45,13 +45,18 @@ class SummarizeTest(unittest.TestCase):
             config_toml(url, {"summarize": "cheap"}, extra=identifiers)
         )
 
-    def _store_source(self, text: str = "Some widget source text.") -> str:
+    def _store_source(
+        self,
+        text: str = "Some widget source text.",
+        content_type: str = "text/markdown",
+        suffix: str = ".md",
+    ) -> str:
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        (self.root / "sources" / f"{digest}.md").write_text(text)
+        (self.root / "sources" / f"{digest}{suffix}").write_text(text)
         (self.root / "sources" / f"{digest}.toml").write_text(
             'url = "https://example.com/widget"\n'
             'fetched = "2024-01-01T00:00:00Z"\n'
-            'content_type = "text/markdown"\n'
+            f'content_type = "{content_type}"\n'
             'job = "manual"\n'
         )
         return digest
@@ -166,6 +171,110 @@ class SummarizeTest(unittest.TestCase):
         fields, body = parse_frontmatter(pages[0].read_text())
         self.assertEqual(fields["title"], "Fenced Widget")
         self.assertEqual(body.strip(), "Fenced abstract.")
+
+    def test_reply_fencing_only_the_frontmatter_is_parsed(self) -> None:
+        """A real reply from the configured provider, captured verbatim.
+        The model fenced the frontmatter and left the body outside the
+        fence, so the block carries no `---` lines of its own and the
+        fence markers stand where they belong."""
+        digest = self._store_source()
+        reply = (
+            "```yaml\n"
+            "kind: summary\n"
+            "title: Archify Reference\n"
+            "identifiers: []\n"
+            "```\n"
+            "\n"
+            "This document details Archify, a tool for generating "
+            "interactive architectural diagrams from JSON specifications.\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 0)
+        pages = list((self.root / "wiki").glob("*.md"))
+        self.assertEqual(len(pages), 1)
+        fields, body = parse_frontmatter(pages[0].read_text())
+        self.assertEqual(fields["title"], "Archify Reference")
+        self.assertTrue(body.startswith("This document details Archify"))
+
+    def test_unparseable_drop_names_what_arrived_instead(self) -> None:
+        digest = self._store_source()
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "```yaml\nkind: x\n"}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 1)
+        for message in (err.getvalue(), (self.root / "log.md").read_text()):
+            self.assertIn("unparseable reply", message)
+            self.assertIn("```yaml", message)
+            self.assertIn("16 chars", message)
+
+    def test_text_types_off_the_network_allowlist_are_summarized(self) -> None:
+        """`.xml`, `.json` and `.py` are what the operator ingests from
+        disk; `mimetypes.guess_type` gives them content types that
+        `fetch.ACCEPTED_TYPES` never listed, because that allowlist
+        guards downloads, not stored bytes."""
+        stored = [
+            self._store_source("<class name='Widget'/>", "text/xml", ".xml"),
+            self._store_source('{"widget": true}', "application/json", ".json"),
+            self._store_source("def widget():\n    pass\n", "text/x-python", ".py"),
+        ]
+        reply = (
+            "---\n"
+            "title: Widget\n"
+            "identifiers: []\n"
+            "---\n\n"
+            "Abstract text.\n"
+        )
+        sent = []
+
+        def respond(_path: str, body: dict) -> dict:
+            sent.append(body)
+            return {"choices": [{"message": {"content": reply}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, sorted(stored))
+
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(len(list((self.root / "wiki").glob("*.md"))), 3)
+
+    def test_source_over_the_text_cap_drops_before_the_model_call(self) -> None:
+        size = summarize.MAX_SOURCE_TEXT_BYTES + 1
+        digest = self._store_source("w" * size, "text/plain", ".txt")
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": "unused"}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            with redirect_stderr(err):
+                code = _run_quiet(self.root, [digest])
+            self.assertEqual(fake.requests, [])
+
+        self.assertEqual(code, 1)
+        log = (self.root / "log.md").read_text()
+        self.assertIn(digest, log)
+        self.assertIn(str(size), log)
+        self.assertIn(str(summarize.MAX_SOURCE_TEXT_BYTES), log)
+        self.assertEqual(list((self.root / "wiki").glob("*.md")), [])
 
     def test_undeclared_identifier_drops_page_leaves_source_and_logs(self) -> None:
         digest = self._store_source()
