@@ -143,7 +143,7 @@ decode failure -> still a drop, and now it means a genuinely broken text file
 ```
 
 `SOURCE_DELIMITER` is `"\n\n=== SOURCE TEXT FOLLOWS ===\n\n"`
-(`summarize.py:80`). A visual source needs its own sibling constant, because
+(`summarize.py:79`). A visual source needs its own sibling constant, because
 "SOURCE TEXT FOLLOWS" is a lie when the source is a chart, and the model reply
 quality depends on the prompt being true.
 
@@ -263,7 +263,11 @@ specific calls made while implementing.
   `MAX_ATTACHMENT_BYTES` and the D1/D2 content-part shapes.
 - `summarize` branches on provenance `content_type` via a `_content_kind`
   helper reusing `fetch.ACCEPTED_TYPES`, with `SOURCE_ATTACHMENT_NOTE` as
-  the visual sibling of `SOURCE_DELIMITER`. The two prompt fingerprints
+  the visual sibling of `SOURCE_DELIMITER`. `_content_kind` was deleted in
+  `37497be`: reusing a network allowlist as a content gate dropped every
+  stored `.xml`, `.json` and `.py` source as `inert`. The content type now
+  selects the attachment branch and nothing else, and text is whatever
+  decodes as UTF-8 under `MAX_SOURCE_TEXT_BYTES`. The two prompt fingerprints
   this phase introduced were later collapsed back into one in `cbdc38c`,
   because both derived from the same prefix, so nothing at runtime could
   move one without moving the other.
