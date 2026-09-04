@@ -254,16 +254,22 @@ def lint_pages(root: Path, pages: list[Path] | None = None) -> list[Finding]:
     return findings
 
 
+def _config_detail(exc: ModelError) -> str:
+    """One line, because lint prints one line per finding. A `ModelError`
+    that carries more than one, which today means only the `[endpoint]`
+    migration message, keeps its first line and points at the verb that
+    prints the rest."""
+    first, _, rest = str(exc).partition("\n")
+    if not rest:
+        return first
+    return f"{first} Run 'llmwiki status' for the replacement to write."
+
+
 def lint_config(root: Path) -> list[Finding]:
     """Resolve every id under `[models]` against `[providers]`, one
     `Finding` per distinct fault. This is what stops a kb linting clean
-    while every model-calling verb refuses to run.
-
-    Only the `lint` verb calls this. `lint_pages` does not, so a
-    generated page's self-lint never drops a good page over a config
-    fault the page cannot fix. A `[endpoint]` table faults every step
-    with one identical message, which the de-duplication collapses back
-    to the single line it is."""
+    while every model-calling verb refuses to run. Only the `lint` verb
+    calls this."""
     kb = Kb(root)
     models = kb.config.get("models")
     if not isinstance(models, dict):
@@ -274,7 +280,7 @@ def lint_config(root: Path) -> list[Finding]:
             resolve_target(kb.config, step)
         except ModelError as exc:
             finding = Finding(
-                root / "config.toml", CONFIG_CHECK, str(exc).splitlines()[0]
+                root / "config.toml", CONFIG_CHECK, _config_detail(exc)
             )
             if finding not in findings:
                 findings.append(finding)
