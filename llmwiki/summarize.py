@@ -23,7 +23,6 @@ from llmwiki.core import (
     render_frontmatter,
     slugify,
 )
-from llmwiki.fetch import ACCEPTED_TYPES
 from llmwiki.lint import lint_pages, prompt_block
 from llmwiki.model import ModelError, ModelTarget, chat, resolve_target, step_is_configured
 from llmwiki.sources import read_provenance
@@ -91,13 +90,24 @@ SOURCE_ATTACHMENT_NOTE = (
 
 SLUG_SUFFIX_LEN = 12  # hex chars of the digest, for a title-slug collision
 
-# Image types sources.EXTENSIONS also knows. Kept here, not imported
-# from sources.py, because sources.py's dict also carries text/markdown
-# and .txt-fallback naming concerns this module has no business with.
-_IMAGE_TYPES = frozenset(
-    {"image/png", "image/jpeg", "image/webp", "image/gif"}
-)
+FENCE = "```"
+REPLY_EXCERPT_CHARS = 60  # of the reply's opening line, for a drop reason
+
+# `ingest.ingest_path` reads a local file of any size, so without a cap
+# here a 200 MB log becomes one prompt. 5 MB is what fetch.MAX_BYTES
+# already allows a source arriving over the network, and five times the
+# 961 KB source measured end to end through a real endpoint.
+MAX_SOURCE_TEXT_BYTES = 5_000_000
+
 _PDF_TYPE = "application/pdf"
+
+# Types sent as an attachment rather than decoded and inlined. The image
+# types sources.EXTENSIONS also knows, kept here and not imported from
+# sources.py, because that dict also carries text/markdown and
+# .txt-fallback naming concerns this module has no business with.
+_VISUAL_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/webp", "image/gif", _PDF_TYPE}
+)
 
 
 def prompt_prefix(kb: Kb) -> str:
@@ -115,18 +125,6 @@ def prompt_fingerprint(prefix: str) -> str:
     """sha256 hexdigest of the prompt prefix alone. Excludes the source
     text and the model name: swapping models is not a prompt change."""
     return hashlib.sha256(prefix.encode("utf-8")).hexdigest()
-
-
-def _content_kind(content_type: str) -> str:
-    """"text" (decode and inline), "visual" (image or PDF, sent as a
-    model attachment), or "unsupported", from a provenance sidecar's
-    `content_type`."""
-    normalized = content_type.split(";")[0].strip().lower()
-    if normalized in ACCEPTED_TYPES:
-        return "text"
-    if normalized in _IMAGE_TYPES or normalized == _PDF_TYPE:
-        return "visual"
-    return "unsupported"
 
 
 def _all_digests(kb: Kb) -> list[str]:
@@ -158,25 +156,54 @@ def _summary_index(kb: Kb) -> dict[str, tuple[Path, str]]:
 
 
 def _unwrap_fence(reply: str) -> str:
-    """Drop exactly one outer ``` fence when the stripped reply both
-    opens and closes with one. Anything else is returned stripped."""
+    """The reply with a leading code fence turned back into a `---`
+    frontmatter block, ready for `core.parse_frontmatter`.
+
+    A model fences the whole reply, or fences the frontmatter alone and
+    leaves the body outside it. In the second case the fenced block
+    carries no `---` lines of its own, so the fence markers stand where
+    those lines belong and this puts them back. A reply that does not
+    open with a fence, or never closes the one it opens, is returned
+    stripped.
+    """
     stripped = reply.strip()
+    if not stripped.startswith(FENCE):
+        return stripped
     lines = stripped.split("\n")
-    if len(lines) >= 2 and lines[0].startswith("```") and lines[-1].rstrip() == "```":
-        return "\n".join(lines[1:-1])
-    return stripped
+    if len(lines) > 1 and lines[-1].rstrip() == FENCE:
+        close = len(lines) - 1  # the whole reply: a fenced body keeps its fences
+    else:
+        close = next(
+            (i for i, line in enumerate(lines[1:], 1) if line.rstrip() == FENCE),
+            None,
+        )
+    if close is None:
+        return stripped
+    inside, after = lines[1:close], lines[close + 1 :]
+    if inside[:1] == ["---"]:
+        return "\n".join(inside + after)
+    return "\n".join(["---", *inside, "---", *after])
+
+
+def _unparseable_reason(reply: str) -> str:
+    """A drop reason naming what arrived in place of a frontmatter
+    block. The reply is not kept anywhere, so its opening line and its
+    length are all a later reader of log.md gets."""
+    opening = reply.strip().split("\n", 1)[0][:REPLY_EXCERPT_CHARS]
+    return (
+        "unparseable reply: want a --- frontmatter block, got "
+        f"{len(reply)} chars beginning {opening!r}"
+    )
 
 
 def _drop_reason(
-    parsed: tuple[dict[str, FrontmatterValue], str] | None, title: str
+    parsed: tuple[dict[str, FrontmatterValue], str], title: str
 ) -> str | None:
     """Why a parsed reply must be dropped before anything reaches disk,
     or `None` to keep it. An absent `identifiers` key, or one holding a
     non-empty scalar or a blank item, drops. A present but empty value
     (`identifiers:` with nothing after it, or `identifiers: []`) is an
     empty list, same as `lint` reads it through `core.as_list`."""
-    if parsed is None:
-        return "unparseable reply"
     if not title:
         return "blank title"
     fields = parsed[0]
@@ -294,14 +321,17 @@ def _resolve_content(
     """The prompt text, optional attachment, model step, and provenance
     for `digest` (a 4-tuple), or a `(category, reason)` pair when
     nothing can be sent. `category` is `"inert"` when the drop derives
-    only from the immutable source bytes and their recorded
-    content_type, so no rerun under any configuration can change it
-    (an undecodable text source, or a content_type this CLI does not
-    handle at all); `"actionable"` for every other reason, since a
-    missing sidecar can be restored, a permission bit can be fixed,
-    and the provider's pdf_part can be edited. Reads no lock; source
-    bytes and provenance are immutable once `sources.store` writes
-    them, so a plain read here needs none."""
+    only from the immutable source bytes, so no rerun under any
+    configuration can change it (bytes that are not UTF-8, or more of
+    them than `MAX_SOURCE_TEXT_BYTES`); `"actionable"` for every other
+    reason, since a missing sidecar can be restored, a permission bit
+    can be fixed, and the provider's pdf_part can be edited.
+
+    The recorded content_type decides one thing: whether the bytes ride
+    as an attachment. Everything else is text when it decodes, so a
+    source type nobody thought to list still reaches the model. Reads no
+    lock; source bytes and provenance are immutable once
+    `sources.store` writes them, so a plain read here needs none."""
     try:
         path = _source_path(kb, digest)
         provenance = read_provenance(kb, digest)
@@ -311,12 +341,16 @@ def _resolve_content(
         return "actionable", f"cannot read provenance: {exc}"
 
     content_type = str(provenance.get("content_type", ""))
-    kind = _content_kind(content_type)
-    if kind == "unsupported":
-        return "inert", f"unsupported content type: {content_type or '(none)'}"
+    normalized = content_type.split(";")[0].strip().lower()
 
-    if kind == "text":
+    if normalized not in _VISUAL_TYPES:
         try:
+            size = path.stat().st_size
+            if size > MAX_SOURCE_TEXT_BYTES:
+                return "inert", (
+                    f"source too large: {size} bytes exceeds the "
+                    f"{MAX_SOURCE_TEXT_BYTES} byte cap"
+                )
             text = path.read_bytes().decode("utf-8")
         except UnicodeDecodeError as exc:
             return "inert", f"cannot decode source: {exc}"
@@ -324,7 +358,6 @@ def _resolve_content(
             return "actionable", f"cannot read source: {exc}"
         return prefix + SOURCE_DELIMITER + text, None, "summarize", provenance
 
-    normalized = content_type.split(";")[0].strip().lower()
     if normalized == _PDF_TYPE and pdf_part == "none":
         return "actionable", "PDF attachments disabled: set pdf_part on the provider"
     try:
@@ -380,7 +413,11 @@ def _process_digest(
 
     reply = chat(target, prompt, attachment=attachment)
     parsed = parse_frontmatter(_unwrap_fence(reply))
-    title = str(parsed[0].get("title", "")).strip() if parsed else ""
+    if parsed is None:
+        _fail(kb, digest, _unparseable_reason(reply))
+        return "actionable"
+
+    title = str(parsed[0].get("title", "")).strip()
     reason = _drop_reason(parsed, title)
     if reason:
         _fail(kb, digest, reason)
