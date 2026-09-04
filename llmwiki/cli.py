@@ -2,19 +2,20 @@
 
 Usage: `llmwiki [--kb PATH] <verb> [args]`. `--kb`, when
 given, must come before the verb and names the kb root directly (the
-`.kb` directory itself, not its parent).
+`.kb` directory itself, not its parent). `--version` prints the build
+that is running and takes no verb.
 """
 
 from __future__ import annotations
 
 import sys
 from collections.abc import Callable
-from importlib import resources
+from importlib import metadata, resources
 from pathlib import Path
 from typing import NamedTuple
 
 from llmwiki.core import Kb, append_log_entry, atomic_write_text
-from llmwiki.lint import lint_pages, select_pages
+from llmwiki.lint import lint_config, lint_pages, select_pages
 from llmwiki.model import ModelError
 from llmwiki.remotes import (
     LOCAL_LABEL,
@@ -39,16 +40,18 @@ CONFIG_TOML = """\
 # serve.
 [models]
 summarize = "hosted:your-summarize-model"
-embed = "desktop:your-embed-model"
+embed = "hosted:your-embed-model"
 dedup = "hosted:your-judge-model"
 
 # Optional. A vision model for images and PDFs. Unset, visual sources
 # use [models].summarize.
 # summarize_image = "hosted:your-vision-model"
 
-# One table per endpoint the ids above name. Uncomment and set your own
-# urls; until then every paid step fails with "[models].summarize names
-# provider "hosted", but [providers.hosted] is not in config.toml".
+# One table per provider named above. Uncomment this one and set your
+# own url; until then "llmwiki lint" and every paid step both fail with
+# "[models].summarize names provider "hosted", but [providers.hosted] is
+# not in config.toml". Add another table, under another name, for each
+# further endpoint you want to name from [models].
 #
 # key_env names the environment variable holding that provider's API
 # key. key_file_env names one holding a path to read the key from. Set
@@ -61,9 +64,6 @@ dedup = "hosted:your-judge-model"
 # url = "https://api.example.com/v1"
 # key_env = "LLM_WIKI_API_KEY_HOSTED"
 # pdf_part = "file"
-
-# [providers.desktop]
-# url = "http://127.0.0.1:1234/v1"
 
 # Identifier vocabulary. Each key can appear in a page's "identifiers"
 # field as "key:value". The CLI appends this table to the summarizer
@@ -110,15 +110,29 @@ def resolve_root(explicit: str | None, for_init: bool) -> Path:
     """Resolve the kb root. `explicit` (from `--kb`) is used as-is when
     given. Otherwise `init` roots at `.kb` under the working directory;
     every other verb walks up from the working directory for an
-    existing `.kb`, falling back to the user's global store."""
+    existing `.kb`, falling back to the user's global store.
+
+    Falling back from inside a repository prints one stderr line naming
+    that repository, because the silent version of this writes project
+    knowledge into the global store and nothing complains."""
     if explicit is not None:
         return Path(explicit)
     if for_init:
         return Path.cwd() / ".kb"
+    repo = None
     for candidate in (Path.cwd(), *Path.cwd().parents):
         found = candidate / ".kb"
         if found.is_dir():
             return found
+        if repo is None and (candidate / ".git").exists():
+            repo = candidate
+    if repo is not None:
+        print(
+            f"llmwiki: no .kb in {repo}; using the global store "
+            f"{GLOBAL_STORE}. Run 'llmwiki init' in {repo} for a "
+            "project kb.",
+            file=sys.stderr,
+        )
     return GLOBAL_STORE
 
 
@@ -146,7 +160,7 @@ def cmd_where(root: Path, args: list[str]) -> int:
 def cmd_lint(root: Path, args: list[str]) -> int:
     kb = Kb(root)
     pages = [Path(a) for a in args] if args else None
-    findings = lint_pages(root, pages)
+    findings = lint_config(root) + lint_pages(root, pages)
     for finding in findings:
         print(f"{finding.path}\t{finding.check}\t{finding.detail}")
     page_count = len(select_pages(root, pages))
@@ -440,9 +454,24 @@ GLOBAL_OPTIONS = frozenset({"--kb"})
 
 
 def _usage() -> str:
-    lines = ["usage: llmwiki [--kb PATH] <verb> [args]", ""]
+    lines = [
+        "usage: llmwiki [--kb PATH] <verb> [args]",
+        "       llmwiki --version",
+        "",
+    ]
     lines.extend(spec.usage for spec in VERBS.values())
     return "\n".join(lines)
+
+
+def _version_line() -> str:
+    """Version and package directory. The directory is the load-bearing
+    half: an installed copy on PATH and a checkout report the same
+    version string, and only the path says which one just ran."""
+    try:
+        version = metadata.version("llmwiki")
+    except metadata.PackageNotFoundError:
+        version = "unknown"
+    return f"llmwiki {version} from {Path(__file__).resolve().parent}"
 
 
 def stray_option(verb: str, args: list[str]) -> str | None:
@@ -461,6 +490,9 @@ def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
     if args and args[0] in ("--help", "-h"):
         print(_usage())
+        return 0
+    if args and args[0] == "--version":
+        print(_version_line())
         return 0
     kb_path: str | None = None
     if args and args[0] == "--kb":

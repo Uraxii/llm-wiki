@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -154,20 +155,24 @@ class VerbTableTest(unittest.TestCase):
         line is a vendor-free placeholder, still uncommented so `embed`
         never fails with a MISSING [models].embed error on a fresh kb.
         agent-kb-9i7: the id itself is now "<provider>:<model>", and
-        both `[providers]` tables ship commented out, so `embed`
-        instead fails naming the table to uncomment."""
+        the `[providers]` table ships commented out, so `embed`
+        instead fails naming the table to uncomment. The provider is
+        read out of the file rather than named here, because which
+        provider the stub picks is the stub's business; that every id
+        picks the same one is `test_cli_init.py`'s business."""
         fresh = self.tmp / "fresh-embed" / ".kb"
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(fresh), "init"]
         subprocess.run(cmd, cwd=str(self.tmp), capture_output=True, text=True, env=self.env)
 
         config = (fresh / "config.toml").read_text()
-        self.assertRegex(config, r'(?m)^embed = "desktop:\S+"$')
+        match = re.search(r'(?m)^embed = "([^:"]+):\S+"$', config)
+        self.assertIsNotNone(match)
 
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(fresh), "embed"]
         result = subprocess.run(cmd, cwd=str(self.tmp), capture_output=True, text=True, env=self.env)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("missing [models].embed", result.stderr)
-        self.assertIn("[providers.desktop]", result.stderr)
+        self.assertIn(f"[providers.{match.group(1)}]", result.stderr)
 
 
 class EmbedAwareCliTest(unittest.TestCase):
