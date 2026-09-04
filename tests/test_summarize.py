@@ -203,6 +203,38 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(fields["title"], "Archify Reference")
         self.assertTrue(body.startswith("This document details Archify"))
 
+    def test_fenced_frontmatter_over_a_body_that_fences_a_block(self) -> None:
+        """The reply's last line is a fence closing a block in the body,
+        not the frontmatter's. Which fence closes the opening one is
+        decided by the line after it, not by the reply's last line."""
+        digest = self._store_source()
+        reply = (
+            "```yaml\n"
+            "title: Fenced Body Widget\n"
+            "identifiers: []\n"
+            "```\n"
+            "\n"
+            "Abstract text.\n"
+            "\n"
+            "```py\n"
+            "widget = 1\n"
+            "```\n"
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        with FakeEndpoint(respond) as fake:
+            self._write_config(fake.url)
+            code = _run_quiet(self.root, [digest])
+
+        self.assertEqual(code, 0)
+        pages = list((self.root / "wiki").glob("*.md"))
+        self.assertEqual(len(pages), 1)
+        fields, body = parse_frontmatter(pages[0].read_text())
+        self.assertEqual(fields["title"], "Fenced Body Widget")
+        self.assertIn("widget = 1", body)
+
     def test_unparseable_drop_names_what_arrived_instead(self) -> None:
         digest = self._store_source()
 
