@@ -49,7 +49,7 @@ dedup = "hosted:your-judge-model"
 
 # One table per provider named above. Uncomment this one and set your
 # own url; until then "llmwiki lint" and every paid step both fail with
-# "[models].summarize names provider "hosted", but [providers.hosted] is
+# "[models].summarize names provider 'hosted', but [providers.hosted] is
 # not in config.toml". Add another table, under another name, for each
 # further endpoint you want to name from [models].
 #
@@ -465,8 +465,9 @@ def _usage() -> str:
 
 def _version_line() -> str:
     """Version and package directory. The directory is the load-bearing
-    half: an installed copy on PATH and a checkout report the same
-    version string, and only the path says which one just ran."""
+    half: the version comes from installed metadata and stays at whatever
+    the last release set, so two installs of the same release are
+    indistinguishable by it, and the path is what says which copy ran."""
     try:
         version = metadata.version("llmwiki")
     except metadata.PackageNotFoundError:
