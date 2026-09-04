@@ -115,8 +115,8 @@ url = "https://api.example.com/v1"
 key_env = "LLM_WIKI_API_KEY_HOSTED"
 ```
 
-Every id under `[models]` is `"<provider>:<model>"`, and the prefix is
-always required. It names a table under `[providers]`. `init` ships one
+Every id under `[models]` is `"<provider>:<model>"`. The prefix names a
+table under `[providers]` and is always required. `init` ships one
 commented `[providers.hosted]` table and points every id at it, so
 uncommenting that table and setting its `url` is the whole edit.
 `hosted` is only the name the stub picked; rename it, or add more
