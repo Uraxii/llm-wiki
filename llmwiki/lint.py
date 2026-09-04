@@ -1,4 +1,5 @@
-"""Wiki lint: seven mechanical checks over every page under `wiki/`.
+"""Wiki lint: seven mechanical checks over every page under `wiki/`,
+plus one check over `config.toml` that only the `lint` verb runs.
 
 No warnings, no severities, no auto-fix. `lint_pages` returns every
 `Finding`; the CLI verb and ingest both call it and decide what to do
@@ -19,8 +20,10 @@ from llmwiki.core import (
     read_page_text,
     slugify,
 )
+from llmwiki.model import ModelError, resolve_target
 
 CLI_KINDS = {"summary", "story"}
+CONFIG_CHECK = "config"
 WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 DUPLICATE_TITLE_NAMES_SHOWN = 5  # a bigger slug group summarizes the rest as a count
 
@@ -248,6 +251,33 @@ def lint_pages(root: Path, pages: list[Path] | None = None) -> list[Finding]:
         parsed = parsed_by_path[path]
         for _name, check in CHECKS:
             findings.extend(check(path, parsed, ctx))
+    return findings
+
+
+def lint_config(root: Path) -> list[Finding]:
+    """Resolve every id under `[models]` against `[providers]`, one
+    `Finding` per distinct fault. This is what stops a kb linting clean
+    while every model-calling verb refuses to run.
+
+    Only the `lint` verb calls this. `lint_pages` does not, so a
+    generated page's self-lint never drops a good page over a config
+    fault the page cannot fix. A `[endpoint]` table faults every step
+    with one identical message, which the de-duplication collapses back
+    to the single line it is."""
+    kb = Kb(root)
+    models = kb.config.get("models")
+    if not isinstance(models, dict):
+        return []
+    findings: list[Finding] = []
+    for step in models:
+        try:
+            resolve_target(kb.config, step)
+        except ModelError as exc:
+            finding = Finding(
+                root / "config.toml", CONFIG_CHECK, str(exc).splitlines()[0]
+            )
+            if finding not in findings:
+                findings.append(finding)
     return findings
 
 
