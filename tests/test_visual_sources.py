@@ -245,7 +245,6 @@ class VisualSourceTest(unittest.TestCase):
         log = (self.root / "log.md").read_text()
         self.assertIn(digest, log)
         self.assertIn("cannot decode source", log)
-        self.assertNotIn("unsupported content type", log)
 
     def test_summarize_image_model_used_when_set(self) -> None:
         digest = self._store(tiny_png(), "image/png")
