@@ -10,7 +10,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmwiki.cli import main  # noqa: E402
-from llmwiki.lint import CHECKS, Finding, lint_pages, prompt_block  # noqa: E402
+from llmwiki.lint import (  # noqa: E402
+    CHECKS,
+    Finding,
+    lint_config,
+    lint_pages,
+    prompt_block,
+)
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -359,6 +365,17 @@ class LintCliTest(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertTrue(all("duplicate-title" in line for line in lines))
 
+    def test_verb_reports_config_faults_and_exits_1(self) -> None:
+        kb = self.copy("recipe")
+        (kb / "config.toml").write_text('[models]\nsummarize = "hosted:a"\n')
+        run = self.run_module(kb, [])
+        config_lines = [
+            line for line in run.stdout.splitlines() if "\tconfig\t" in line
+        ]
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual(len(config_lines), 1)
+        self.assertIn("[providers.hosted]", config_lines[0])
+
     def test_single_page_argument_filters(self) -> None:
         kb = self.copy("recipe")
         run = self.run_module(kb, ["wiki/bad-key.md"], cwd=kb)
@@ -367,6 +384,61 @@ class LintCliTest(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("bad-key.md", lines[0])
         self.assertIn("identifier-key", lines[0])
+
+
+class LintConfigTest(unittest.TestCase):
+    """`lint` used never to read `config.toml`, so a config that stopped
+    every model-calling verb was lint-clean and an agent told to run
+    `lint` before finishing reported success on a dead kb."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+
+    def kb_with(self, config: str) -> Path:
+        kb = init_kb(self.tmp / f"kb{len(list(self.tmp.iterdir()))}")
+        (kb / "config.toml").write_text(config)
+        return kb
+
+    def test_missing_provider_table_faults_every_step_that_names_it(self) -> None:
+        kb = self.kb_with(
+            '[models]\nsummarize = "hosted:a"\nembed = "hosted:b"\n'
+        )
+        details = [f.detail for f in lint_config(kb)]
+        self.assertEqual(len(details), 2)
+        self.assertTrue(all("[providers.hosted]" in d for d in details))
+        self.assertEqual({f.check for f in lint_config(kb)}, {"config"})
+        self.assertEqual(
+            {f.path for f in lint_config(kb)}, {kb / "config.toml"}
+        )
+
+    def test_legacy_endpoint_table_reports_one_line_not_one_per_step(self) -> None:
+        kb = self.kb_with(
+            '[models]\nsummarize = "a"\nembed = "b"\n\n'
+            '[endpoint]\nurl = "https://api.example.com/v1"\n'
+        )
+        findings = lint_config(kb)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(
+            findings[0].detail,
+            "config.toml still has [endpoint]; this version reads [providers].",
+        )
+
+    def test_resolvable_config_and_absent_models_are_both_clean(self) -> None:
+        resolvable = self.kb_with(
+            '[models]\nsummarize = "test:cheap"\n\n'
+            '[providers.test]\nurl = "http://unused"\n'
+        )
+        self.assertEqual(lint_config(resolvable), [])
+        self.assertEqual(lint_config(self.kb_with("")), [])
+
+    def test_lint_pages_never_reports_a_config_fault(self) -> None:
+        # summarize and dedup self-lint a page they just wrote through
+        # lint_pages and drop it on any finding. A config fault there
+        # would destroy good pages over something the page cannot fix.
+        kb = self.kb_with('[models]\nsummarize = "hosted:a"\n')
+        write_page(kb, "a.md", "---\ntitle: Coffee Gear\n---\n\nBody.\n")
+        self.assertEqual(lint_pages(kb), [])
 
 
 if __name__ == "__main__":
