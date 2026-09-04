@@ -48,8 +48,9 @@ Karpathy's three layers and nothing else:
   frontmatter block each
 - `SCHEMA.md` the contract the user's agent reads; the CLI never parses it
 
-Machine settings live in `config.toml` (`[models]`, `[identifiers]`,
-`[jobs]`, `[endpoint]`); the summarizer prompt lives in `SUMMARIZE.md`.
+Machine settings live in `config.toml` (`[models]`, `[providers]`,
+`[identifiers]`, `[jobs]`, `[remotes]`); the summarizer prompt lives in
+`SUMMARIZE.md`. `[endpoint]` is retired and `model.py` refuses it by name.
 
 **Ownership boundary, the rule most likely to be broken.** The CLI writes
 ONLY `sources/`, wiki pages of kind `summary` and `story`, `log.md` lines,
@@ -63,7 +64,7 @@ never overwrite it.
 |---|---|
 | `core.py` | `Kb` paths, `load_config`, frontmatter parse/render, `slugify`, `atomic_write_text`, `append_log_entry`. Every other module imports these and none re-implements them. |
 | `cli.py` | `main(argv)`, the `VERBS` table, root resolution, `init`. One thin `cmd_*` per verb; the work lives in the module behind it. |
-| `lint.py` | Seven mechanical checks over `wiki/`. No warnings, no severities, no auto-fix. Also renders the identifier vocabulary into the summarizer prompt. |
+| `lint.py` | Seven mechanical checks over `wiki/`, plus `lint_config`, which resolves `[models]` against `[providers]`. No warnings, no severities, no auto-fix. Also renders the identifier vocabulary into the summarizer prompt. Only the `lint` verb calls `lint_config`; a page self-lint must never fail over the config. |
 | `sources.py` | Hash-keyed byte store plus provenance. The sidecar, not the byte file, is the exclusive claim that decides new from existing. |
 | `model.py` | The endpoint client. `ModelError` is its entire error contract; every failure path raises it. |
 | `summarize.py` | One summary page per source: build prompt, call the model, parse the reply, self-lint, keep or drop. |
@@ -134,9 +135,12 @@ resend the `Authorization` header to a host `config.toml` never named. Use
 `model.OPENER`. No retries, backoff, connection pooling, or response
 caching.
 
-**Credentials.** From the environment only: `LLM_WIKI_API_KEY`, else
-`LLM_WIKI_API_KEY_FILE` as a path. Never in `config.toml`, never cached in
-module state, never printed, never in an error message.
+**Credentials.** From the environment only. Each `[providers.<name>]` table
+names its own variable: `key_env` holds the key, `key_file_env` holds a path
+to read it from. `config.toml` holds variable NAMES, never a key value; a key
+is never cached in module state, never printed, and never in an error message.
+The fixed `LLM_WIKI_API_KEY` and `LLM_WIKI_API_KEY_FILE` variables were
+replaced by those two keys and no longer read anywhere.
 
 **Prose.** No em-dashes in text an agent writes. No vendor names and no
 security-specific vocabulary in CLI modules or example configs, not even
