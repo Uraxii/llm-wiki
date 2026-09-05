@@ -33,7 +33,7 @@ to solve.
 ├── SCHEMA.md            how an agent works this kb
 ├── log.md               append-only, greppable prefix
 ├── sources/             immutable, flat
-├── vectors/             GENERATED cache, gitignored, one sqlite file per embedding model
+├── vectors/             GENERATED cache, one sqlite file per embedding model
 └── wiki/
     ├── index.md         GENERATED, never hand-edited
     └── <page>.md
@@ -49,6 +49,12 @@ A rows index was solving a scale problem that does not exist yet, and ripgrep
 over a few hundred megabytes is a second or two. The sqlite files under
 `vectors/` are a rebuildable cache derived from `wiki/`, never a store of
 record (see Vectors).
+
+**The whole kb is gitignored** (operator directive, 2026-09-04). `init` writes
+`.kb/.gitignore` containing `*`. An earlier version excluded `vectors/` alone,
+on the reasoning that sources and pages are worth keeping in history; observed
+practice went the other way in three repositories out of four, and a kb is
+local working knowledge that grows on its own clock rather than project source.
 
 **`.kb` is the store**, not a pointer to one. A pointer file stays available
 later if a project needs to share a store; the indirection buys nothing until
