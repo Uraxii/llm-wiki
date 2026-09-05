@@ -62,10 +62,24 @@ If you are in a repo, the knowledge belongs to it, and there is no
 llmwiki init
 ```
 
-`init` writes `.kb/.gitignore` excluding `vectors/`, which is the
-rebuildable part, so the rest of the kb can be committed with the
-project. Sources and pages are worth keeping in history; the vector
-store is not.
+`init` writes `.kb/.gitignore` containing `*`, so the whole kb stays out
+of the project's history. A kb is local working knowledge that grows on
+its own clock, not project source.
+
+**Keeping the kb outside the repo root.** Some projects put every agent
+scratch directory in one place. The upward search looks for a directory
+named `.kb`, so a kb kept anywhere else needs a symlink at the repo
+root:
+
+```
+mkdir -p .agent-scratch
+llmwiki --kb .agent-scratch/.kb init
+ln -s .agent-scratch/.kb .kb
+```
+
+Skip the symlink and every verb run from the repo root falls through to
+the global store, with the stderr note above as the only warning. There
+is no `init --path`; those three commands are the whole feature.
 
 ## Starting a kb
 
@@ -178,9 +192,24 @@ looking for one.
 lives in the shell that sourced it, so a non-login or snapshotted shell,
 which is what most agents run in, can inherit the wrapper's name and
 none of the helpers it calls. The symptom is a `command not found` for a
-name you never typed. Source the file that defines it, or ask the
-operator to install the wrapper as an executable on `PATH` instead,
-which every shell inherits.
+name you never typed. To get past it now, source the file that defines
+the function, then rerun the verb.
+
+The durable fix belongs to whoever owns the shell configuration, not to
+this CLI. Move the wrapper out of the shell startup file and into an
+executable on `PATH`:
+
+```
+#!/usr/bin/env bash
+# ~/.local/bin/llmwiki-with-key, or any name earlier on PATH
+exec env LLM_WIKI_API_KEY_HOSTED="$(your-secret-tool read llm-wiki)" \
+  /path/to/real/llmwiki "$@"
+```
+
+Every shell inherits a file on `PATH`, login or not, snapshotted or not,
+so the failure above cannot happen again. There is no `key_command`
+setting in `config.toml`, and there will not be: it would make a config
+file executable, which is a much worse trade than one script.
 
 Which verbs need it: `ingest`, `summarize`, `embed`, `search`, and
 `dedup` when `[models] dedup` is configured. `init`, `where`, `lint`
