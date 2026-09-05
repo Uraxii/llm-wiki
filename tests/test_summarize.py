@@ -254,9 +254,13 @@ class SummarizeTest(unittest.TestCase):
             self._write_config(fake.url)
             with redirect_stderr(err):
                 code = _run_quiet(self.root, [digest])
+                sweep_code = _run_quiet(self.root, None)
             self.assertEqual(fake.requests, [])
 
         self.assertEqual(code, 1)
+        # A bare sweep fails too: the cap is a constant a later build can
+        # raise, so this drop is actionable rather than inert.
+        self.assertEqual(sweep_code, 1)
         log = (self.root / "log.md").read_text()
         self.assertIn(digest, log)
         self.assertIn(str(size), log)
@@ -1200,7 +1204,15 @@ FENCE_SHAPES = [
         "architectural diagrams from JSON specifications.",
     ),
     ("opening fence never closed", f"```yaml\n{NO_DASHES}\n", None),
+    ("fence around a whole page, never closed", f"```markdown\n{FM}\n\n{PLAIN}\n", None),
     ("fenced page with no dashes at all", f"```\n{NO_DASHES}\n\n{PLAIN}\n```", None),
+    (
+        # The body line holds a colon, so wrapping this in `---` would
+        # read it as a frontmatter field and leave the page with no body.
+        "fenced page with no dashes, colon in the body",
+        f"```\n{NO_DASHES}\n\nOverview: what the widget does.\n```",
+        None,
+    ),
     ("one fence line", "```", None),
     ("prose instead of a page", "Sorry, I cannot summarize that.", None),
 ]

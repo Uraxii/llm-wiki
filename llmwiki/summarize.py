@@ -161,36 +161,45 @@ def _unwrap_fence(reply: str) -> str:
     """The reply with a leading code fence turned back into a `---`
     frontmatter block, ready for `core.parse_frontmatter`.
 
-    A model fences the whole reply, or fences the frontmatter alone and
-    leaves the body outside it. Text after the first closing fence is
-    that second shape, and it decides everything: the fenced block is
-    the frontmatter, and the `---` lines go back around it unless it
-    already brought its own. With nothing after that fence, the reply is
-    one fenced page, and only the fence on its last line closes it, so a
-    fenced block inside the body keeps its own fences.
+    What sits INSIDE the fence decides the shape, because a `---` line
+    can only be frontmatter while a fence line can be either marker.
 
-    A reply that opens with a fence it never closes is returned
-    stripped, and so is a fenced page carrying no `---` line: wrapping
-    that one would read its first prose line holding a colon as a
-    frontmatter field and write a page with no body at all.
+    The block opens with `---`, so the frontmatter is inside the fence
+    and its own closing `---` says where the body starts. A fence on the
+    line right after it means the fence held the frontmatter alone;
+    otherwise it held the whole page and the fence on the last line
+    closes it, which leaves a fenced code block in the body untouched.
+
+    The block does not open with `---`, so the fence markers stand where
+    the `---` lines belong and this puts them back.
+
+    A reply that opens a fence it never closes is returned stripped, and
+    so is a fenced page carrying no `---` line and no body after the
+    fence: wrapping that one would read its first prose line holding a
+    colon as a frontmatter field and write a page with no body at all.
     """
     stripped = reply.strip()
     if not stripped.startswith(FENCE):
         return stripped
     lines = stripped.split("\n")
+
+    if lines[1:2] == ["---"]:
+        end = next((i for i, line in enumerate(lines[2:], 2) if line == "---"), None)
+        if end is None:
+            return stripped
+        rest = lines[end + 1 :]
+        if rest and rest[0].rstrip() == FENCE:
+            return "\n".join(lines[1 : end + 1] + rest[1:])
+        if lines[-1].rstrip() == FENCE:
+            return "\n".join(lines[1:-1])
+        return stripped
+
     close = next(
         (i for i, line in enumerate(lines[1:], 1) if line.rstrip() == FENCE), None
     )
-    if close is not None and any(line.strip() for line in lines[close + 1 :]):
-        block, body = lines[1:close], lines[close + 1 :]
-        if block[:1] == ["---"]:
-            return "\n".join(block + body)
-        return "\n".join(["---", *block, "---", *body])
-
-    page = "\n".join(lines[1:-1])
-    if lines[-1].rstrip() == FENCE and page.startswith("---\n"):
-        return page
-    return stripped
+    if close is None or not any(line.strip() for line in lines[close + 1 :]):
+        return stripped
+    return "\n".join(["---", *lines[1:close], "---", *lines[close + 1 :]])
 
 
 def _unparseable_reason(reply: str) -> str:
@@ -329,11 +338,13 @@ def _resolve_content(
     """The prompt text, optional attachment, model step, and provenance
     for `digest` (a 4-tuple), or a `(category, reason)` pair when
     nothing can be sent. `category` is `"inert"` when the drop derives
-    only from the immutable source bytes, so no rerun under any
-    configuration can change it (bytes that are not UTF-8, or more of
-    them than `MAX_SOURCE_TEXT_BYTES`); `"actionable"` for every other
-    reason, since a missing sidecar can be restored, a permission bit
-    can be fixed, and the provider's pdf_part can be edited.
+    only from the immutable source bytes, so no rerun can change it:
+    bytes that are not UTF-8, and nothing else. `"actionable"` for every
+    other reason, since a missing sidecar can be restored, a permission
+    bit can be fixed, the provider's pdf_part can be edited, and a
+    source over `MAX_SOURCE_TEXT_BYTES` is measured against a constant a
+    later build can raise, which makes it the operator's business to see
+    rather than a fact about the bytes.
 
     The recorded content_type decides one thing: whether the bytes ride
     as an attachment. Everything else is text when it decodes, so a
@@ -355,7 +366,7 @@ def _resolve_content(
         try:
             size = path.stat().st_size
             if size > MAX_SOURCE_TEXT_BYTES:
-                return "inert", (
+                return "actionable", (
                     f"source too large: {size} bytes exceeds the "
                     f"{MAX_SOURCE_TEXT_BYTES} byte cap"
                 )
