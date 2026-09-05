@@ -83,6 +83,18 @@ class InitTest(TmpDirTest):
             summarize_model, r"(?i)google|openai|gemini|anthropic|claude|gpt-"
         )
 
+    def test_gitignore_excludes_the_whole_kb(self) -> None:
+        """Operator directive, 2026-09-04: a kb is local working
+        knowledge, not project source. It used to exclude `vectors/`
+        only, which committed sources and pages by default while three
+        of the four kbs on this machine ignored the lot by hand."""
+        self.run_main(["--kb", str(self.kb), "init"])
+        written = (self.kb / ".gitignore").read_text(encoding="utf-8")
+        self.assertEqual(
+            [line for line in written.splitlines() if not line.startswith("#")],
+            ["*"],
+        )
+
     def test_schema_matches_skeleton_bytes(self) -> None:
         self.run_main(["--kb", str(self.kb), "init"])
         written = (self.kb / "SCHEMA.md").read_bytes()
