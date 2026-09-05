@@ -84,6 +84,12 @@ describe = "13-digit ISBN without hyphens"
 # mode = "partial"
 """
 
+GITIGNORE = """\
+# A kb is local working knowledge, not project source, so the whole
+# directory stays out of history.
+*
+"""
+
 SUMMARIZE_STUB = """\
 # Summarize
 
@@ -102,7 +108,7 @@ def _init_files() -> dict[str, str]:
         "SCHEMA.md": SCHEMA_SKELETON.read_text(encoding="utf-8"),
         "SUMMARIZE.md": SUMMARIZE_STUB,
         "log.md": "# log\n",
-        ".gitignore": "vectors/\n",
+        ".gitignore": GITIGNORE,
     }
 
 
