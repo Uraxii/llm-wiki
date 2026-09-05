@@ -147,157 +147,6 @@ class SummarizeTest(unittest.TestCase):
         after = summarize.prompt_fingerprint(summarize.prompt_prefix(Kb(self.root)))
         self.assertNotEqual(before, after)
 
-    def test_code_fenced_reply_is_unwrapped_and_parsed(self) -> None:
-        digest = self._store_source()
-        inner = (
-            "---\n"
-            "title: Fenced Widget\n"
-            "identifiers: []\n"
-            "---\n\n"
-            "Fenced abstract.\n"
-        )
-        reply = "```markdown\n" + inner + "```"
-
-        def respond(_path: str, _body: dict) -> dict:
-            return {"choices": [{"message": {"content": reply}}]}
-
-        with FakeEndpoint(respond) as fake:
-            self._write_config(fake.url)
-            code = _run_quiet(self.root, [digest])
-
-        self.assertEqual(code, 0)
-        pages = list((self.root / "wiki").glob("*.md"))
-        self.assertEqual(len(pages), 1)
-        fields, body = parse_frontmatter(pages[0].read_text())
-        self.assertEqual(fields["title"], "Fenced Widget")
-        self.assertEqual(body.strip(), "Fenced abstract.")
-
-    def test_reply_fencing_only_the_frontmatter_is_parsed(self) -> None:
-        """A real reply from the configured provider, captured verbatim.
-        The model fenced the frontmatter and left the body outside the
-        fence, so the block carries no `---` lines of its own and the
-        fence markers stand where they belong."""
-        digest = self._store_source()
-        reply = (
-            "```yaml\n"
-            "kind: summary\n"
-            "title: Archify Reference\n"
-            "identifiers: []\n"
-            "```\n"
-            "\n"
-            "This document details Archify, a tool for generating "
-            "interactive architectural diagrams from JSON specifications.\n"
-        )
-
-        def respond(_path: str, _body: dict) -> dict:
-            return {"choices": [{"message": {"content": reply}}]}
-
-        with FakeEndpoint(respond) as fake:
-            self._write_config(fake.url)
-            code = _run_quiet(self.root, [digest])
-
-        self.assertEqual(code, 0)
-        pages = list((self.root / "wiki").glob("*.md"))
-        self.assertEqual(len(pages), 1)
-        fields, body = parse_frontmatter(pages[0].read_text())
-        self.assertEqual(fields["title"], "Archify Reference")
-        self.assertTrue(body.startswith("This document details Archify"))
-
-    def test_fenced_frontmatter_over_a_body_that_fences_a_block(self) -> None:
-        """The reply's last line is a fence closing a block in the body,
-        not the frontmatter's. Which fence closes the opening one is
-        decided by the line after it, not by the reply's last line."""
-        digest = self._store_source()
-        reply = (
-            "```yaml\n"
-            "title: Fenced Body Widget\n"
-            "identifiers: []\n"
-            "```\n"
-            "\n"
-            "Abstract text.\n"
-            "\n"
-            "```py\n"
-            "widget = 1\n"
-            "```\n"
-        )
-
-        def respond(_path: str, _body: dict) -> dict:
-            return {"choices": [{"message": {"content": reply}}]}
-
-        with FakeEndpoint(respond) as fake:
-            self._write_config(fake.url)
-            code = _run_quiet(self.root, [digest])
-
-        self.assertEqual(code, 0)
-        pages = list((self.root / "wiki").glob("*.md"))
-        self.assertEqual(len(pages), 1)
-        fields, body = parse_frontmatter(pages[0].read_text())
-        self.assertEqual(fields["title"], "Fenced Body Widget")
-        self.assertIn("widget = 1", body)
-
-    def test_fence_around_a_frontmatter_block_that_kept_its_dashes(self) -> None:
-        """The fence closes on the frontmatter's own closing `---`, and
-        the body sits outside it and ends with a fenced block of its
-        own. Everything after that first closing fence is body."""
-        digest = self._store_source()
-        reply = (
-            "```markdown\n"
-            "---\n"
-            "title: Dashed Widget\n"
-            "identifiers: []\n"
-            "---\n"
-            "```\n"
-            "\n"
-            "Abstract text.\n"
-            "\n"
-            "```py\n"
-            "widget = 1\n"
-            "```\n"
-        )
-
-        def respond(_path: str, _body: dict) -> dict:
-            return {"choices": [{"message": {"content": reply}}]}
-
-        with FakeEndpoint(respond) as fake:
-            self._write_config(fake.url)
-            code = _run_quiet(self.root, [digest])
-
-        self.assertEqual(code, 0)
-        pages = list((self.root / "wiki").glob("*.md"))
-        self.assertEqual(len(pages), 1)
-        fields, body = parse_frontmatter(pages[0].read_text())
-        self.assertEqual(fields["title"], "Dashed Widget")
-        self.assertTrue(body.strip().startswith("Abstract text."))
-        self.assertIn("widget = 1", body)
-
-    def test_a_fenced_page_with_no_dashes_drops_rather_than_guessing(self) -> None:
-        """The whole reply is fenced and carries no `---` line. Reading
-        the fence markers as the frontmatter's own would swallow the
-        first body line that holds a colon and write a page with an
-        empty body, so this drops instead."""
-        digest = self._store_source()
-        reply = (
-            "```\n"
-            "title: Guessed Widget\n"
-            "identifiers: []\n"
-            "\n"
-            "Overview: this widget does things.\n"
-            "```"
-        )
-
-        def respond(_path: str, _body: dict) -> dict:
-            return {"choices": [{"message": {"content": reply}}]}
-
-        err = io.StringIO()
-        with FakeEndpoint(respond) as fake:
-            self._write_config(fake.url)
-            with redirect_stderr(err):
-                code = _run_quiet(self.root, [digest])
-
-        self.assertEqual(code, 1)
-        self.assertIn("unparseable reply", err.getvalue())
-        self.assertEqual(list((self.root / "wiki").glob("*.md")), [])
-
     def test_source_of_exactly_the_text_cap_is_summarized(self) -> None:
         digest = self._store_source(
             "w" * summarize.MAX_SOURCE_TEXT_BYTES, "text/plain", ".txt"
@@ -1303,6 +1152,119 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(len(pages), 1)
         fields, _body = parse_frontmatter(pages[0].read_text())
         self.assertEqual(fields["title"], "Leading Newline Widget")
+
+
+FM = "---\nkind: summary\ntitle: Fence Widget\nidentifiers: []\n---"
+PLAIN = "Body says something."
+CODED = "Body says:\n\n```python\nx = 1\n```\n\nTrailing sentence."
+NO_DASHES = "kind: summary\ntitle: Fence Widget\nidentifiers: []"
+
+# One row per way a reply has been seen to arrive: the reply, and the
+# body the page must end up carrying, or None when the reply must drop.
+# A new shape is a row here, never a new test method.
+FENCE_SHAPES = [
+    ("bare frontmatter", f"{FM}\n\n{PLAIN}\n", PLAIN),
+    ("bare frontmatter, code in the body", f"{FM}\n\n{CODED}\n", CODED),
+    ("fence around the whole reply", f"```markdown\n{FM}\n\n{PLAIN}\n```", PLAIN),
+    (
+        "fence around the whole reply, code in the body",
+        f"```markdown\n{FM}\n\n{CODED}\n```",
+        CODED,
+    ),
+    (
+        "fence around the frontmatter, dashes kept",
+        f"```markdown\n{FM}\n```\n\n{PLAIN}\n",
+        PLAIN,
+    ),
+    (
+        "fence around the frontmatter, dashes kept, code in the body",
+        f"```markdown\n{FM}\n```\n\n{CODED}\n",
+        CODED,
+    ),
+    (
+        "fence around the frontmatter, no dashes",
+        f"```yaml\n{NO_DASHES}\n```\n\n{PLAIN}\n",
+        PLAIN,
+    ),
+    (
+        "fence around the frontmatter, no dashes, code in the body",
+        f"```yaml\n{NO_DASHES}\n```\n\n{CODED}\n",
+        CODED,
+    ),
+    (
+        "captured reply, provider fenced the frontmatter alone",
+        "```yaml\nkind: summary\ntitle: Archify Reference\nidentifiers: []\n```\n"
+        "\nThis document details Archify, a tool for generating interactive "
+        "architectural diagrams from JSON specifications.\n",
+        "This document details Archify, a tool for generating interactive "
+        "architectural diagrams from JSON specifications.",
+    ),
+    ("opening fence never closed", f"```yaml\n{NO_DASHES}\n", None),
+    ("fenced page with no dashes at all", f"```\n{NO_DASHES}\n\n{PLAIN}\n```", None),
+    ("one fence line", "```", None),
+    ("prose instead of a page", "Sorry, I cannot summarize that.", None),
+]
+
+
+class FenceShapeTest(unittest.TestCase):
+    """Every way the summarizer has been seen to fence a reply, driven
+    through `run` to the page on disk.
+
+    The body has to round-trip, not merely parse. A reply that parses
+    while a line goes missing out of the middle of its body writes a
+    mangled page and exits 0, and checking only for a page is what let
+    that through once already.
+    """
+
+    def _summarize(self, reply: str) -> tuple[int, str | None, str]:
+        """Exit code, the written page's body or `None` when no page was
+        written, and stderr. A fresh kb per call, so one shape cannot
+        leave a page behind for the next."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        root = tmp / ".kb"
+        for sub in ("wiki", "sources"):
+            (root / sub).mkdir(parents=True)
+        (root / "log.md").write_text("# log\n")
+        text = "Some widget source text."
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        (root / "sources" / f"{digest}.md").write_text(text)
+        (root / "sources" / f"{digest}.toml").write_text(
+            'url = "https://example.com/widget"\n'
+            'fetched = "2024-01-01T00:00:00Z"\n'
+            'content_type = "text/markdown"\n'
+            'job = "manual"\n'
+        )
+
+        def respond(_path: str, _body: dict) -> dict:
+            return {"choices": [{"message": {"content": reply}}]}
+
+        err = io.StringIO()
+        with FakeEndpoint(respond) as fake:
+            (root / "config.toml").write_text(
+                config_toml(fake.url, {"summarize": "cheap"})
+            )
+            with redirect_stderr(err):
+                code = _run_quiet(root, [digest])
+
+        pages = list((root / "wiki").glob("*.md"))
+        self.assertLessEqual(len(pages), 1)
+        body = parse_frontmatter(pages[0].read_text())[1] if pages else None
+        return code, body, err.getvalue()
+
+    def test_each_shape_round_trips_its_body_or_drops(self) -> None:
+        for name, reply, want_body in FENCE_SHAPES:
+            with self.subTest(shape=name):
+                code, body, err = self._summarize(reply)
+                if want_body is None:
+                    self.assertEqual(code, 1)
+                    self.assertIsNone(body)
+                    self.assertIn("unparseable reply", err)
+                    continue
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0)
+                self.assertIsNotNone(body)
+                self.assertEqual(body.strip(), want_body.strip())
 
 
 class DropReasonTest(unittest.TestCase):
