@@ -22,15 +22,7 @@ Check first, because it is usually already there:
 llmwiki --help
 ```
 
-If that is not found, install it from a checkout of the `llm-wiki`
-project (`github.com/Uraxii/llm-wiki`):
-
-```
-uv tool install .
-```
-
-Needs Python 3.14 and pulls `sqlite-vec`, which is not optional: the
-vector store is loaded at import time and there is no degraded mode.
+If that is not found, install it: `references/install.md`.
 
 ## Which kb you are talking to
 

@@ -65,7 +65,7 @@ claude --plugin-dir /path/to/llm-wiki
 copilot --plugin-dir /path/to/llm-wiki
 ```
 
-`scripts/check-skill-sync.sh` fails if the manifest versions drift from
+`scripts/check-skill-sync.py` fails if the manifest versions drift from
 `pyproject.toml`, or if this repo's copy of the skill drifts from the copy in
 a `dotai` checkout.
 
