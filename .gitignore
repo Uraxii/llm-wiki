@@ -21,3 +21,15 @@ docs/plans/01-llm-wiki-poc/decisions.tsv
 
 # mutmut's working copy and per-mutant test cache (scripts/check-mutation-gate.py)
 mutants/
+
+# secrets and keys, so a stray file cannot be committed into a public repo
+.env.*
+*.sqlite
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+.netrc
+.direnv/
