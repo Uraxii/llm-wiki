@@ -1,6 +1,6 @@
 {
   "name": "llm-wiki",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Knowledgebase skill for agents: immutable sources with provenance, model-written pages, and meaning-based search over a .kb directory.",
   "homepage": "https://github.com/Uraxii/llm-wiki",
   "repository": "https://github.com/Uraxii/llm-wiki",
