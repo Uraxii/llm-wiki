@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import os
 import re
 import shutil
 import sys
@@ -10,6 +11,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 from llmwiki import cli  # noqa: E402
 from llmwiki.cli import (  # noqa: E402
     CONFIG_TOML,
@@ -145,12 +147,20 @@ class SubprocessTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             kb = Path(tmp) / ".kb"
+            repo_root = Path(__file__).resolve().parents[1]
+            env = {
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(
+                    [str(repo_root), str(repo_root / "skills" / "llm-wiki")]
+                ),
+            }
             result = subprocess.run(
                 [sys.executable, "-m", "llmwiki", "--kb", str(kb), "where"],
-                cwd=Path(__file__).resolve().parents[1],
+                cwd=repo_root,
                 capture_output=True,
                 text=True,
                 check=True,
+                env=env,
             )
             self.assertEqual(result.stdout.strip(), str(kb))
 

@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 from llmwiki import fetch  # noqa: E402
 
 PUBLIC_ADDRESS = "93.184.216.34"  # example.com's old address: is_global True, never dialled here

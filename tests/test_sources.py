@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 from llmwiki.core import Kb  # noqa: E402
 from llmwiki.sources import read_provenance, store, stored_urls  # noqa: E402
 

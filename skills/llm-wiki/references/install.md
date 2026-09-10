@@ -1,8 +1,9 @@
 # Installing the `llmwiki` CLI
 
-The plugin ships the skill and not the binary, because no plugin format
-for Claude Code, Codex, or Copilot CLI can declare or install an external
-program. So the CLI is one manual step, once per machine.
+The skill folder carries the CLI's source alongside the instructions for
+using it, so copying the skill copies the tool. But no plugin format for
+Claude Code, Codex, or Copilot CLI can turn that source into a program on
+`PATH`. So the CLI is one manual step, once per machine.
 
 Check first, because it is usually already there:
 
@@ -21,8 +22,10 @@ so:
 
 ```
 ls ~/.claude/plugins/cache/llm-wiki/llm-wiki/      # the version directories
-uv tool install ~/.claude/plugins/cache/llm-wiki/llm-wiki/0.2.0
+uv tool install ~/.claude/plugins/cache/llm-wiki/llm-wiki/0.2.0/skills/llm-wiki
 ```
+
+For Codex, the same directory sits under `~/.codex/plugins/cache/llm-wiki/llm-wiki/<version>/skills/llm-wiki`.
 
 That directory holds `pyproject.toml` and the `llmwiki` package, which is
 all `uv tool install` needs.
@@ -36,7 +39,7 @@ you how to use it.
 
 ```
 git clone https://github.com/Uraxii/llm-wiki
-uv tool install ./llm-wiki
+uv tool install ./llm-wiki/skills/llm-wiki
 ```
 
 ## What it needs

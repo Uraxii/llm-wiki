@@ -11,6 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import parse_frontmatter, render_frontmatter  # noqa: E402
 from llmwiki import cli, dedup  # noqa: E402

@@ -20,9 +20,11 @@ from pathlib import Path
 from llmwiki_service import __main__ as service_main
 
 PYTHON = sys.executable
+REPO_ROOT = Path(__file__).resolve().parent.parent
 PEPPER_ENV = {
     "LLM_WIKI_PEPPER": "1:pepper-one",
     "LLM_WIKI_BOOTSTRAP_ADMIN_TOKEN": "bootstrap-secret",
+    "PYTHONPATH": str(REPO_ROOT / "skills" / "llm-wiki"),
 }
 
 

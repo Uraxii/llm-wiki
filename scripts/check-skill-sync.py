@@ -2,9 +2,11 @@
 """Fail if the shipped skill or the plugin version numbers have drifted.
 
 In plain words: this skill lives in two places on disk, and its version
-number is written in four files. This script compares them and names the
-one that has fallen out of step, so nobody ships a plugin whose skill text
-is older than the copy in this repo.
+number is written in five files, with `skills/llm-wiki/pyproject.toml` as
+the source of truth because that is the file a `uv tool install` actually
+reads. This script compares the other four against it and names the one
+that has fallen out of step, so nobody ships a plugin whose skill text is
+older than the copy in this repo.
 """
 
 import json
@@ -39,7 +41,13 @@ def skipped(message: str) -> None:
 
 
 def files_under(root: Path) -> set[Path]:
-    return {p.relative_to(root) for p in root.rglob("*") if p.is_file()}
+    return {
+        p.relative_to(root)
+        for p in root.rglob("*")
+        if p.is_file()
+        and "__pycache__" not in p.parts
+        and p.suffix != ".pyc"
+    }
 
 
 def check_skill_copy(dotai_root: Path) -> None:
@@ -70,13 +78,13 @@ def check_skill_copy(dotai_root: Path) -> None:
 
 
 def check_manifest_versions() -> None:
-    pyproject = REPO_ROOT / "pyproject.toml"
-    if not pyproject.is_file():
-        failed("manifest versions: pyproject.toml missing")
+    skill_pyproject = REPO_ROOT / SKILL_DIR / "pyproject.toml"
+    if not skill_pyproject.is_file():
+        failed(f"manifest versions: {SKILL_DIR / 'pyproject.toml'} missing")
         return
-    want = tomllib.loads(pyproject.read_text()).get("project", {}).get("version")
+    want = tomllib.loads(skill_pyproject.read_text()).get("project", {}).get("version")
     if not want:
-        failed("manifest versions: no [project] version in pyproject.toml")
+        failed(f"manifest versions: no [project] version in {SKILL_DIR / 'pyproject.toml'}")
         return
 
     for rel in MANIFESTS:
@@ -88,9 +96,24 @@ def check_manifest_versions() -> None:
         if not got:
             failed(f"manifest versions: {rel} has no version field")
         elif got != want:
-            failed(f"manifest versions: {rel} is {got}, pyproject.toml is {want}")
+            failed(f"manifest versions: {rel} is {got}, {SKILL_DIR / 'pyproject.toml'} is {want}")
         else:
             passed(f"manifest versions: {rel} is {want}")
+
+    root_pyproject = REPO_ROOT / "pyproject.toml"
+    if not root_pyproject.is_file():
+        failed("manifest versions: pyproject.toml missing")
+        return
+    root_got = tomllib.loads(root_pyproject.read_text()).get("project", {}).get("version")
+    if not root_got:
+        failed("manifest versions: no [project] version in pyproject.toml")
+    elif root_got != want:
+        failed(
+            f"manifest versions: pyproject.toml is {root_got}, "
+            f"{SKILL_DIR / 'pyproject.toml'} is {want}"
+        )
+    else:
+        passed(f"manifest versions: pyproject.toml is {want}")
 
 
 def main() -> int:

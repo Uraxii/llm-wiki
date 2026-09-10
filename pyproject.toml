@@ -1,5 +1,5 @@
 [project]
-name = "llmwiki"
+name = "llmwiki-service"
 version = "0.2.0"
 requires-python = ">=3.14"
 dependencies = ["sqlite-vec", "starlette", "uvicorn"]
@@ -7,11 +7,8 @@ dependencies = ["sqlite-vec", "starlette", "uvicorn"]
 [project.optional-dependencies]
 dev = ["mutmut"]
 
-[project.scripts]
-llmwiki = "llmwiki.cli:main"
-
 [tool.hatch.build.targets.wheel]
-packages = ["llmwiki", "llmwiki_service"]
+packages = ["llmwiki_service", "skills/llm-wiki/llmwiki"]
 
 [build-system]
 requires = ["hatchling"]
@@ -29,4 +26,4 @@ pytest_add_cli_args_test_selection = [
     "tests/test_service_routes.py",
     "tests/test_service_admin.py",
 ]
-also_copy = ["llmwiki"]
+also_copy = ["skills/llm-wiki/llmwiki"]

@@ -18,6 +18,7 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki import cli, remotes  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
@@ -63,7 +64,7 @@ class VerbTableTest(unittest.TestCase):
         (self.kb / "config.toml").write_text(
             config_toml(self.fake.url, {"summarize": "cheap"})
         )
-        self.env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+        self.env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "skills" / "llm-wiki")])}
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(self.kb), *args]
@@ -202,7 +203,7 @@ class EmbedAwareCliTest(unittest.TestCase):
         (self.kb / "config.toml").write_text(
             config_toml(self.fake.url, {"summarize": "cheap", "embed": "embed-model"})
         )
-        self.env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+        self.env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "skills" / "llm-wiki")])}
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(self.kb), *args]

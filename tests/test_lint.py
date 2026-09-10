@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 from llmwiki.cli import main  # noqa: E402
 from llmwiki.lint import (  # noqa: E402
     CHECKS,
@@ -329,7 +330,7 @@ class LintCliTest(unittest.TestCase):
 
     def run_module(self, kb: Path, args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
         cmd = [sys.executable, "-m", "llmwiki", "--kb", str(kb), "lint", *args]
-        env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "skills" / "llm-wiki")])}
         return subprocess.run(cmd, cwd=str(cwd or REPO_ROOT), capture_output=True, text=True, env=env)
 
     def test_exit_code_and_log_on_findings(self) -> None:

@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 from llmwiki.core import (  # noqa: E402
     append_log_entry,
     atomic_write_bytes,

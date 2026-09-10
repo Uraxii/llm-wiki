@@ -12,6 +12,7 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki import remotes  # noqa: E402
 from fake_wiki import FakeWiki, Reply  # noqa: E402

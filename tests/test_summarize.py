@@ -12,6 +12,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import Kb, parse_frontmatter  # noqa: E402
 from llmwiki import summarize  # noqa: E402
@@ -1358,7 +1359,7 @@ class SummarizeCliTest(unittest.TestCase):
                 sys.executable, "-m", "llmwiki",
                 "--kb", str(self.root), "summarize", digest,
             ]
-            env = {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+            env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "skills" / "llm-wiki")])}
             run = subprocess.run(
                 cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, env=env
             )

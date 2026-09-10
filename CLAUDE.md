@@ -12,14 +12,14 @@ plan 02 phase 5, which owns packaging, so a fresh checkout needs
 `uv pip install --python .venv/bin/python starlette uvicorn mutmut` until then.
 
 **Use `.venv/bin/python`, not bare `python3`.** From phase 13 the whole CLI
-requires `sqlite-vec`: `llmwiki/vectors.py` imports it at module level and
-`ingest` sweeps vectors on every run, so bare `python3 -m llmwiki` raises
-`ModuleNotFoundError` and so does the suite. Any `[jobs]` entry on an OS
-scheduler must name the venv interpreter.
+requires `sqlite-vec`: `skills/llm-wiki/llmwiki/vectors.py` imports it at
+module level and `ingest` sweeps vectors on every run, so bare
+`python3 -m llmwiki` raises `ModuleNotFoundError` and so does the suite. Any
+`[jobs]` entry on an OS scheduler must name the venv interpreter.
 
 ```bash
 .venv/bin/python -m unittest discover tests
-.venv/bin/python -m compileall -q llmwiki
+.venv/bin/python -m compileall -q skills/llm-wiki/llmwiki
 ```
 
 The suite must be hermetic. Run it a second time with a dead proxy and get

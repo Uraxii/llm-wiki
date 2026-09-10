@@ -21,8 +21,8 @@ for how an agent uses it.
 
 ## CLI
 
-Install: `uv tool install .` from the repo root. Needs Python 3.14 and
-`sqlite-vec`, the project's one dependency.
+Install: `uv tool install ./skills/llm-wiki` from the repo root. Needs Python
+3.14 and `sqlite-vec`, the project's one dependency.
 
 `llmwiki` verbs: `init`, `where`, `ingest`, `summarize`, `dedup`, `lint`,
 `embed`, `status`, `search`.
@@ -33,9 +33,11 @@ agent, and the CLI never overwrites it.
 
 ## Install as a plugin
 
-The plugin ships one skill, `llm-wiki`. It does not ship the `llmwiki` binary,
-because no plugin format for these harnesses can declare or install an external
-program. Install the plugin, then install the CLI as described under CLI above.
+The plugin ships one skill, `llm-wiki`, and the skill carries the `llmwiki`
+CLI's source inside it. No plugin format for these harnesses can turn that
+source into a program on `PATH`, so install the plugin, then install the CLI
+as described under CLI above, pointing `uv tool install` at the skill folder
+the plugin cache put on disk.
 
 Claude Code:
 
@@ -66,8 +68,8 @@ copilot --plugin-dir /path/to/llm-wiki
 ```
 
 `scripts/check-skill-sync.py` fails if the manifest versions drift from
-`pyproject.toml`, or if this repo's copy of the skill drifts from the copy in
-a `dotai` checkout.
+`skills/llm-wiki/pyproject.toml`, or if this repo's copy of the skill drifts
+from the copy in a `dotai` checkout.
 
 ## Status
 

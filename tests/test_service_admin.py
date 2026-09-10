@@ -23,6 +23,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 
 from llmwiki.core import render_frontmatter  # noqa: E402
 from llmwiki_service import admin, app, auth, tokens  # noqa: E402

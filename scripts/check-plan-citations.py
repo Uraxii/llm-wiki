@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-CODE_DIRS = ("llmwiki", "tests")
+CODE_DIRS = ("skills/llm-wiki/llmwiki", "tests")
 
 CITATION_RE = re.compile(
     r"((?:[a-z_][a-z0-9_]*/)?[a-z_][a-z0-9_]*\.py):(\d+)(?:-(\d+))?"

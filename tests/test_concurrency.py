@@ -51,6 +51,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import Kb, as_list, parse_frontmatter, render_frontmatter  # noqa: E402
 from llmwiki import summarize, vectors  # noqa: E402
@@ -61,7 +62,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _subprocess_env() -> dict:
-    return {**os.environ, "PYTHONPATH": str(REPO_ROOT)}
+    return {**os.environ, "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / "skills" / "llm-wiki")])}
 
 
 def _fields(root: Path, name: str) -> dict:
