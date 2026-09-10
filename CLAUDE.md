@@ -6,10 +6,12 @@ This file provides instructions and context for AI coding agents working on this
 
 Python 3.14. Dependencies are allowed; see the Dependencies rule below for the
 bar they clear. In use today: `sqlite-vec` for the vector store, `starlette`
-and `uvicorn` for the service, and `mutmut` for the mutation gate. Only
-`sqlite-vec` is declared in `pyproject.toml`; declaring the rest belongs to
-plan 02 phase 5, which owns packaging, so a fresh checkout needs
-`uv pip install --python .venv/bin/python starlette uvicorn mutmut` until then.
+and `uvicorn` for the service, and `mutmut` for the mutation gate. All
+four are declared. `sqlite-vec` sits in `skills/llm-wiki/pyproject.toml`,
+the CLI's own manifest and the file `uv tool install` reads. `starlette` and
+`uvicorn` sit in the root `pyproject.toml`, which packages the service, with
+`mutmut` in its `dev` extra. A fresh checkout still bootstraps with
+`uv pip install --python .venv/bin/python starlette uvicorn mutmut`.
 
 **Use `.venv/bin/python`, not bare `python3`.** From phase 13 the whole CLI
 requires `sqlite-vec`: `skills/llm-wiki/llmwiki/vectors.py` imports it at
