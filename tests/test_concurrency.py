@@ -38,6 +38,7 @@ process arrives, then releases both, so both processes reach the slug
 check at the same instant, every run, not by luck.
 """
 
+import contextlib
 import hashlib
 import io
 import os
@@ -47,6 +48,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -54,7 +56,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import Kb, as_list, parse_frontmatter, render_frontmatter, slugify  # noqa: E402
-from llmwiki import summarize, vectors  # noqa: E402
+from llmwiki.core import kb_lock as real_kb_lock  # noqa: E402
+from llmwiki.model import chat as real_chat  # noqa: E402
+from llmwiki import dedup, ingest, summarize, vectors  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
 from kb_config import config_toml  # noqa: E402
 
@@ -119,22 +123,18 @@ class Hazard1LostUpdate(unittest.TestCase):
         while s1.md still claims `story: foo`, a dangling
         back-reference no lint check covers.
 
-        Deadlock check: a coming fix locks the WHOLE of `dedup.run`
-        (snapshot through writes), so this test never requires both
-        processes to be inside that span together (a mutual rendezvous
-        there would deadlock, exactly what made the original
-        `threading.Barrier` version of this test wrong). Instead only
-        process B waits, on an `Event` only the main thread ever sets;
-        process A is never made to wait on anything from this test.
-        Once fixed, B's `dedup.run` holds the lock across its own
-        judge call, so `b_reached` still fires (the network call is
-        inside the locked span but still runs); process A then simply
-        blocks in the kernel acquiring the same lock, `communicate`
-        times out, this thread sets `release_b` anyway, B finishes and
-        releases the lock, and only then does A's blocked acquire
-        succeed and its (now fresh, not stale) snapshot run to
-        completion. Bounded either way: nothing here waits on A before
-        releasing B.
+        How the fix makes it true: `_place_once` judges with no lock
+        held, then takes the lock and re-reads the wiki, and `_commit`
+        rebuilds `members` from THAT read rather than from the story
+        object the judge was shown. B's stale `members=[]` is therefore
+        never written, whichever process commits second.
+
+        Deadlock check: only process B ever waits, on an `Event` only
+        the main thread sets, and B's judge call is outside the lock, so
+        `b_reached` fires with nothing held. Process A is never made to
+        wait on anything from this test; it takes the same lock only for
+        its own short commit. Each process's `communicate` is bounded,
+        and nothing here waits on A before releasing B.
         """
         b_reached = threading.Event()
         release_b = threading.Event()
@@ -488,16 +488,19 @@ class Hazard4RollbackDeletesRival(unittest.TestCase):
         set once two arrivals are counted OR after a 2s cap, whichever
         first: pre-fix, with no lock at all, both requests arrive
         quickly and get released together, which is what gives the
-        TOCTOU in `_story_path` (pre-fix) something to race on. Once
-        the coming `kb_lock` serializes the whole of `dedup.run`,
-        `sb`'s process cannot even reach the endpoint until `sa`'s
-        process, lock and all, is completely done, so `sa`'s own
-        request is the only arrival ever counted; it waits out the 2s
-        cap, then proceeds solo, same either way. That 2s cap, well
-        under this test's own 60s `communicate` timeout and under
-        nothing that can loop or retry, is why this cannot hang: worst
-        case is one process paying that cap once, never both, never
-        twice.
+        TOCTOU in `_story_path` (pre-fix) something to race on. The
+        judge call still runs outside the lock after the fix, so both
+        arrivals are still counted and both are still released
+        together; what changed is that `_free_story_path` and the write
+        now run inside a short lock, and the loser's recheck sees the
+        winner's new story as a candidate it was never shown, re-judges
+        once, and lands on its own digest-suffixed path. Its rollback
+        can then only unlink a page it really did create.
+
+        That 2s cap, well under this test's own 60s `communicate`
+        timeout, is why this cannot hang. The re-judge is bounded at
+        PLACEMENT_ATTEMPTS, so the endpoint is called a fixed number of
+        times, never in a loop.
         """
         arrived = 0
         arrived_lock = threading.Lock()
@@ -661,6 +664,103 @@ class D9ConcurrentIngestWithJudge(unittest.TestCase):
         members = _fields(self.root, "foo")["members"]
         self.assertIn(alpha_fields["source"], members)
         self.assertIn(beta_fields["source"], members)
+
+
+class ModelCallsOutsideTheKbLock(unittest.TestCase):
+    """ingest.py `_pipeline`. A model call made while this process holds
+    the kb lock IS D9: it is what makes the hold outlast every other
+    agent's bounded wait. This watches the real ingest path and records
+    the lock depth at each call instead of reading the code and
+    believing it.
+
+    One model call on this path is deliberately not covered. With
+    `[models] embed` set, the trailing `vectors.sweep` at ingest.py:103
+    still embeds inside a lock, which the D9 design kept on purpose (its
+    section 5, the restated D6 invariant). This kb configures no embed
+    model, so no embed call is made here at all."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / ".kb"
+        for sub in ("wiki", "sources"):
+            (self.root / sub).mkdir(parents=True)
+        (self.root / "log.md").write_text("# log\n")
+        (self.root / "wiki" / "foo.md").write_text(
+            render_frontmatter(
+                {"kind": "story", "title": "Foo", "members": [],
+                 "identifiers": ["tag:shared"]},
+                "placeholder body",
+            )
+        )
+        self.source = self.tmp / "one.md"
+        self.source.write_text("one source text")
+
+    def test_no_model_call_runs_while_the_kb_lock_is_held(self) -> None:
+        """Drives `ingest.run` end to end and asserts every `chat` call,
+        the summarizer's and the judge's alike, happened at lock depth
+        zero. Before the fix the judge ran at depth 1."""
+        depth = 0
+        calls: list[tuple[str, int]] = []
+
+        @contextlib.contextmanager
+        def counting_lock(root: Path):
+            nonlocal depth
+            with real_kb_lock(root):
+                depth += 1
+                try:
+                    yield
+                finally:
+                    depth -= 1
+
+        def counting_chat(step: str):
+            def wrapper(*args, **kwargs):
+                calls.append((step, depth))
+                return real_chat(*args, **kwargs)
+
+            return wrapper
+
+        def respond(_path: str, body: dict) -> dict:
+            content = body["messages"][0]["content"]
+            if "=== NEW SUMMARY ===" in content:
+                return {"choices": [{"message": {"content": "foo"}}]}
+            page = (
+                "---\nkind: summary\ntitle: One Report\n"
+                "identifiers: [tag:shared]\n---\n\nAbstract for One Report.\n"
+            )
+            return {"choices": [{"message": {"content": page}}]}
+
+        with FakeEndpoint(respond) as fake:
+            (self.root / "config.toml").write_text(
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "dedup": "cheap"},
+                    extra="[identifiers.tag]\n",
+                )
+            )
+            patches = [
+                unittest.mock.patch.object(module, "kb_lock", counting_lock)
+                for module in (dedup, ingest, summarize)
+            ] + [
+                unittest.mock.patch.object(module, "chat", counting_chat(step))
+                for module, step in ((dedup, "dedup"), (summarize, "summarize"))
+            ]
+            with contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                with redirect_stdout(io.StringIO()):
+                    code = ingest.run(self.root, [str(self.source)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            sorted(name for name, _depth in calls), ["dedup", "summarize"],
+            f"the ingest path did not make both model calls: {calls!r}",
+        )
+        self.assertEqual(
+            [held for _name, held in calls], [0, 0],
+            f"a model call ran while the kb lock was held: {calls!r}",
+        )
+        self.assertEqual(_fields(self.root, "one-report")["story"], "foo")
 
 
 if __name__ == "__main__":

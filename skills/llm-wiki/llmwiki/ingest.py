@@ -72,10 +72,19 @@ def _sweep_or_fail(kb: Kb) -> bool:
 def _pipeline(root: Path, digest: str) -> str | None:
     """Returns the name of the failing step, or `None` when clean.
 
-    Lock ordering. summarize takes and releases its own commit lock per
-    digest. The story placement and the sweep that follows it share ONE
-    hold, so no other process can call vectors.neighbours between the
-    story page appearing and its vector row existing."""
+    Lock ordering. No step here holds the kb lock across a model call,
+    which is what lets two agents ingest into one kb at the same time.
+    summarize takes and releases its own commit lock per digest, and
+    dedup.place takes one short lock per digest to recheck and write.
+
+    The sweep after placement keeps a lock of its own, but placement no
+    longer shares it, so a story page can exist for a moment with no
+    vector row while no process holds the lock. The invariant that
+    survives is the weaker one: no story page is left without a vector
+    row once the placing process exits. A reader that calls
+    vectors.neighbours inside that window misses one vector-only
+    candidate, which at worst costs a duplicate story, which `rebuild`
+    repairs. See section 5 of the D9 design."""
     kb = Kb(root)
     if summarize.run(root, [digest]) != 0:
         return "summarize"
@@ -88,10 +97,10 @@ def _pipeline(root: Path, digest: str) -> str | None:
     # page for source)" line into the append-only log.
     if not _sweep_or_fail(kb):  # NO LOCK: vectors converge on their own
         return "embed"
+    placed, attempted = dedup.place(kb, [digest])
+    if placed != attempted:
+        return "dedup"
     with kb_lock(kb.root):
-        placed, attempted = dedup.place(kb, [digest])
-        if placed != attempted:
-            return "dedup"
         # dedup may write a new story page (a join or a fresh one) and
         # always rewrites the summary's own frontmatter (the `story:`
         # back-reference), so both sweeps here are real, not redundant:

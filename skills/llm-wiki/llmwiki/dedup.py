@@ -11,12 +11,11 @@ from __future__ import annotations
 import re
 import sys
 import unicodedata
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
 from llmwiki.core import (
-    LOCK_WAIT_TIMEOUT_SEC,
     FrontmatterValue,
     Kb,
     Page,
@@ -123,6 +122,13 @@ SLUG_SUFFIX_LEN = 8  # hex chars of the first member hash, for a title collision
 # that wanted a sampled judge would only be asking for that coin flip
 # back.
 JUDGE_TEMPERATURE = 0.0
+
+# How many times one digest may be judged before it is left for a later
+# run. Two: the first decision, and one re-judge when a rival writer
+# changed the candidate set while the first was in flight. A third would
+# buy a rarer case at the cost of a third paid model call, and a digest
+# left story-less is legal state `_target_digests` picks up next run.
+PLACEMENT_ATTEMPTS = 2
 
 
 class Story(NamedTuple):
@@ -470,9 +476,77 @@ def _place_summary(
     kb: Kb, digest: str, summary: Page, summaries: dict[str, Page], stories: dict[Path, Story]
 ) -> tuple[Story, str] | None:
     """Join or start a story for `summary`, deciding and committing
-    under one hold. CALLER MUST HOLD kb_lock."""
+    under one hold. CALLER MUST HOLD kb_lock. This is `rebuild`'s path:
+    it judges against the stories accumulated in memory, which is
+    correct only because `rebuild` holds the lock for its whole run."""
     placement = _decide(kb, summary, stories)
     return _commit(kb, digest, summary, placement, summaries, stories)
+
+
+def _summary_or_drop(
+    kb: Kb, digest: str, summaries: dict[str, Page]
+) -> Page | None:
+    """The summary page for `digest`, or `None` with the drop logged."""
+    summary = summaries.get(digest)
+    if summary is None:
+        append_log_entry(
+            kb.log, "dedup", f"{digest}: dropped (no summary page for source)"
+        )
+    return summary
+
+
+def _placement_holds(
+    kb: Kb, placement: Placement, summary: Page, stories: dict[Path, Story]
+) -> bool:
+    """True when `placement`, judged against an older view, is still the
+    answer `stories` supports.
+
+    A join depends only on the chosen story still existing. Another
+    member arriving does not change whose subject it covers, and
+    `_commit` recomputes the member list from the fresh view anyway.
+    A new story depends only on no candidate having appeared that the
+    judge was never shown; a candidate that disappeared was rejected
+    already."""
+    if placement.target is not None:
+        return placement.target.path in stories
+    fresh = _candidate_stories(kb, summary, stories)
+    return {story.path.stem for story in fresh} <= placement.candidate_stems
+
+
+def _place_once(kb: Kb, digest: str) -> tuple[Story, str] | None:
+    """Place one summary: judge with no lock held, then take the kb lock
+    for as long as it takes to confirm the decision still stands and
+    write it. Returns `(story, action)` on success and `None` on a drop,
+    which is the summary having vanished, self-lint refusing the write,
+    another writer having placed this digest first, or the decision
+    losing its race PLACEMENT_ATTEMPTS times.
+
+    CALLER MUST NOT HOLD kb_lock: the lock is not re-entrant, so a
+    caller holding it deadlocks itself here."""
+    for _attempt in range(PLACEMENT_ATTEMPTS):
+        summaries, stories, _agent_pages = _load_wiki(kb)
+        summary = _summary_or_drop(kb, digest, summaries)
+        if summary is None:
+            return None
+        placement = _decide(kb, summary, stories)
+        with kb_lock(kb.root):
+            summaries, stories, _agent_pages = _load_wiki(kb)
+            summary = _summary_or_drop(kb, digest, summaries)
+            if summary is None:
+                return None
+            if summary.fields.get("story"):
+                # `_target_digests`' rule, re-applied where the view is
+                # authoritative: moving a summary between stories is
+                # `rebuild`'s job, so a digest another writer placed
+                # while this one judged is left alone.
+                append_log_entry(
+                    kb.log, "dedup", f"{digest}: dropped (placed by another writer)"
+                )
+                return None
+            if _placement_holds(kb, placement, summary, stories):
+                return _commit(kb, digest, summary, placement, summaries, stories)
+    append_log_entry(kb.log, "dedup", f"{digest}: dropped (placement contended)")
+    return None
 
 
 def _target_digests(digests: list[str] | None, summaries: dict[str, Page]) -> list[str]:
@@ -506,18 +580,25 @@ def _replay(
     summaries: dict[str, Page],
     stories: dict[Path, Story],
     agent_pages: list[Page],
+    place_one: Callable[[str, Page], tuple[Story, str] | None],
 ) -> int:
-    """Place a story for each digest in `targets`, in order, accumulating
-    into `stories`. Returns the number placed; fewer than len(targets)
-    means something was dropped or a model error cut the run short."""
+    """Place a story for each digest in `targets`, in order, through
+    `place_one`, accumulating into `stories`. Returns the number placed;
+    fewer than len(targets) means something was dropped or a model error
+    cut the run short.
+
+    `place_one` is where the two callers differ, and it is the whole
+    reason `rebuild`'s whole-run lock and `place`'s per-digest lock never
+    nest: `rebuild` passes `_place_summary`, which writes under the lock
+    it already holds, and `place` passes `_place_once`, which takes a
+    lock of its own."""
     placed = 0
     for digest in targets:
-        summary = summaries.get(digest)
+        summary = _summary_or_drop(kb, digest, summaries)
         if summary is None:
-            append_log_entry(kb.log, "dedup", f"{digest}: dropped (no summary page for source)")
             continue
         try:
-            result = _place_summary(kb, digest, summary, summaries, stories)
+            result = place_one(digest, summary)
         except ModelError as exc:
             print(f"llmwiki: dedup: {exc}", file=sys.stderr)
             break
@@ -577,7 +658,16 @@ def rebuild(root: Path) -> int:
         # not run at rebuild. Every summary being replayed here already
         # had its push warning emitted the first time it was placed;
         # firing it again on every rebuild would just be noise.
-        placed = _replay(kb, targets, summaries, rebuilt, [])
+        placed = _replay(
+            kb,
+            targets,
+            summaries,
+            rebuilt,
+            [],
+            lambda digest, summary: _place_summary(
+                kb, digest, summary, summaries, rebuilt
+            ),
+        )
 
         append_log_entry(
             kb.log, "dedup", f"rebuild {placed} summaries into {len(rebuilt)} stories"
@@ -589,30 +679,30 @@ def place(kb: Kb, digests: list[str] | None) -> tuple[int, int]:
     """Place a story for each of `digests`, or every summary lacking a
     `story:` field when `None`. Returns (placed, attempted).
 
-    CALLER MUST HOLD kb_lock. This loads the whole wiki and writes from
-    that load; a second writer inside the span reinstates the
-    lost-update and duplicate-story races verbatim.
+    CALLER MUST NOT HOLD kb_lock. Every digest is judged with no lock
+    held and then takes its own short lock to recheck and write, so
+    several agents can place into one kb at once. The load below is only
+    used to pick the targets; each placement re-reads the wiki.
 
-    Prints one stderr line when [models] dedup is set: the run then
-    holds the lock across one model call per target, and a second
-    writer gets KbBusy after LOCK_WAIT_TIMEOUT_SEC."""
-    if _dedup_target(kb) is not None:
-        print(
-            "llmwiki: dedup: [models] dedup is set, so this run holds the "
-            "kb lock across one model call per target; a second writer "
-            f"gets KbBusy after {LOCK_WAIT_TIMEOUT_SEC}s",
-            file=sys.stderr,
-        )
+    Resolving the judge target up front is what makes a malformed
+    `[models] dedup` raise here rather than reach `_replay`, which reads
+    any ModelError as a model outage and just cuts the run short."""
+    _dedup_target(kb)
     summaries, stories, agent_pages = _load_wiki(kb)
     targets = _ordered(_target_digests(digests, summaries), summaries)
     print(f"dedup: {len(targets)} planned")
-    placed = _replay(kb, targets, summaries, stories, agent_pages)
+    placed = _replay(
+        kb,
+        targets,
+        summaries,
+        stories,
+        agent_pages,
+        lambda digest, _summary: _place_once(kb, digest),
+    )
     return placed, len(targets)
 
 
 def run(root: Path, digests: list[str] | None) -> int:
     """CLI `dedup`."""
-    kb = Kb(root)
-    with kb_lock(kb.root):
-        placed, attempted = place(kb, digests)
+    placed, attempted = place(Kb(root), digests)
     return 0 if placed == attempted else 1
