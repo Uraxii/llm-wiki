@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from llmwiki.core import (
+    LOCK_WAIT_TIMEOUT_SEC,
     FrontmatterValue,
     Kb,
     Page,
@@ -24,6 +25,7 @@ from llmwiki.core import (
     as_list,
     atomic_write_bytes,
     atomic_write_text,
+    holds_kb_lock,
     kb_lock,
     parse_frontmatter,
     read_page_text,
@@ -756,14 +758,22 @@ def place(kb: Kb, digests: list[str] | None) -> tuple[int, int]:
     """Place a story for each of `digests`, or every summary lacking a
     `story:` field when `None`. Returns (placed, attempted).
 
-    CALLER MUST NOT HOLD kb_lock. Every digest is judged with no lock
-    held and then takes its own short lock to recheck and write, so
-    several agents can place into one kb at once. The load below is only
-    used to pick the targets; each placement re-reads the wiki.
+    CALLER MUST NOT HOLD kb_lock, and the first line below enforces it
+    rather than asking. Every digest is judged with no lock held and
+    then takes its own short lock to recheck and write, so several
+    agents can place into one kb at once. The load below is only used
+    to pick the targets; each placement re-reads the wiki.
 
     Resolving the judge target up front is what makes a malformed
     `[models] dedup` raise here rather than reach `_replay`, which reads
     any ModelError as a model outage and just cuts the run short."""
+    if holds_kb_lock():
+        raise RuntimeError(
+            "dedup.place must not be called while this thread holds the "
+            "kb lock: the lock is not re-entrant, so the placement below "
+            f"would wait out the full {LOCK_WAIT_TIMEOUT_SEC}s timeout "
+            "and then raise KbBusy against itself"
+        )
     _dedup_target(kb)
     summaries, stories, agent_pages = _load_wiki(kb)
     targets = _ordered(_target_digests(digests, summaries), summaries)

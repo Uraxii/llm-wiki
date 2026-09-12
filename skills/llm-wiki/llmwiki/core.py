@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import re
 import tempfile
+import threading
 import time
 import tomllib
 import unicodedata
@@ -56,6 +57,22 @@ class Kb:
         self.config = load_config(root)
 
 
+_HELD = threading.local()
+
+
+def holds_kb_lock() -> bool:
+    """True when THIS thread is already inside a `kb_lock` block.
+
+    `kb_lock` is not re-entrant, so a function that takes the lock is
+    unusable from inside one: the nested acquire waits out
+    LOCK_WAIT_TIMEOUT_SEC and then raises KbBusy, which reads as a
+    busy kb rather than as the caller's mistake. Callers that must not
+    hold the lock check this and say so at once. Per thread, not per
+    process, because two threads take two `open()` descriptions and so
+    genuinely queue for the lock rather than deadlocking."""
+    return getattr(_HELD, "depth", 0) > 0
+
+
 class KbBusy(Exception):
     """Raised when the kb lock is not free within LOCK_WAIT_TIMEOUT_SEC.
     Never carries retry or recovery logic: the caller's process exits
@@ -87,9 +104,11 @@ def kb_lock(root: Path) -> Iterator[None]:
                         f"{LOCK_WAIT_TIMEOUT_SEC}s waiting for the lock"
                     ) from None
                 time.sleep(LOCK_POLL_INTERVAL_SEC)
+        _HELD.depth = getattr(_HELD, "depth", 0) + 1
         try:
             yield
         finally:
+            _HELD.depth -= 1
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os_close(fd)
