@@ -673,11 +673,10 @@ class ModelCallsOutsideTheKbLock(unittest.TestCase):
     the lock depth at each call instead of reading the code and
     believing it.
 
-    One model call on this path is deliberately not covered. With
-    `[models] embed` set, the trailing `vectors.sweep` at ingest.py:103
-    still embeds inside a lock, which the D9 design kept on purpose (its
-    section 5, the restated D6 invariant). This kb configures no embed
-    model, so no embed call is made here at all."""
+    This kb configures no embed model, so the embed call the trailing
+    `vectors.sweep` would make is not exercised here. It holds no lock
+    either; `EmbedCallsOutsideTheKbLock` in
+    tests/test_concurrent_placement_outcomes.py is what proves that."""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -740,7 +739,7 @@ class ModelCallsOutsideTheKbLock(unittest.TestCase):
             )
             patches = [
                 unittest.mock.patch.object(module, "kb_lock", counting_lock)
-                for module in (dedup, ingest, summarize)
+                for module in (dedup, summarize)
             ] + [
                 unittest.mock.patch.object(module, "chat", counting_chat(step))
                 for module, step in ((dedup, "dedup"), (summarize, "summarize"))

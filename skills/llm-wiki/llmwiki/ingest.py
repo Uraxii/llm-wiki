@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-from llmwiki.core import Kb, append_log_entry, as_list, flatten, kb_lock
+from llmwiki.core import Kb, append_log_entry, as_list, flatten
 from llmwiki.model import ModelError, step_is_configured
 from llmwiki import dedup, fetch, feeds, sources, summarize, vectors
 
@@ -77,14 +77,20 @@ def _pipeline(root: Path, digest: str) -> str | None:
     summarize takes and releases its own commit lock per digest, and
     dedup.place takes one short lock per digest to recheck and write.
 
-    The sweep after placement keeps a lock of its own, but placement no
-    longer shares it, so a story page can exist for a moment with no
-    vector row while no process holds the lock. The invariant that
-    survives is the weaker one: no story page is left without a vector
-    row once the placing process exits. A reader that calls
-    vectors.neighbours inside that window misses one vector-only
-    candidate, which at worst costs a duplicate story, which `rebuild`
-    repairs. See section 5 of the D9 design."""
+    The sweep after placement holds no lock either. Holding one there
+    put an embed call, and a walk and hash of the WHOLE wiki, inside the
+    lock: ~1.2s at 500 pages with a 1s embed, which is D9 again at a
+    fleet of about 25 agents.
+
+    So a story page can exist for a moment with no vector row while no
+    process holds the lock, and if this process is killed between the
+    two it stays that way. The honest invariant is convergence, not
+    completeness: every page without a current vector row gets one on
+    the next sweep, and both `ingest.run` and `llmwiki embed` sweep the
+    whole wiki. A reader that calls vectors.neighbours inside that
+    window misses one vector-only candidate, which at worst costs a
+    duplicate story, which `rebuild` repairs. See section 5 of the D9
+    design, and its falsification row for this trade."""
     kb = Kb(root)
     if summarize.run(root, [digest]) != 0:
         return "summarize"
@@ -100,16 +106,15 @@ def _pipeline(root: Path, digest: str) -> str | None:
     placed, attempted = dedup.place(kb, [digest])
     if placed != attempted:
         return "dedup"
-    with kb_lock(kb.root):
-        # dedup may write a new story page (a join or a fresh one) and
-        # always rewrites the summary's own frontmatter (the `story:`
-        # back-reference), so both sweeps here are real, not redundant:
-        # the first sweep's vector for the summary is stale the moment
-        # dedup touches it. Sweeping again is how "no wiki page lacks a
-        # current vector after ingest" holds even for the story the
-        # last source in a batch creates.
-        if not _sweep_or_fail(kb):
-            return "embed"
+    # dedup may write a new story page (a join or a fresh one) and
+    # always rewrites the summary's own frontmatter (the `story:`
+    # back-reference), so both sweeps here are real, not redundant: the
+    # first sweep's vector for the summary is stale the moment dedup
+    # touches it. Sweeping again is how "no wiki page lacks a current
+    # vector after ingest" holds even for the story the last source in
+    # a batch creates.
+    if not _sweep_or_fail(kb):  # NO LOCK: vectors converge on their own
+        return "embed"
     return None
 
 

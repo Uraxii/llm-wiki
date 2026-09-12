@@ -29,11 +29,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wik
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llmwiki.core import (  # noqa: E402
     Kb,
+    holds_kb_lock,
     kb_lock,
     parse_frontmatter,
     render_frontmatter,
 )
-from llmwiki import dedup  # noqa: E402
+from llmwiki import dedup, ingest, vectors  # noqa: E402
+from fake_endpoint import FakeEndpoint  # noqa: E402
+from kb_config import config_toml  # noqa: E402
 
 SUMMARY_TITLE = "Report Zero"
 SHARED_IDENTIFIER = "tag:shared"
@@ -265,6 +268,55 @@ class PlaceRefusesUnderTheKbLock(_OneStorylessSummary):
                 _quiet(dedup.place, Kb(self.root), None)
         self.assertLess(time.monotonic() - started, 5.0)
         self.assertIn("kb lock", str(caught.exception))
+
+
+class EmbedCallsOutsideTheKbLock(_OneStorylessSummary):
+    """ingest.py `_pipeline`. The sweep after placement used to run
+    under the kb lock, which put an embed call AND a walk and hash of
+    the whole wiki inside it. That hold is D9 all over again: long,
+    paid, and shared, so the next agent waits it out. Every embed call
+    on the real ingest path must happen with no lock held."""
+
+    def _respond(self, path: str, body: dict) -> dict:
+        if path == "/embeddings":
+            return {
+                "data": [
+                    {"index": index, "embedding": [float(len(text)), 1.0, 0.0]}
+                    for index, text in enumerate(body["input"])
+                ]
+            }
+        content = body["messages"][0]["content"]
+        if "=== NEW SUMMARY ===" in content:
+            return {"choices": [{"message": {"content": "NONE"}}]}
+        page = (
+            "---\nkind: summary\ntitle: Report One\n"
+            f"identifiers: [{SHARED_IDENTIFIER}]\n---\n\nAbstract for report one.\n"
+        )
+        return {"choices": [{"message": {"content": page}}]}
+
+    def test_no_embed_call_runs_while_the_kb_lock_is_held(self) -> None:
+        source = self.tmp / "report-one.md"
+        source.write_text("source one text")
+        held_at_embed: list[bool] = []
+        real_embed = vectors.embed
+
+        def recording_embed(target, texts):
+            held_at_embed.append(holds_kb_lock())
+            return real_embed(target, texts)
+
+        with FakeEndpoint(self._respond) as fake:
+            (self.root / "config.toml").write_text(
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "dedup": "cheap", "embed": "cheap"},
+                    extra=f"[identifiers.{SHARED_IDENTIFIER.split(':')[0]}]\n",
+                )
+            )
+            with mock.patch.object(vectors, "embed", recording_embed):
+                self.assertEqual(_quiet(ingest.run, self.root, [str(source)]), 0)
+
+        self.assertTrue(held_at_embed, "no embed call was made, so nothing was proved")
+        self.assertNotIn(True, held_at_embed)
 
 
 if __name__ == "__main__":
