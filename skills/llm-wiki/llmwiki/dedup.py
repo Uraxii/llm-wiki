@@ -131,6 +131,18 @@ class Story(NamedTuple):
     members: list[str]  # summary source hashes, arrival order
 
 
+class Placement(NamedTuple):
+    """One judged answer about where a summary belongs.
+
+    `candidate_stems` is every candidate the judge was shown, and it is
+    the whole version token: a placement is still good when the same
+    view would show the judge nothing new."""
+
+    target: Story | None  # the story to join, or None to start one
+    model_id: str  # the judge that decided, or "none"
+    candidate_stems: frozenset[str]
+
+
 def normalise(value: str) -> str:
     """NFKC-normalise, casefold, strip, and collapse internal whitespace
     runs to one space, so an identifier joins on meaning, not spelling.
@@ -380,11 +392,11 @@ def _load_wiki(kb: Kb) -> tuple[dict[str, Page], dict[Path, Story], list[Page]]:
     return summaries, stories, agent_pages
 
 
-def _pick_target(
+def _candidate_stories(
     kb: Kb, summary: Page, stories: dict[Path, Story]
-) -> tuple[Story | None, str]:
-    """The story `summary` should join, or `None` to start a new one,
-    plus the model id that decided it (or "none")."""
+) -> list[Story]:
+    """Every story worth judging `summary` against: the identifier
+    matches, unioned with the phase 13 vector seam's nearest stories."""
     extra: list[Story] = []
     # GATE (today's decision): vector neighbours are consulted only
     # when a dedup judge model is configured. With no judge, `judge`
@@ -393,23 +405,43 @@ def _pick_target(
     # and the closest unrelated pair measured in the arena corpus is
     # 0.6922 similarity. With no dedup model, dedup must behave
     # exactly as it does today.
-    target = _dedup_target(kb)
-    if target is not None:
+    if _dedup_target(kb) is not None:
         for _score, path in vectors.neighbours(kb, summary.path, "story"):
             story = stories.get(path)
             if story is not None:
                 extra.append(story)
-    cands = candidates(summary, stories.values(), extra)
-    return judge(kb, summary, cands), target.id if target is not None else "none"
+    return candidates(summary, stories.values(), extra)
 
 
-def _place_summary(
-    kb: Kb, digest: str, summary: Page, summaries: dict[str, Page], stories: dict[Path, Story]
+def _decide(kb: Kb, summary: Page, stories: dict[Path, Story]) -> Placement:
+    """Where `summary` belongs, judged against `stories`. This is the
+    half that calls the judge model."""
+    target = _dedup_target(kb)
+    cands = _candidate_stories(kb, summary, stories)
+    return Placement(
+        judge(kb, summary, cands),
+        target.id if target is not None else "none",
+        frozenset(story.path.stem for story in cands),
+    )
+
+
+def _commit(
+    kb: Kb,
+    digest: str,
+    summary: Page,
+    placement: Placement,
+    summaries: dict[str, Page],
+    stories: dict[Path, Story],
 ) -> tuple[Story, str] | None:
-    """Join or start a story for `summary`. Returns `(story, action)`
-    with `action` "new" or "joined" on success, `None` when self-lint
-    dropped the write."""
-    target, model_id = _pick_target(kb, summary, stories)
+    """Write `placement`'s answer for `digest`. Returns `(story,
+    action)` with `action` "new" or "joined" on success, `None` when
+    self-lint dropped the write. CALLER MUST HOLD kb_lock.
+
+    The target story is re-read from `stories` rather than taken from
+    `placement.target`, and members, identifiers, and the seen range are
+    recomputed from `summaries`, so whatever another writer added since
+    the decision is carried forward instead of overwritten."""
+    target = None if placement.target is None else stories[placement.target.path]
 
     is_new = target is None
     if is_new:
@@ -425,13 +457,22 @@ def _place_summary(
 
     identifiers = _union_identifiers(members, summaries)
     first_seen, last_seen = _seen_range(members, summaries)
-    fields = _new_fields(title, identifiers, first_seen, last_seen, model_id)
+    fields = _new_fields(title, identifiers, first_seen, last_seen, placement.model_id)
     story = Story(path, fields, members)
 
     sources = {**summaries, digest: summary}
     if not _write_story(kb, story, digest, summary, sources, is_new):
         return None
     return story, action
+
+
+def _place_summary(
+    kb: Kb, digest: str, summary: Page, summaries: dict[str, Page], stories: dict[Path, Story]
+) -> tuple[Story, str] | None:
+    """Join or start a story for `summary`, deciding and committing
+    under one hold. CALLER MUST HOLD kb_lock."""
+    placement = _decide(kb, summary, stories)
+    return _commit(kb, digest, summary, placement, summaries, stories)
 
 
 def _target_digests(digests: list[str] | None, summaries: dict[str, Page]) -> list[str]:
