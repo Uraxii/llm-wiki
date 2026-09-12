@@ -126,11 +126,11 @@ SLUG_SUFFIX_LEN = 8  # hex chars of the first member hash, for a title collision
 # back.
 JUDGE_TEMPERATURE = 0.0
 
-# How many times one digest may be judged before it is left for a later
-# run. Two: the first decision, and one re-judge when a rival writer
-# changed the candidate set while the first was in flight. A third would
-# buy a rarer case at the cost of a third paid model call, and a digest
-# left story-less is legal state `_target_digests` picks up next run.
+# How many times one digest may be judged before `_place_once` stops
+# re-judging and settles on what it has. Two: the first decision, and
+# one re-judge when a rival writer changed the candidate set while the
+# first was in flight. A third would buy a rarer case at the cost of a
+# third paid model call, and the last attempt writes either way.
 PLACEMENT_ATTEMPTS = 2
 
 
