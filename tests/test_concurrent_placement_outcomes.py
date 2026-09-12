@@ -213,7 +213,9 @@ class RecreatedStoryPath(_OneStorylessSummary):
             Acme outage; a concurrent rebuild then recreated that path
             over an unrelated subject."""
             self.write_story("acme-outage", "Zeta Launch", [])
-            return dedup.Placement(stale, "none", frozenset({"acme-outage"}))
+            return dedup.Placement(
+                stale, "none", frozenset({dedup._story_subject(stale)})
+            )
 
         with mock.patch.object(dedup, "_decide", judged_against_the_old_page):
             placed, attempted = _quiet(dedup.place, Kb(self.root), None)

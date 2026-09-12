@@ -141,13 +141,31 @@ class Story(NamedTuple):
 class Placement(NamedTuple):
     """One judged answer about where a summary belongs.
 
-    `candidate_stems` is every candidate the judge was shown, and it is
-    the whole version token: a placement is still good when the same
-    view would show the judge nothing new."""
+    `candidate_subjects` is the subject of every candidate the judge was
+    shown, and it is the whole version token: a placement is still good
+    when the same view would show the judge nothing new."""
 
     target: Story | None  # the story to join, or None to start one
     model_id: str  # the judge that decided, or "none"
-    candidate_stems: frozenset[str]
+    candidate_subjects: frozenset[tuple[str, str]]
+
+
+def _story_subject(story: Story) -> tuple[str, str]:
+    """What a story is ABOUT, as far as a recheck can tell: its path
+    stem and its title.
+
+    A bare path stem is not an identity. `rebuild` recreates story paths
+    from titles, so `acme-outage.md` can be deleted and remade covering
+    something else entirely, and a recheck asking only "is that path
+    still there" would append the digest to the wrong story. The title
+    is what moves when the subject moves.
+
+    Members, identifiers, and the seen range are deliberately not in
+    here. They churn every time another writer joins the same story,
+    and none of that changes whose subject it covers; folding them in
+    would fail the recheck on ordinary concurrent joins and turn a
+    correct outcome into a contended one."""
+    return story.path.stem, str(story.fields.get("title", ""))
 
 
 def normalise(value: str) -> str:
@@ -428,7 +446,7 @@ def _decide(kb: Kb, summary: Page, stories: dict[Path, Story]) -> Placement:
     return Placement(
         judge(kb, summary, cands),
         target.id if target is not None else "none",
-        frozenset(story.path.stem for story in cands),
+        frozenset(_story_subject(story) for story in cands),
     )
 
 
@@ -502,21 +520,24 @@ def _placement_holds(
     """True when `placement`, judged against an older view, is still the
     answer `stories` supports.
 
-    A join depends only on the chosen story still existing. Another
-    member arriving does not change whose subject it covers, and
-    `_commit` recomputes the member list from the fresh view anyway.
-    A new story depends only on no candidate having appeared that the
-    judge was never shown; a candidate that disappeared was rejected
-    already."""
+    A join depends only on the chosen story still covering the subject
+    it was chosen for. Another member arriving does not change that,
+    and `_commit` recomputes the member list from the fresh view
+    anyway. A new story depends only on no candidate having appeared
+    that the judge was never shown; a candidate that disappeared was
+    rejected already. Both questions are asked of `_story_subject`,
+    never of a bare path."""
     if placement.target is not None:
         return _target_survives(placement.target, stories)
     fresh = _candidate_stories(kb, summary, stories)
-    return {story.path.stem for story in fresh} <= placement.candidate_stems
+    return {_story_subject(story) for story in fresh} <= placement.candidate_subjects
 
 
 def _target_survives(target: Story, stories: dict[Path, Story]) -> bool:
-    """True when the story `target` names is still there to be joined."""
-    return target.path in stories
+    """True when the story `target` names is still there, still covering
+    the subject the judge chose it for."""
+    fresh = stories.get(target.path)
+    return fresh is not None and _story_subject(fresh) == _story_subject(target)
 
 
 def _supported(placement: Placement, stories: dict[Path, Story]) -> Placement:
