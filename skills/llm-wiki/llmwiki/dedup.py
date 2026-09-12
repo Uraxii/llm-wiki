@@ -508,22 +508,48 @@ def _placement_holds(
     judge was never shown; a candidate that disappeared was rejected
     already."""
     if placement.target is not None:
-        return placement.target.path in stories
+        return _target_survives(placement.target, stories)
     fresh = _candidate_stories(kb, summary, stories)
     return {story.path.stem for story in fresh} <= placement.candidate_stems
 
 
-def _place_once(kb: Kb, digest: str) -> tuple[Story, str] | None:
+def _target_survives(target: Story, stories: dict[Path, Story]) -> bool:
+    """True when the story `target` names is still there to be joined."""
+    return target.path in stories
+
+
+def _supported(placement: Placement, stories: dict[Path, Story]) -> Placement:
+    """`placement` with a join the fresh view no longer supports demoted
+    to a new story. The judge's reason for joining that story went with
+    the story, and NONE is the only other answer it could have given."""
+    if placement.target is None or _target_survives(placement.target, stories):
+        return placement
+    return placement._replace(target=None)
+
+
+def _place_once(kb: Kb, digest: str) -> tuple[Story | None, str] | None:
     """Place one summary: judge with no lock held, then take the kb lock
     for as long as it takes to confirm the decision still stands and
-    write it. Returns `(story, action)` on success and `None` on a drop,
-    which is the summary having vanished, self-lint refusing the write,
-    another writer having placed this digest first, or the decision
-    losing its race PLACEMENT_ATTEMPTS times.
+    write it. Three answers, and the caller must tell them apart:
+
+    `(story, "new" | "joined")`: this run wrote `story`.
+    `(None, action)`: another writer placed the digest while this one
+    judged. The work exists on disk, so the digest counts as placed and
+    there is nothing left for this run to write.
+    `None`: a genuine drop. The summary vanished, or self-lint refused
+    the write.
+
+    The last attempt settles instead of retrying. A recheck that keeps
+    failing means rival writers keep moving the candidate set, and
+    giving up there leaves the digest story-less while telling the
+    caller the run failed, which `ingest` reports as a failed source
+    that nothing ever retries. Settling costs at worst a duplicate
+    story, and repairing those is what `rebuild` is for.
 
     CALLER MUST NOT HOLD kb_lock: the lock is not re-entrant, so a
     caller holding it deadlocks itself here."""
-    for _attempt in range(PLACEMENT_ATTEMPTS):
+    for attempt in range(PLACEMENT_ATTEMPTS):
+        last = attempt == PLACEMENT_ATTEMPTS - 1
         summaries, stories, _agent_pages = _load_wiki(kb)
         summary = _summary_or_drop(kb, digest, summaries)
         if summary is None:
@@ -540,12 +566,20 @@ def _place_once(kb: Kb, digest: str) -> tuple[Story, str] | None:
                 # `rebuild`'s job, so a digest another writer placed
                 # while this one judged is left alone.
                 append_log_entry(
-                    kb.log, "dedup", f"{digest}: dropped (placed by another writer)"
+                    kb.log, "dedup", f"{digest}: already placed by another writer"
                 )
-                return None
-            if _placement_holds(kb, placement, summary, stories):
-                return _commit(kb, digest, summary, placement, summaries, stories)
-    append_log_entry(kb.log, "dedup", f"{digest}: dropped (placement contended)")
+                return None, "already placed by another writer"
+            if not _placement_holds(kb, placement, summary, stories):
+                if not last:
+                    continue
+                append_log_entry(
+                    kb.log,
+                    "dedup",
+                    f"{digest}: placement contended, settled on the last attempt",
+                )
+            return _commit(
+                kb, digest, summary, _supported(placement, stories), summaries, stories
+            )
     return None
 
 
@@ -580,12 +614,14 @@ def _replay(
     summaries: dict[str, Page],
     stories: dict[Path, Story],
     agent_pages: list[Page],
-    place_one: Callable[[str, Page], tuple[Story, str] | None],
+    place_one: Callable[[str, Page], tuple[Story | None, str] | None],
 ) -> int:
     """Place a story for each digest in `targets`, in order, through
     `place_one`, accumulating into `stories`. Returns the number placed;
     fewer than len(targets) means something was dropped or a model error
-    cut the run short.
+    cut the run short. A digest another writer placed first counts as
+    placed: the work is on disk, and the caller asked for it to be
+    there, not for this process to be the one that wrote it.
 
     `place_one` is where the two callers differ, and it is the whole
     reason `rebuild`'s whole-run lock and `place`'s per-digest lock never
@@ -616,6 +652,12 @@ def _replay(
         if result is None:
             continue
         story, action = result
+        if story is None:
+            # Another writer placed this digest and logged its own line
+            # under the lock. Nothing to record, nothing to push, and
+            # the digest is placed.
+            placed += 1
+            continue
         stories[story.path] = story
         append_log_entry(kb.log, "dedup", f"{digest} -> {story.path.stem} ({action})")
         push(kb, summary, agent_pages)
