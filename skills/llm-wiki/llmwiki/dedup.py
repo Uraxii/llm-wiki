@@ -9,6 +9,7 @@ shares an identifier with a page the CLI does not own.
 from __future__ import annotations
 
 import re
+import sqlite3
 import sys
 import unicodedata
 from collections.abc import Callable, Iterable, Sequence
@@ -546,40 +547,52 @@ def _place_once(kb: Kb, digest: str) -> tuple[Story | None, str] | None:
     that nothing ever retries. Settling costs at worst a duplicate
     story, and repairing those is what `rebuild` is for.
 
+    A candidate story unlinked while the judge prompt was being read (a
+    concurrent `rebuild` deletes every story page), and a vector
+    database locked by another process's sweep, are both the world
+    moving under a decision taken with no lock held. Each costs an
+    attempt and is answered by judging again against what is on disk
+    now. The last attempt has nothing left to judge with, so it lets
+    the error out and `_replay` logs the drop.
+
     CALLER MUST NOT HOLD kb_lock: the lock is not re-entrant, so a
     caller holding it deadlocks itself here."""
     for attempt in range(PLACEMENT_ATTEMPTS):
         last = attempt == PLACEMENT_ATTEMPTS - 1
-        summaries, stories, _agent_pages = _load_wiki(kb)
-        summary = _summary_or_drop(kb, digest, summaries)
-        if summary is None:
-            return None
-        placement = _decide(kb, summary, stories)
-        with kb_lock(kb.root):
+        try:
             summaries, stories, _agent_pages = _load_wiki(kb)
             summary = _summary_or_drop(kb, digest, summaries)
             if summary is None:
                 return None
-            if summary.fields.get("story"):
-                # `_target_digests`' rule, re-applied where the view is
-                # authoritative: moving a summary between stories is
-                # `rebuild`'s job, so a digest another writer placed
-                # while this one judged is left alone.
-                append_log_entry(
-                    kb.log, "dedup", f"{digest}: already placed by another writer"
+            placement = _decide(kb, summary, stories)
+            with kb_lock(kb.root):
+                summaries, stories, _agent_pages = _load_wiki(kb)
+                summary = _summary_or_drop(kb, digest, summaries)
+                if summary is None:
+                    return None
+                if summary.fields.get("story"):
+                    # `_target_digests`' rule, re-applied where the view
+                    # is authoritative: moving a summary between stories
+                    # is `rebuild`'s job, so a digest another writer
+                    # placed while this one judged is left alone.
+                    append_log_entry(
+                        kb.log, "dedup", f"{digest}: already placed by another writer"
+                    )
+                    return None, "already placed by another writer"
+                if not _placement_holds(kb, placement, summary, stories):
+                    if not last:
+                        continue
+                    append_log_entry(
+                        kb.log,
+                        "dedup",
+                        f"{digest}: placement contended, settled on the last attempt",
+                    )
+                return _commit(
+                    kb, digest, summary, _supported(placement, stories), summaries, stories
                 )
-                return None, "already placed by another writer"
-            if not _placement_holds(kb, placement, summary, stories):
-                if not last:
-                    continue
-                append_log_entry(
-                    kb.log,
-                    "dedup",
-                    f"{digest}: placement contended, settled on the last attempt",
-                )
-            return _commit(
-                kb, digest, summary, _supported(placement, stories), summaries, stories
-            )
+        except (FileNotFoundError, sqlite3.OperationalError):
+            if last:
+                raise
     return None
 
 
@@ -638,13 +651,14 @@ def _replay(
         except ModelError as exc:
             print(f"llmwiki: dedup: {exc}", file=sys.stderr)
             break
-        except FileNotFoundError as exc:
-            # A page read while building the judge prompt (the
-            # summary itself, or a candidate story) vanished after
-            # _load_wiki snapshotted it. Unlike a reader glob that
-            # just drops a vanished row, this digest's target is
-            # gone: log it as a drop, same as any other dropped
-            # write, and move on to the next digest.
+        except (FileNotFoundError, sqlite3.OperationalError) as exc:
+            # `_place_once` already spent every attempt re-judging this.
+            # A page read while building the judge prompt (the summary
+            # itself, or a candidate story) is still vanishing, or the
+            # vector database another process sweeps is still locked.
+            # Unlike a reader glob that just drops a vanished row, this
+            # digest's target is gone: log it as a drop, same as any
+            # other dropped write, and move on to the next digest.
             append_log_entry(
                 kb.log, "dedup", f"{digest}: dropped (target vanished: {exc})"
             )
