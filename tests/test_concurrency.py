@@ -53,7 +53,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills" / "llm-wiki"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from llmwiki.core import Kb, as_list, parse_frontmatter, render_frontmatter  # noqa: E402
+from llmwiki.core import Kb, as_list, parse_frontmatter, render_frontmatter, slugify  # noqa: E402
 from llmwiki import summarize, vectors  # noqa: E402
 from fake_endpoint import FakeEndpoint  # noqa: E402
 from kb_config import config_toml  # noqa: E402
@@ -534,6 +534,133 @@ class Hazard4RollbackDeletesRival(unittest.TestCase):
             "another process's rollback deleted it out from under a "
             "writer that had already committed and exited 0",
         )
+
+
+class D9ConcurrentIngestWithJudge(unittest.TestCase):
+    """ingest.py:91 and dedup.py:551. Two `llmwiki ingest` OS processes
+    against one kb with `[models] dedup` set must both exit 0. Today the
+    first process holds the kb lock across its judge call, so the second
+    waits out LOCK_WAIT_TIMEOUT_SEC and dies with KbBusy."""
+
+    ALPHA_SOURCE = "alpha source text"
+    BETA_SOURCE = "beta source text"
+    ALPHA_TITLE = "Alpha Report"
+    BETA_TITLE = "Beta Report"
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / ".kb"
+        for sub in ("wiki", "sources"):
+            (self.root / sub).mkdir(parents=True)
+        (self.root / "log.md").write_text("# log\n")
+        # A story both summaries can join, so `candidates` is non-empty
+        # and `judge` actually reaches the endpoint (dedup.py:208-209
+        # returns before the call for an empty candidate list).
+        (self.root / "wiki" / "foo.md").write_text(
+            render_frontmatter(
+                {"kind": "story", "title": "Foo", "members": [],
+                 "identifiers": ["tag:shared"]},
+                "placeholder body",
+            )
+        )
+        self.alpha_path = self._source_file("alpha.md", self.ALPHA_SOURCE)
+        self.beta_path = self._source_file("beta.md", self.BETA_SOURCE)
+
+    def _source_file(self, name: str, text: str) -> Path:
+        # Outside the kb: `ingest` reads the file and stores the bytes
+        # itself, which is the path D9 lives on.
+        path = self.tmp / name
+        path.write_text(text)
+        return path
+
+    def _summary_reply(self, title: str) -> dict:
+        page = (
+            f"---\nkind: summary\ntitle: {title}\n"
+            "identifiers: [tag:shared]\n---\n\n"
+            f"Abstract for {title}.\n"
+        )
+        return {"choices": [{"message": {"content": page}}]}
+
+    def _ingest(self, source: Path, env: dict) -> subprocess.Popen:
+        cmd = [sys.executable, "-m", "llmwiki", "--kb", str(self.root),
+               "ingest", str(source)]
+        return subprocess.Popen(
+            cmd, cwd=str(REPO_ROOT), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+    def test_concurrent_ingest_with_a_judge_model(self) -> None:
+        """The correct outcome: both ingests exit 0 and both summaries
+        join `foo`. Fails today: process beta reaches its judge call
+        holding the kb lock for the whole of `dedup.place`, so process
+        alpha's own summarize commit lock waits out
+        LOCK_WAIT_TIMEOUT_SEC and raises KbBusy, which `_ingest_one`
+        turns into `summarize failed` and a nonzero exit.
+
+        Deadlock check: only the beta process is ever made to wait, on
+        an `Event` this thread sets once alpha has finished or timed
+        out. Alpha waits on nothing this test controls. Beta's stall
+        therefore lasts as long as alpha takes, which is exactly the
+        pre-fix 30s lock wait, and is bounded by the endpoint's own 60s
+        timeout (model.py:16) either way.
+        """
+        beta_judging = threading.Event()
+        release_beta = threading.Event()
+
+        def respond(_path: str, body: dict) -> dict:
+            content = body["messages"][0]["content"]
+            if "=== NEW SUMMARY ===" not in content:
+                title = (
+                    self.BETA_TITLE if self.BETA_SOURCE in content
+                    else self.ALPHA_TITLE
+                )
+                return self._summary_reply(title)
+            if f"title: {self.BETA_TITLE}" in content:
+                beta_judging.set()
+                release_beta.wait(timeout=90)
+            return {"choices": [{"message": {"content": "foo"}}]}
+
+        env = _subprocess_env()
+        with FakeEndpoint(respond, concurrent=True) as fake:
+            (self.root / "config.toml").write_text(
+                config_toml(
+                    fake.url,
+                    {"summarize": "cheap", "dedup": "cheap"},
+                    extra="[identifiers.tag]\n",
+                )
+            )
+            proc_beta = self._ingest(self.beta_path, env)
+            self.assertTrue(
+                beta_judging.wait(timeout=30),
+                "the beta process never reached its judge call",
+            )
+
+            proc_alpha = self._ingest(self.alpha_path, env)
+            try:
+                out_alpha, err_alpha = proc_alpha.communicate(timeout=60)
+            except subprocess.TimeoutExpired:
+                out_alpha = err_alpha = None
+
+            release_beta.set()
+            out_beta, err_beta = proc_beta.communicate(timeout=60)
+            if out_alpha is None:
+                out_alpha, err_alpha = proc_alpha.communicate(timeout=60)
+
+        self.assertEqual(
+            proc_alpha.returncode, 0,
+            "the second agent's ingest failed while the first held the "
+            f"kb lock across its judge call: {err_alpha}",
+        )
+        self.assertEqual(proc_beta.returncode, 0, err_beta)
+
+        alpha_fields = _fields(self.root, slugify(self.ALPHA_TITLE))
+        beta_fields = _fields(self.root, slugify(self.BETA_TITLE))
+        self.assertEqual(alpha_fields["story"], "foo")
+        self.assertEqual(beta_fields["story"], "foo")
+        members = _fields(self.root, "foo")["members"]
+        self.assertIn(alpha_fields["source"], members)
+        self.assertIn(beta_fields["source"], members)
 
 
 if __name__ == "__main__":
