@@ -253,11 +253,17 @@ class GlobalStoreFallbackTest(TmpDirTest):
         self.assertEqual(out.strip(), str(repo / ".kb"))
 
     def test_plain_directory_stays_silent(self) -> None:
+        # Ceilinged at self.tmp so this stays hermetic: whatever sits
+        # above the test's own tempdir (a stray `.git`, a real repo)
+        # can never leak into the resolution this test is checking.
         plain = self.tmp / "not-a-repo"
         plain.mkdir()
-        code, out, err = self.where_from(plain)
-        self.assertEqual((code, err), (0, ""))
-        self.assertEqual(out.strip(), str(GLOBAL_STORE))
+        with contextlib.chdir(plain):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                root = cli.resolve_root(None, for_init=False, ceiling=self.tmp)
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(root, GLOBAL_STORE)
 
 
 class VersionTest(TmpDirTest):

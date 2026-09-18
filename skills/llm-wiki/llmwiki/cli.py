@@ -112,11 +112,15 @@ def _init_files() -> dict[str, str]:
     }
 
 
-def resolve_root(explicit: str | None, for_init: bool) -> Path:
+def resolve_root(
+    explicit: str | None, for_init: bool, ceiling: Path | None = None
+) -> Path:
     """Resolve the kb root. `explicit` (from `--kb`) is used as-is when
     given. Otherwise `init` roots at `.kb` under the working directory;
     every other verb walks up from the working directory for an
-    existing `.kb`, falling back to the user's global store.
+    existing `.kb`, falling back to the user's global store. `ceiling`,
+    when given, is the last directory the walk examines; real CLI use
+    never sets it, so the walk still reaches the filesystem root.
 
     Falling back from inside a repository prints one stderr line naming
     that repository, because the silent version of this writes project
@@ -132,6 +136,8 @@ def resolve_root(explicit: str | None, for_init: bool) -> Path:
             return found
         if repo is None and (candidate / ".git").exists():
             repo = candidate
+        if candidate == ceiling:
+            break
     if repo is not None:
         print(
             f"llmwiki: no .kb in {repo}; using the global store "
