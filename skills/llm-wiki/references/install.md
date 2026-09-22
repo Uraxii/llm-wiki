@@ -22,7 +22,7 @@ so:
 
 ```
 ls ~/.claude/plugins/cache/llm-wiki/llm-wiki/      # the version directories
-uv tool install ~/.claude/plugins/cache/llm-wiki/llm-wiki/0.2.0/skills/llm-wiki
+uv tool install ~/.claude/plugins/cache/llm-wiki/llm-wiki/0.3.0/skills/llm-wiki
 ```
 
 For Codex, the same directory sits under `~/.codex/plugins/cache/llm-wiki/llm-wiki/<version>/skills/llm-wiki`.
