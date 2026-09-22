@@ -679,12 +679,15 @@ def _replay(
             # A page read while building the judge prompt (the summary
             # itself, or a candidate story) is still vanishing, or the
             # vector database another process sweeps is still locked.
-            # Unlike a reader glob that just drops a vanished row, this
-            # digest's target is gone: log it as a drop, same as any
-            # other dropped write, and move on to the next digest.
-            append_log_entry(
-                kb.log, "dedup", f"{digest}: dropped (target vanished: {exc})"
+            # Log it as a drop, same as any other dropped write, and
+            # move on to the next digest. Only a missing file means the
+            # target vanished; a database error is named as itself.
+            reason = (
+                "target vanished"
+                if isinstance(exc, FileNotFoundError)
+                else f"sqlite3.{type(exc).__name__}"
             )
+            append_log_entry(kb.log, "dedup", f"{digest}: dropped ({reason}: {exc})")
             continue
         if result is None:
             continue

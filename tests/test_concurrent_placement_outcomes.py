@@ -15,6 +15,7 @@ reproducer found the real interleaving with threads.
 import hashlib
 import io
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -199,6 +200,25 @@ class CandidateVanishesMidJudge(_OneStorylessSummary):
         self.assertEqual(len(judged), 2, "the digest was never re-judged")
         self.assertEqual((placed, attempted), (1, 1))
         self.assertEqual(_drop_lines(self.root), [])
+
+
+class DatabaseErrorOnEveryJudge(_OneStorylessSummary):
+    """dedup.py `_replay`. A digest dropped because the database stayed
+    locked through every attempt must be logged as that, not as a
+    target that vanished."""
+
+    def test_a_database_drop_is_not_logged_as_a_vanished_target(self) -> None:
+        def locked_decide(kb, summary, stories):
+            raise sqlite3.OperationalError("database is locked")
+
+        with mock.patch.object(dedup, "_decide", locked_decide):
+            placed, attempted = _quiet(dedup.place, Kb(self.root), None)
+
+        self.assertEqual((placed, attempted), (0, 1))
+        self.assertEqual(
+            [line.split(": ", 1)[1].rsplit(" - ", 1)[0] for line in _drop_lines(self.root)],
+            ["dropped (sqlite3.OperationalError: database is locked)"],
+        )
 
 
 class RecreatedStoryPath(_OneStorylessSummary):
