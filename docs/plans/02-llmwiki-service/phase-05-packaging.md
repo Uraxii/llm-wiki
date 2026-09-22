@@ -78,7 +78,7 @@ nor worth a second code path.
 
 ### A legacy `[endpoint]` refuses, loudly, in `core.load_config`
 
-`core.load_config` (`core.py:98`) raises `ValueError` when the parsed table
+`core.load_config` (`core.py:117`) raises `ValueError` when the parsed table
 holds an `endpoint` key, naming the config path and the two variables that
 replace it. It already raises on a malformed file, so this is one more refusal
 on a path every caller shares rather than a new mechanism.
@@ -117,7 +117,7 @@ No migration script. Two scalars, a handful of kbs, and a refusal that names
 the edit is under the bar where a script pays for itself, and a script that
 rewrites `config.toml` would cross the ownership boundary to save one deletion.
 
-`CONFIG_TOML` (`cli.py:34-64`) loses its commented `[endpoint]` block and gains
+`CONFIG_TOML` (`cli.py:35-85`) loses its commented `[endpoint]` block and gains
 one comment line naming the two variables, so a kb created after this phase
 never carries the section that would refuse.
 
@@ -279,7 +279,7 @@ entry named the venv interpreter path on the host, per the standing rule that
 `[jobs]` holds `feed` XOR `urls` plus `mode` and never an interpreter. Now it
 names the image and the verb, and the interpreter path is baked into the image
 where it cannot drift from the venv it belongs to. `[jobs]` is unchanged, still
-read from each kb's `config.toml` by `ingest.run_job` (`ingest.py:173`).
+read from each kb's `config.toml` by `ingest.run_job` (`ingest.py:187`).
 
 Four consequences, stated rather than discovered:
 
@@ -293,7 +293,7 @@ Four consequences, stated rather than discovered:
   `search` embeds the query. This is the same environment for both, which is
   the point of the section above.
 - **Concurrency is already handled.** The job writes while the service reads.
-  Phase 14's `core.kb_lock` (`core.py:66`) serializes writers, and phase 3
+  Phase 14's `core.kb_lock` (`core.py:83`) serializes writers, and phase 3
   establishes that read routes take no lock and see content at most one write
   stale. A job run that finds the kb busy exits nonzero and the scheduler's
   next tick runs it again. Nothing retries in process.

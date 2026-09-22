@@ -359,12 +359,14 @@ class DedupTest(unittest.TestCase):
         self._write_summary("summary-file", digest, "Malformed Widget", ["tag:multi"])
         self._write_config('[models]\nsummarize = "cheap"\ndedup = 123\n\n[identifiers.tag]\n')
 
-        from llmwiki.core import Kb, kb_lock
+        from llmwiki.core import Kb
         from llmwiki.model import ModelError
 
+        # No kb_lock around this call. `place` takes its own lock per
+        # digest, and the lock is not re-entrant, so holding one here
+        # would stall for the whole lock timeout and die with KbBusy.
         with self.assertRaises(ModelError) as ctx:
-            with kb_lock(self.root):
-                dedup.place(Kb(self.root), None)
+            dedup.place(Kb(self.root), None)
         self.assertIn("[models].dedup", str(ctx.exception))
         self.assertIn("not a string", str(ctx.exception))
 

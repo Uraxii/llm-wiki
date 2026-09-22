@@ -44,11 +44,15 @@ first and serialize only the true invariant.
   change: `BUSY_TIMEOUT_MS` is 5000 and `sqlite3.connect`'s implicit default
   is also 5000 ms. An earlier note in this phase recorded that line as a fix.
   It is not one.
-- Story placement takes an exclusive lock spanning snapshot to write, not
-  just the write. Narrower than the snapshot reinstates the duplicate-story
-  races verbatim. With `[models] dedup` unset, the recommended setting, that
-  span makes no model call, so it serializes milliseconds of disk work while
-  `summarize` and `embed` stay concurrent.
+- Story placement judges with no lock held, then takes the exclusive lock
+  only to recheck and write. Under the lock it re-reads the wiki and asks
+  whether the judged answer still holds: the chosen story still covers the
+  same subject, or, for a new story, no candidate appeared that the judge
+  was never shown. When the answer no longer holds it re-judges once. The
+  recheck is what keeps the duplicate-story races closed with a lock
+  narrower than snapshot to write, so a paid judge call never sits inside
+  the lock. The last attempt writes either way, and any duplicate that leaves
+  is repaired by `dedup --rebuild`.
 - `dedup --rebuild` takes the exclusive lock for the whole run. It unlinks
   every story page at `dedup.py:467`, and decision row 27 already accepts a
   window where summaries carry no story. That window is safe alone and unsafe
