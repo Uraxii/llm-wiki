@@ -255,6 +255,57 @@ class PlacementKeepsLosingItsRace(_OneStorylessSummary):
         self.assertTrue(_fields(self.root, "summary-zero").get("story"))
 
 
+class RivalStoryLandsMidJudge(_OneStorylessSummary):
+    """dedup.py `_placement_holds`. Writer B judges "new story" against
+    an empty wiki while writer A writes a story sharing B's identifier.
+    The recheck under the lock must see that rival, re-judge, and join
+    it. Committing the stale answer leaves two stories on one subject."""
+
+    def test_a_rival_story_landing_mid_judge_is_joined_not_duplicated(self) -> None:
+        rival_digest = hashlib.sha256(b"source one").hexdigest()
+        (self.root / "sources" / f"{rival_digest}.txt").write_text("source one")
+        (self.root / "wiki" / "summary-one.md").write_text(
+            render_frontmatter(
+                {
+                    "kind": "summary",
+                    "title": "Report One",
+                    "source": rival_digest,
+                    "identifiers": [SHARED_IDENTIFIER],
+                    "fetched": "2026-01-02T00:00:00Z",
+                },
+                "Abstract for report one.\n",
+            )
+        )
+        real_decide = dedup._decide
+        judged: list[str] = []
+
+        def writer_a_places_during_b_first_judge(kb, summary, stories):
+            digest = str(summary.fields["source"])
+            judged.append(digest)
+            placement = real_decide(kb, summary, stories)
+            if digest == self.digest and judged.count(self.digest) == 1:
+                writer_a = threading.Thread(
+                    target=_quiet, args=(dedup.place, Kb(self.root), [rival_digest])
+                )
+                writer_a.start()
+                writer_a.join(timeout=60)
+            return placement
+
+        with mock.patch.object(dedup, "_decide", writer_a_places_during_b_first_judge):
+            placed, attempted = _quiet(dedup.place, Kb(self.root), [self.digest])
+
+        self.assertEqual((placed, attempted), (1, 1))
+        self.assertEqual(judged.count(self.digest), 2, "writer B was never re-judged")
+        rival_story = _fields(self.root, "summary-one")["story"]
+        self.assertEqual(_fields(self.root, "summary-zero")["story"], rival_story)
+        stories = [
+            path.stem
+            for path in (self.root / "wiki").glob("*.md")
+            if _fields(self.root, path.stem)["kind"] == "story"
+        ]
+        self.assertEqual(stories, [rival_story])
+
+
 class PlaceRefusesUnderTheKbLock(_OneStorylessSummary):
     """dedup.py `place`. Its "CALLER MUST NOT HOLD kb_lock" contract was
     enforced by a docstring alone. `kb_lock` is not re-entrant, so
