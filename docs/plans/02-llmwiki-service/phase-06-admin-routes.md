@@ -241,7 +241,7 @@ that differs from its own `strip()`.
 
 The recorded U+2028 footgun is closed at this commit. `flatten` collapses U+2028
 and U+2029 along with the C0 controls, DEL, and NEL (`core.flatten` at
-`core.py:111-115`), so `mint`'s `flatten(label) != label` guard now catches a
+`core.py:130-134`), so `mint`'s `flatten(label) != label` guard now catches a
 label carrying either. It did not always, which is why the footgun was
 recorded; it does now, and no new guard is needed for it.
 
@@ -303,7 +303,7 @@ Three rules hold it together.
   no principal, `by` is the client key the limiter counts on, which is an
   address or a token id and never a credential.
 - A label cannot forge a second line, because `mint` rejects any label
-  `flatten` would change (`core.flatten` at `core.py:111-115`).
+  `flatten` would change (`core.flatten` at `core.py:130-134`).
 
 Nothing else in the request path logs a credential either. The one existing
 per-request line is in `ForwardedHeaderMiddleware._resolve`

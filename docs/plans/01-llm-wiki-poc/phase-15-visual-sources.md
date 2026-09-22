@@ -42,7 +42,7 @@ A summary page written from an image is a `kind: summary` page like any other:
 same frontmatter keys, same `source:` digest, same identifiers, same body. So:
 
 - `lint`'s seven checks are all frontmatter checks. `_check_dangling_source`
-  (`lint.py:110-119`) asks only whether the `source:` digest is present in
+  (`lint.py:113-122`) asks only whether the `source:` digest is present in
   `sources/`, which it is. No check reads a source's bytes or its type.
 - `dedup` joins on identifiers and vectors over the summary text, not the
   source.

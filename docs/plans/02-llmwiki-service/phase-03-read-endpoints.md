@@ -187,7 +187,7 @@ measured differently.
 `core.flatten` are already plain functions.
 
 **`page` reads bytes, not text.** Do not use `core.read_page_text`. It decodes
-with `errors="replace"` by design (`core.py:223-227`), so a page holding one
+with `errors="replace"` by design (`core.py:242-246`), so a page holding one
 byte that is not valid UTF-8 comes back with U+FFFD where that byte was. That
 is right for a lint run and wrong for a route whose contract is the file. Call
 `Path.read_bytes`.
@@ -321,7 +321,7 @@ the cost this design declines.
 
 A page whose frontmatter does not parse has no `kind` and no `title`:
 `core.parse_frontmatter` returns `None` on any malformed block
-(`core.py:118-120`). List it with `kind` and `title` both null rather than
+(`core.py:137-145`). List it with `kind` and `title` both null rather than
 dropping it. A page the wiki holds and the listing hides is worse than a page
 the listing admits it cannot read.
 
