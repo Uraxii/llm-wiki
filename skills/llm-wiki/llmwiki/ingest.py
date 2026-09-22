@@ -80,7 +80,9 @@ def _pipeline(root: Path, digest: str) -> str | None:
     The sweep after placement holds no lock either. Holding one there
     put an embed call, and a walk and hash of the WHOLE wiki, inside the
     lock: ~1.2s at 500 pages with a 1s embed, which is D9 again at a
-    fleet of about 25 agents.
+    fleet of about 25 agents (D9 is the lock hold that outlasts every
+    other agent's wait; see `D9ConcurrentIngestWithJudge` in
+    tests/test_concurrency.py).
 
     So a story page can exist for a moment with no vector row while no
     process holds the lock, and if this process is killed between the
@@ -89,8 +91,8 @@ def _pipeline(root: Path, digest: str) -> str | None:
     the next sweep, and both `ingest.run` and `llmwiki embed` sweep the
     whole wiki. A reader that calls vectors.neighbours inside that
     window misses one vector-only candidate, which at worst costs a
-    duplicate story, which `rebuild` repairs. See section 5 of the D9
-    design, and its falsification row for this trade."""
+    duplicate story, which `rebuild` repairs. That rare, repairable
+    duplicate is the price of keeping every agent's wait short."""
     kb = Kb(root)
     if summarize.run(root, [digest]) != 0:
         return "summarize"
